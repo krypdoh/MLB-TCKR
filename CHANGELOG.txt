@@ -1,0 +1,154 @@
+MLB-TCKR Changelog
+==================
+
+Version 2.1.0 (2026-03-15)
+--------------------------
+HiDPI rendering fixes, font selection, and packaging support
+
+FEATURES:
++ PyInstaller spec file (MLB-TCKR.spec) for single-file EXE distribution
++ Font selection in Settings now applies immediately (no longer locked to LED Board-7)
++ register_all_font_files() scans app directories and registers all .ttf/.otf files at startup
++ Font preview in Settings dialog updates live as font is changed
++ sys._MEIPASS support in register_all_font_files() for frozen (PyInstaller) builds
+
+FIXES:
+* Fixed font appearing compressed/blurry at Windows display scales above 100%
+* Fixed PIRATES/large team name text appearing ghosted vs. smaller fallback text
+* Fixed @ symbol positioned too far left with extra empty space to its right
+* Fixed only one game visible when scrolling (x_offset not advancing in draw loop)
+* Fixed DPR mismatch: x_offset was incrementing by physical pixels in a logical coordinate space
+
+IMPROVEMENTS:
+* AA_EnableHighDpiScaling and AA_UseHighDpiPixmaps set before QApplication creation
+* All off-screen pixmaps now created at physical resolution (logical × DPR) with setDevicePixelRatio()
+* TextAntialiasing disabled on game pixmap painter for crisp LED font dot-grid
+* draw_baseball_diamond() accepts dpr parameter for native-resolution rendering
+* update_scroll() and max_width calculation use logical pixel range (width / dpr / 2)
+* @ symbol spacing symmetric: 15px gap on both sides for centered appearance
+* total_width calculations in build_game_pixmap() aligned with actual draw loop advances
+
+TECHNICAL:
+* self.dpr = QApplication.primaryScreen().devicePixelRatio() stored at init
+* build_game_pixmap() pixmaps: QPixmap(int(w * dpr), int(h * dpr)) + setDevicePixelRatio(dpr)
+* build_ticker_pixmap() loop: logical_width = int(pixmap.width() / dpr) for x_offset math
+* MLB-TCKR.spec: auto-detects cpXYY-win_amd64.pyd matching current Python version
+* MLB-TCKR.spec: bundles led_board-7.ttf, SubwayTicker.ttf, mlb.png; excludes numpy/pandas/numba
+
+
+Version 2.0.0 (2026-03-14)
+--------------------------
+Major performance and efficiency update
+
+FEATURES:
++ Intelligent polling system - automatically stops frequent updates when all games finish
++ Hourly next-day checks after games finish to detect midnight rollover
++ Automatic resume of normal polling when new day's games detected
++ Background threading (GameDataWorker QThread) - prevents scroll interruptions during API calls
++ Hover-to-pause functionality - ticker pauses when mouse hovers over it
++ 60 FPS rendering with PreciseTimer (16ms frame time)
++ Sub-pixel smooth scrolling using float positions
++ Cached background and overlay rendering for better performance
++ Hardware acceleration with SmoothPixmapTransform
++ Optional Cython optimization module with Python fallback
++ Build automation script (build_performance.bat) for Cython compilation
+
+IMPROVEMENTS:
+* Optimized all spacing throughout ticker (2-20px between elements)
+* Centered inning indicator with baseball diamond bases
+* Adjusted outs circles positioning (moved down 2 pixels)
+* Enhanced closeEvent to properly clean up both timers and worker threads
+* Date tracking for automatic day transitions
+* Improved API usage efficiency (drops from ~360 calls/hour to 1 call/hour after games finish)
+
+TECHNICAL:
+* GameDataWorker class for non-blocking API calls
+* Dual-timer system: normal (10s) and next-day (3600s) polling
+* check_all_games_finished() method for game status detection
+* check_for_next_day_games() for midnight rollover detection
+* Console logging for polling state changes
+
+
+Version 1.5.0 (2026-03-13)
+--------------------------
+Visual polish and layout refinements
+
+FEATURES:
++ LED-style gradient background (20,20,20→0,0,0→20,20,20)
++ Glass overlay effect with transparency controls
++ Adjustable background opacity (0-255)
++ Team Colors tab in Settings dialog for custom color overrides
++ Settings persistence in %APPDATA%\MLB-TCKR\MLB-TCKR.Settings.json
+
+IMPROVEMENTS:
+* Finalized layout: TEAM LOGO SCORE | DIAMOND | SCORE LOGO TEAM format
+* Capitalized all team names (YANKEES, DODGERS, etc.)
+* Final games show "F" indicator using same layout as live games
+* Gold inning indicator (#FFD700, 13pt bold)
+* Optimized spacing between all elements
+* Enhanced visual consistency across game states
+
+
+Version 1.0.0 (2026-03-12)
+--------------------------
+Initial release
+
+FEATURES:
++ MLB-StatsAPI integration for live game data
++ Scrolling ticker bar with team logos and scores
++ Baseball diamond visualization (3 triangle bases, 3 circular outs)
++ Live runner detection (bright green #00FF00)
++ Live outs display (bright red #FF0000)
++ Inning indicator (Top/Bottom format: T5, B5)
++ 30 MLB team official colors with defaults
++ Team logo support (PNG files in %APPDATA%\MLB-TCKR\MLB-TCKR.images\)
++ Windows AppBar integration for persistent top-of-screen docking
++ System tray icon with context menu
++ Settings dialog with General tab
++ Custom LED Board-7 font support with Arial fallback
++ Configurable scroll speed and update intervals
++ Toggle options for team records, cities, final games, scheduled games
++ Automatic data refresh every 10 seconds (configurable)
+
+TECHNICAL:
+* PyQt5 GUI framework
+* FramelessWindowHint and TranslucentBackground
+* Windows AppBar API integration (ABM_NEW, ABM_SETPOS, ABE_TOP)
+* Live game feed parsing from linescore.offense data
+* Team nickname detection and normalization
+* Logo file case-insensitive search
+* Fallback rendering for missing logos
+
+
+Build Information
+-----------------
+Python Version: 3.13
+Required Python Path: C:\Users\prc\AppData\Local\Programs\Python\Python313\python.exe
+Build Script: build_performance.bat
+
+Required Dependencies:
+- statsapi (MLB data)
+- PyQt5 (GUI framework)
+- Cython (optional, for optimizations)
+
+Performance Files:
+- mlb_ticker_utils_cython.pyx (Cython optimizations)
+- setup_mlb_cython.py (Cython build configuration)
+- build_performance.bat (Windows build automation)
+- PERFORMANCE.md (optimization documentation)
+
+
+Known Issues
+------------
+None reported
+
+
+Future Enhancements
+-------------------
+Potential features for consideration:
+- Game alerts and notifications
+- Score change notifications
+- Expanded statistics display
+- Multi-monitor support
+- Custom positioning options
+- Additional visual themes
