@@ -975,7 +975,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         intro_font.setPixelSize(max(12, int(h_phys * 0.35 * 1.5)))  # size in physical px
         intro_font.setBold(True)
 
-        text = "MLB-TCKR"
+        text = "MLB-TCKR++"
         metrics = QtGui.QFontMetrics(intro_font)
         text_width = metrics.horizontalAdvance(text)
 
