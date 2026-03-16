@@ -1,6 +1,58 @@
 MLB-TCKR Changelog
 ==================
 
+Version 2.2.0 (2026-03-16)
+--------------------------
+Standings window, keyboard shortcuts, font preview, DPI-aware AppBar, custom defaults
+
+FEATURES:
++ Standings window — full AL/NL standings popup with LED-style background
+  - Split header: "STANDINGS" title (white) above "American League | National League" row
+  - American League label glows bright red when active; National League glows bright blue
+  - Clicking either league label switches the displayed standings instantly
+  - Three fixed-width division columns (East / Central / West) with table alignment
+  - Per-column headers: logo spacer + Team / W-L / Pct. / L10
+  - Team logos, team-color names, and stat cells with consistent 40px row height
+  - Alternating row shading; bright green border and divider
+  - Background fetch via _StandingsWorker QThread (non-blocking)
+  - Draggable, frameless, always-on-top window; centered on open and after data loads
+  - "Standings..." entry added to system tray menu
++ Keyboard shortcuts (when ticker window has focus):
+  - S / s   → open Standings window (or raise if already visible)
+  - .       → open Settings dialog
+  - R / r   → force data refresh
+  - P / p   → pause / unpause scroll
+  - Q / q   → quit application completely
++ Font preview delegate — font combo box renders each family name in its own typeface
++ DPI-aware AppBar — correctly reserves desktop space at 125 %, 150 %, 200 % display scaling
++ Intro animation — pixel-reveal (block randomize-in / hold / block randomize-out) using
+  Ozone-xRRO font and mlb-reverse.png logo at physical resolution
+
+FIXES:
+* AppBar called after self.show() so HWND is valid and visible
+* ABM_QUERYPOS step added (was missing) so Windows can negotiate bar position
+* AppBar physical/logical pixel conversion: Win32 receives physical pixels, Qt setGeometry
+  receives logical pixels (divided by devicePixelRatio)
+
+IMPROVEMENTS:
+* Default font changed to Ozone, font scale to 150 %, ticker height to 64 px, speed to 5
+* Default background_opacity changed to 255 (fully opaque)
+* show_team_cities defaults to False (nickname-only mode)
+* Nine team colors baked into MLB_TEAM_COLORS_DEFAULT reflecting user preferences
+* StandingsWindow uses fixed pixel widths per cell (_W_LOGO=44, _W_NAME=160, _W_WL/PCT/L10=90)
+  instead of stretch ratios — guarantees perfect column alignment
+* All standings font sizes doubled (header 64 px, league row 40 px, div titles 36 px,
+  col headers 26 px, team names 30 px, stats 26 px)
+
+TECHNICAL:
+* _AL_DIVISIONS / _NL_DIVISIONS dicts map division names to MLB team IDs
+* fetch_standings() uses statsapi.get('standings', ...) with hydration; parses lastTen
+  from splitRecords; sorts best→worst by (-wins, losses)
+* StandingsWindow._populate() removes stale row widgets before re-adding (prevents duplication)
+* FontPreviewDelegate.paint() renders family + "  —  AaBbCc 123" suffix at 18px
+* scroll_paused and is_hovered state variables drive enterEvent/leaveEvent/keyPressEvent logic
+
+
 Version 2.1.0 (2026-03-15)
 --------------------------
 HiDPI rendering fixes, font selection, and packaging support

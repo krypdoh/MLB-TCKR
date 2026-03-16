@@ -467,6 +467,63 @@ a {
   border-top: 1px solid rgba(255, 242, 0, 0.2);
 }
 
+.feature-card--standings {
+  border-color: rgba(57, 255, 20, 0.5);
+  background: rgba(10, 28, 12, 0.9);
+  grid-column: span 1;
+}
+
+.feature-card--standings:hover {
+  border-color: var(--accent-green);
+  box-shadow: 0 0 28px rgba(57, 255, 20, 0.2);
+}
+
+.feature-card--standings kbd {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 5px;
+  border: 1px solid rgba(57, 255, 20, 0.45);
+  background: rgba(57, 255, 20, 0.1);
+  font-family: 'PixelUI', monospace;
+  font-size: 0.82rem;
+  color: var(--accent-green-soft);
+}
+
+.standings-showcase {
+  position: relative;
+  z-index: 1;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px 24px 60px;
+  text-align: center;
+}
+
+.standings-img-wrap {
+  display: inline-block;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(57, 255, 20, 0.45);
+  background: #081109;
+  box-shadow:
+    0 0 0 1px rgba(57, 255, 20, 0.15),
+    0 18px 70px rgba(57, 255, 20, 0.22),
+    0 0 110px rgba(0, 255, 68, 0.1);
+  max-width: 960px;
+  width: 100%;
+  transition: border-color 0.25s, transform 0.2s;
+}
+
+.standings-img-wrap:hover {
+  border-color: rgba(57, 255, 20, 0.75);
+  transform: translateY(-2px);
+}
+
+.standings-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .how-it-works {
   max-width: 920px;
   margin: 0 auto;
@@ -550,7 +607,8 @@ a {
 
 .feature-card,
 .screenshot-card,
-.step {
+.step,
+.standings-img-wrap {
   opacity: 0;
   transform: translateY(20px);
   transition: opacity 0.6s ease, transform 0.6s ease;
@@ -558,7 +616,8 @@ a {
 
 .feature-card.visible,
 .screenshot-card.visible,
-.step.visible {
+.step.visible,
+.standings-img-wrap.visible {
   opacity: 1;
   transform: translateY(0);
 }

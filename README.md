@@ -4,7 +4,7 @@
 
 A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen - just like the tickers you see on sports networks and in sports bars.
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.2.0-blue)
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
 
@@ -29,13 +29,33 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Optional Cython optimization** for maximum performance
 - **Hardware acceleration** with SmoothPixmapTransform
 
+### 📊 Standings Window
+- **Full AL/NL standings** in a sleek LED-style popup window
+- **"STANDINGS" header** in bright white with league selector below
+- **American League** (bright red) and **National League** (bright blue) — click to switch
+- **Three division columns** (East / Central / West) with fixed-width table alignment
+- **Per-team rows**: logo, colored nickname, W-L, Pct., Last 10
+- **Background fetch** — non-blocking, loads while window is open
+- **Draggable**, frameless, always-on-top; auto-centers on screen
+- Access via system tray → **Standings...** or press **S**
+
+### ⌨️ Keyboard Shortcuts
+| Key | Action |
+|-----|--------|
+| `S` | Open Standings window |
+| `.` | Open Settings dialog |
+| `R` | Force data refresh |
+| `P` | Pause / unpause scroll |
+| `Q` | Quit application |
+
 ### 🎨 Customizable Appearance
 - **LED-style gradient background** with glass overlay effect
 - **Adjustable transparency** (0-255 opacity)
 - **Custom team colors** - override any team's color
-- **Multiple font options** including custom LED Board-7 font
+- **Multiple font options** with live in-dropdown preview (each name shown in its own typeface)
 - **Configurable ticker height** (40-200 pixels)
 - **Hover-to-pause** - ticker pauses when mouse is over it
+- **Startup intro animation** - pixel-reveal block effect with MLB logo and app name
 
 ### ⚙️ Flexible Configuration
 - **Scroll speed control** (1-10)
@@ -48,7 +68,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Settings persist** across sessions
 
 ### 🖥️ Windows Integration
-- **AppBar integration** - docks persistently at top of screen
+- **AppBar integration** - docks persistently at top of screen, DPI-aware (works at 100 %, 125 %, 150 %, 200 % display scaling)
 - **System tray icon** with quick access menu
 - **Stays on top** of all windows
 - **Transparent background** blends with desktop
@@ -116,8 +136,17 @@ The application automatically falls back to Python if Cython modules aren't avai
 ### System Tray Menu
 Right-click the system tray icon to access:
 - **Refresh Games** - Force immediate data update
+- **Standings...** - Open standings window
 - **Settings** - Open settings dialog
 - **Quit** - Exit the ticker
+
+### Keyboard Shortcuts
+Click the ticker bar to give it focus, then:
+- **S** — Open Standings window
+- **.** — Open Settings dialog
+- **R** — Force data refresh
+- **P** — Pause / unpause scrolling
+- **Q** — Quit application
 
 ### Settings Dialog
 
@@ -212,17 +241,18 @@ MLB-TCKR/
 ### Default Settings
 ```json
 {
-    "speed": 2,
+    "speed": 5,
     "update_interval": 10,
-    "ticker_height": 60,
-    "font": "LED Board-7",
+    "ticker_height": 64,
+    "font": "Ozone",
+    "font_scale_percent": 150,
     "show_team_records": true,
-    "show_team_cities": true,
+    "show_team_cities": false,
     "include_final_games": true,
     "include_scheduled_games": true,
     "led_background": true,
     "glass_overlay": true,
-    "background_opacity": 230,
+    "background_opacity": 255,
     "team_colors": {}
 }
 ```
@@ -295,14 +325,19 @@ The application performs case-insensitive searches and automatically falls back 
 
 ### Code Structure
 - **Main Classes**:
-  - `MLBTickerWindow` - Main application window with AppBar integration
+  - `MLBTickerWindow` - Main application window with DPI-aware AppBar integration
   - `GameDataWorker` - Background thread for API calls
+  - `StandingsWindow` - AL/NL standings popup with LED-style background
+  - `_StandingsWorker` - Background thread for standings fetch
+  - `FontPreviewDelegate` - Custom item delegate for font combo box
   - `SettingsDialog` - Configuration UI with tabs
 - **Key Methods**:
   - `fetch_todays_games()` - MLB API integration
+  - `fetch_standings()` - AL/NL standings from statsapi
   - `build_ticker_pixmap()` - Render complete ticker
   - `draw_baseball_diamond()` - Create diamond visualization
   - `update_scroll()` - 60 FPS animation loop
+  - `setup_appbar()` - DPI-aware Win32 AppBar registration
   - `check_all_games_finished()` - Game status detection
   - `check_for_next_day_games()` - Midnight rollover
 
@@ -334,8 +369,8 @@ You should have received a copy of the GNU Affero General Public License along w
 **Paul R. Charovkine**
 
 - Program: MLB-TCKR.py
-- Version: 2.0.0
-- Date: 2026.03.14
+- Version: 2.2.0
+- Date: 2026.03.16
 
 ---
 

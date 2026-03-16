@@ -1527,12 +1527,24 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
     def keyPressEvent(self, event):
         """Keyboard shortcuts (active when ticker window has focus).
-        Q = quit, S = settings, R = refresh data, P = pause/unpause scroll.
+        Q   = quit app entirely
+        S   = standings window
+        .   = settings dialog
+        R   = refresh data
+        P   = pause/unpause scroll
         """
         key = event.text().lower()
+        raw = event.text()
         if key == 'q':
-            self.close()
+            QtWidgets.QApplication.instance().quit()
         elif key == 's':
+            if not hasattr(self, '_standings_win') or not self._standings_win.isVisible():
+                self._standings_win = StandingsWindow()
+                self._standings_win.show()
+            else:
+                self._standings_win.raise_()
+                self._standings_win.activateWindow()
+        elif raw == '.':
             SettingsDialog(self).exec_()
         elif key == 'r':
             self.start_data_fetch()
@@ -1573,6 +1585,91 @@ class MLBTickerWindow(QtWidgets.QWidget):
         event.accept()
 
 
+# ---------------------------------------------------------------------------
+# Standings data fetch
+# ---------------------------------------------------------------------------
+
+# AL/NL division structure
+_AL_DIVISIONS = {
+    'East':    [147, 110, 111, 139, 141],   # NYY, BAL, BOS, TB, TOR
+    'Central': [145, 114, 116, 118, 142],   # CWS, CLE, DET, KC, MIN
+    'West':    [117, 108, 133, 136, 140],   # HOU, LAA, OAK, SEA, TEX
+}
+_NL_DIVISIONS = {
+    'East':    [144, 146, 121, 143, 120],   # ATL, MIA, NYM, PHI, WSH
+    'Central': [112, 113, 158, 138, 134],   # CHC, CIN, MIL, STL, PIT
+    'West':    [109, 115, 119, 135, 137],   # ARI, COL, LAD, SD, SF
+}
+
+
+def fetch_standings():
+    """Fetch full standings for the current season.
+
+    Returns a dict:
+        {
+          'AL': {'East': [...], 'Central': [...], 'West': [...]},
+          'NL': {'East': [...], 'Central': [...], 'West': [...]}
+        }
+    Each team entry:
+        {'name': str, 'wins': int, 'losses': int, 'pct': str,
+         'last10': str, 'team_id': int}
+    Sorted best→worst within each division.
+    """
+    season_year = datetime.datetime.now().year
+    try:
+        standings_data = statsapi.get(
+            'standings',
+            {
+                'leagueId': '103,104',
+                'season': str(season_year),
+                'standingsTypes': 'regularSeason',
+                'hydrate': 'team,league,division,streaks,records,standingsInfo',
+            }
+        )
+    except Exception as e:
+        print(f"[STANDINGS] Fetch error: {e}")
+        return None
+
+    # Build flat map: team_id → row dict
+    rows = {}
+    for group in standings_data.get('records', []):
+        for tr in group.get('teamRecords', []):
+            tid = tr.get('team', {}).get('id')
+            if tid is None:
+                continue
+            wins   = tr.get('wins', 0)
+            losses = tr.get('losses', 0)
+            total  = wins + losses
+            pct    = f".{round((wins/total)*1000):03d}" if total else '.000'
+            # Last-10 record lives under splitRecords
+            last10 = '-'
+            for sr in tr.get('records', {}).get('splitRecords', []):
+                if sr.get('type') == 'lastTen':
+                    last10 = f"{sr.get('wins',0)}-{sr.get('losses',0)}"
+                    break
+            rows[tid] = {
+                'name':    get_team_nickname(tr.get('team', {}).get('name', '')),
+                'wins':    wins,
+                'losses':  losses,
+                'pct':     pct,
+                'last10':  last10,
+                'team_id': tid,
+                'full_name': tr.get('team', {}).get('name', ''),
+            }
+
+    def build_division(div_ids):
+        teams = [rows[tid] for tid in div_ids if tid in rows]
+        teams.sort(key=lambda t: (-t['wins'], t['losses']))
+        return teams
+
+    result = {'AL': {}, 'NL': {}}
+    for div, ids in _AL_DIVISIONS.items():
+        result['AL'][div] = build_division(ids)
+    for div, ids in _NL_DIVISIONS.items():
+        result['NL'][div] = build_division(ids)
+    return result
+
+
 class FontPreviewDelegate(QtWidgets.QStyledItemDelegate):
     """Renders each font family name in its own typeface inside the combo dropdown."""
     _SUFFIX = "  —  AaBbCc 123"
@@ -1597,6 +1694,372 @@ class FontPreviewDelegate(QtWidgets.QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         return QtCore.QSize(option.rect.width(), 30)
+
+
+# ---------------------------------------------------------------------------
+# Standings window
+# ---------------------------------------------------------------------------
+
+class StandingsWindow(QtWidgets.QWidget):
+    """Full standings window with LED-style background.
+
+    Displays AL or NL standings in three division columns (East / Central / West).
+    Clicking the league header toggles between AL and NL.
+    Data is fetched on demand in a background thread.
+    """
+
+    _DIVISIONS = ['East', 'Central', 'West']
+
+    # Fixed pixel widths for every cell — guarantees perfect table alignment
+    _W_LOGO = 44    # logo square
+    _W_NAME = 160   # team nickname
+    _W_WL   = 90    # W-L
+    _W_PCT  = 90    # Pct.
+    _W_L10  = 90    # L10
+    _ROW_H  = 40    # row height
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint |
+                         QtCore.Qt.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setWindowTitle("MLB Standings")
+
+        self._league  = 'AL'
+        self._data    = None
+        self._loading = False
+
+        self._build_ui()
+        self._center_on_desktop()
+        self._fetch()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        self._ozone_family  = load_ozone_font() or load_custom_font()
+        self._record_family = load_record_font_family() or self._ozone_family
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(28, 20, 28, 20)
+        outer.setSpacing(0)
+
+        # ── Header ────────────────────────────────────────────────
+        title_font = QtGui.QFont(self._ozone_family)
+        title_font.setPixelSize(64)
+        title_lbl = QtWidgets.QLabel("STANDINGS")
+        title_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        title_lbl.setFont(title_font)
+        title_lbl.setStyleSheet("color: #FFFFFF; padding: 10px 0 4px 0;")
+        outer.addWidget(title_lbl)
+
+        league_font = QtGui.QFont(self._ozone_family)
+        league_font.setPixelSize(40)
+
+        self._al_lbl = QtWidgets.QLabel("American League")
+        self._al_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self._al_lbl.setFont(league_font)
+        self._al_lbl.setCursor(QtCore.Qt.PointingHandCursor)
+        self._al_lbl.setToolTip("Show AL Standings")
+        self._al_lbl.mousePressEvent = lambda _e: self._select_league('AL')
+
+        sep_lbl = QtWidgets.QLabel("  |  ")
+        sep_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        sep_lbl.setFont(league_font)
+        sep_lbl.setStyleSheet("color: #444444; padding: 4px 0 18px 0;")
+
+        self._nl_lbl = QtWidgets.QLabel("National League")
+        self._nl_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self._nl_lbl.setFont(league_font)
+        self._nl_lbl.setCursor(QtCore.Qt.PointingHandCursor)
+        self._nl_lbl.setToolTip("Show NL Standings")
+        self._nl_lbl.mousePressEvent = lambda _e: self._select_league('NL')
+
+        league_row = QtWidgets.QHBoxLayout()
+        league_row.setSpacing(0)
+        league_row.addStretch()
+        league_row.addWidget(self._al_lbl)
+        league_row.addWidget(sep_lbl)
+        league_row.addWidget(self._nl_lbl)
+        league_row.addStretch()
+        outer.addLayout(league_row)
+
+        self._update_header_colors()
+
+        # Thin gold divider under header
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        sep.setStyleSheet("color: #00FF44; background: #00FF44; max-height: 2px;")
+        outer.addWidget(sep)
+        outer.addSpacing(16)
+
+        # ── Division columns ─────────────────────────────────────────
+        cols_row = QtWidgets.QHBoxLayout()
+        cols_row.setSpacing(0)
+        self._col_widgets = {}
+
+        for i, div in enumerate(self._DIVISIONS):
+            col = QtWidgets.QVBoxLayout()
+            col.setSpacing(0)
+
+            # Division title
+            div_lbl = QtWidgets.QLabel(div)
+            div_font = QtGui.QFont(self._ozone_family)
+            div_font.setPixelSize(36)
+            div_lbl.setFont(div_font)
+            div_lbl.setAlignment(QtCore.Qt.AlignCenter)
+            div_lbl.setStyleSheet("color: #AAAAAA; padding-bottom: 8px;")
+            div_lbl.setFixedWidth(self._div_width())
+            col.addWidget(div_lbl)
+
+            # Column header row
+            col.addWidget(self._make_col_header())
+
+            # Thin separator
+            hsep = QtWidgets.QFrame()
+            hsep.setFrameShape(QtWidgets.QFrame.HLine)
+            hsep.setStyleSheet(
+                "color: #555; background: #555; max-height: 1px; margin: 4px 0;"
+            )
+            col.addWidget(hsep)
+
+            self._col_widgets[div] = col
+
+            wrapper = QtWidgets.QWidget()
+            wrapper.setLayout(col)
+            wrapper.setStyleSheet("background: transparent;")
+            wrapper.setFixedWidth(self._div_width())
+            cols_row.addWidget(wrapper)
+
+            if i < len(self._DIVISIONS) - 1:
+                vsep = QtWidgets.QFrame()
+                vsep.setFrameShape(QtWidgets.QFrame.VLine)
+                vsep.setStyleSheet(
+                    "color: #555; background: #555; max-width: 2px; margin: 0 16px;"
+                )
+                cols_row.addWidget(vsep)
+
+        outer.addLayout(cols_row)
+        outer.addSpacing(20)
+
+        # ── Loading indicator ─────────────────────────────────────────
+        self._loading_lbl = QtWidgets.QLabel("Loading…")
+        loading_font = QtGui.QFont(self._ozone_family)
+        loading_font.setPixelSize(40)
+        self._loading_lbl.setFont(loading_font)
+        self._loading_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self._loading_lbl.setStyleSheet("color: #888;")
+        outer.addWidget(self._loading_lbl)
+        self._loading_lbl.hide()
+
+        # ── Bottom bar (close button) ──────────────────────────────────
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.addStretch()
+        close_btn = QtWidgets.QPushButton("✕  Close")
+        close_btn_font = QtGui.QFont(self._ozone_family)
+        close_btn_font.setPixelSize(26)
+        close_btn.setFont(close_btn_font)
+        close_btn.setFixedSize(160, 52)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #2a2a2a; color: #cccccc;
+                border: 1px solid #555; border-radius: 6px;
+            }
+            QPushButton:hover { background: #3a3a3a; color: #ffffff; }
+            QPushButton:pressed { background: #111; }
+        """)
+        close_btn.clicked.connect(self.close)
+        bottom.addWidget(close_btn)
+        outer.addLayout(bottom)
+
+    def _div_width(self):
+        return self._W_LOGO + self._W_NAME + self._W_WL + self._W_PCT + self._W_L10
+
+    def _make_col_header(self):
+        """Return a fixed-width header row widget matching team row cell widths."""
+        row = QtWidgets.QWidget()
+        row.setFixedWidth(self._div_width())
+        row.setFixedHeight(self._ROW_H)
+        row.setStyleSheet("background: transparent;")
+        hl = QtWidgets.QHBoxLayout(row)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(0)
+        hdr_font = QtGui.QFont(self._record_family)
+        hdr_font.setPixelSize(26)
+
+        # Logo placeholder
+        spacer = QtWidgets.QLabel()
+        spacer.setFixedWidth(self._W_LOGO)
+        hl.addWidget(spacer)
+
+        for label, width in [("Team", self._W_NAME),
+                              ("W-L",  self._W_WL),
+                              ("Pct.", self._W_PCT),
+                              ("L10",  self._W_L10)]:
+            lbl = QtWidgets.QLabel(label)
+            lbl.setFont(hdr_font)
+            lbl.setFixedWidth(width)
+            lbl.setFixedHeight(self._ROW_H)
+            lbl.setStyleSheet("color: #888888;")
+            if label == "Team":
+                lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            else:
+                lbl.setAlignment(QtCore.Qt.AlignCenter)
+            hl.addWidget(lbl)
+        return row
+
+    # ------------------------------------------------------------------
+    # Data loading
+    # ------------------------------------------------------------------
+
+    def _fetch(self):
+        if self._loading:
+            return
+        self._loading = True
+        self._loading_lbl.show()
+        self._worker = _StandingsWorker()
+        self._worker.done.connect(self._on_data)
+        self._worker.start()
+
+    def _on_data(self, data):
+        self._loading = False
+        self._loading_lbl.hide()
+        self._data = data
+        self._populate()
+        self._center_on_desktop()
+
+    def _populate(self):
+        """Fill all three division columns with the current league's data."""
+        if not self._data:
+            return
+        league_data = self._data.get(self._league, {})
+        name_font = QtGui.QFont(self._ozone_family)
+        name_font.setPixelSize(30)
+        stat_font = QtGui.QFont(self._record_family)
+        stat_font.setPixelSize(26)
+
+        for div in self._DIVISIONS:
+            col = self._col_widgets[div]
+            teams = league_data.get(div, [])
+
+            # Remove old team rows (everything after div title + header + sep = 3)
+            while col.count() > 3:
+                item = col.takeAt(3)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            for rank, team in enumerate(teams):
+                row_widget = QtWidgets.QWidget()
+                row_widget.setFixedWidth(self._div_width())
+                row_widget.setFixedHeight(self._ROW_H)
+                row_widget.setStyleSheet(
+                    "background: rgba(255,255,255,12);" if rank % 2 == 0
+                    else "background: transparent;"
+                )
+                hl = QtWidgets.QHBoxLayout(row_widget)
+                hl.setContentsMargins(0, 0, 0, 0)
+                hl.setSpacing(0)
+
+                # Logo
+                logo_px = get_team_logo(team['full_name'], size=self._W_LOGO - 4)
+                logo_lbl = QtWidgets.QLabel()
+                logo_lbl.setPixmap(logo_px)
+                logo_lbl.setFixedSize(self._W_LOGO, self._ROW_H)
+                logo_lbl.setAlignment(QtCore.Qt.AlignCenter)
+                hl.addWidget(logo_lbl)
+
+                # Team name
+                name_lbl = QtWidgets.QLabel(team['name'])
+                name_lbl.setFont(name_font)
+                name_lbl.setFixedWidth(self._W_NAME)
+                name_lbl.setFixedHeight(self._ROW_H)
+                color = get_team_color(team['full_name'])
+                name_lbl.setStyleSheet(f"color: {color};")
+                name_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                hl.addWidget(name_lbl)
+
+                # W-L / Pct. / L10
+                for val, width in [
+                    (f"{team['wins']}-{team['losses']}", self._W_WL),
+                    (team['pct'],   self._W_PCT),
+                    (team['last10'], self._W_L10),
+                ]:
+                    lbl = QtWidgets.QLabel(val)
+                    lbl.setFont(stat_font)
+                    lbl.setFixedWidth(width)
+                    lbl.setFixedHeight(self._ROW_H)
+                    lbl.setStyleSheet("color: #cccccc;")
+                    lbl.setAlignment(QtCore.Qt.AlignCenter)
+                    hl.addWidget(lbl)
+
+                col.addWidget(row_widget)
+
+        self._update_header_colors()
+        self.adjustSize()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _update_header_colors(self):
+        al_color = "#FF2222" if self._league == 'AL' else "#555555"
+        nl_color = "#2266FF" if self._league == 'NL' else "#555555"
+        self._al_lbl.setStyleSheet(f"color: {al_color}; padding: 4px 0 18px 0;")
+        self._nl_lbl.setStyleSheet(f"color: {nl_color}; padding: 4px 0 18px 0;")
+
+    def _select_league(self, league):
+        if self._league == league:
+            return
+        self._league = league
+        self._update_header_colors()
+        if self._data:
+            self._populate()
+
+
+    def _center_on_desktop(self):
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        self.adjustSize()
+        x = screen.x() + (screen.width()  - self.width())  // 2
+        y = screen.y() + (screen.height() - self.height()) // 2
+        self.move(x, y)
+
+    # ------------------------------------------------------------------
+    # LED-style background paint
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect()
+
+        # Rounded dark background
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 240)))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#00FF44'), 1.5))
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
+
+        # Scanlines
+        scan = QtGui.QColor(0, 0, 0, 35)
+        for y in range(0, rect.height(), 2):
+            painter.fillRect(0, y, rect.width(), 1, scan)
+
+        painter.end()
+
+    # Allow dragging the window
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & QtCore.Qt.LeftButton and hasattr(self, '_drag_pos'):
+            self.move(event.globalPos() - self._drag_pos)
+
+
+class _StandingsWorker(QtCore.QThread):
+    done = QtCore.pyqtSignal(object)
+
+    def run(self):
+        data = fetch_standings()
+        self.done.emit(data)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -1968,9 +2431,24 @@ def main():
     
     refresh_action = tray_menu.addAction("Refresh Games")
     refresh_action.triggered.connect(window.start_data_fetch)
-    
+
     tray_menu.addSeparator()
-    
+
+    standings_action = tray_menu.addAction("Standings...")
+    standings_win = [None]  # mutable container so lambda can replace it
+
+    def open_standings():
+        if standings_win[0] is None or not standings_win[0].isVisible():
+            standings_win[0] = StandingsWindow()
+            standings_win[0].show()
+        else:
+            standings_win[0].raise_()
+            standings_win[0].activateWindow()
+
+    standings_action.triggered.connect(open_standings)
+
+    tray_menu.addSeparator()
+
     settings_action = tray_menu.addAction("Settings...")
     settings_action.triggered.connect(lambda: SettingsDialog(window).exec_())
     

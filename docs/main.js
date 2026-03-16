@@ -1,6 +1,6 @@
 // Fade-in on scroll
 document.addEventListener('DOMContentLoaded', () => {
-  const targets = document.querySelectorAll('.feature-card, .screenshot-card, .step');
+  const targets = document.querySelectorAll('.feature-card, .screenshot-card, .step, .standings-img-wrap');
   const observer = new IntersectionObserver(
     (entries) => {
       entries.forEach((entry) => {
