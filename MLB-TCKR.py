@@ -16,6 +16,7 @@ import os
 import json
 import time
 import datetime
+import random
 import statsapi
 from PyQt5 import QtWidgets, QtCore, QtGui
 import ctypes
@@ -56,27 +57,27 @@ TEAM_LOGO_CACHE = {}
 MLB_TEAM_COLORS_DEFAULT = {
     'Diamondbacks': '#A71930',  # Sedona Red
     'Braves': '#CE1141',  # Scarlet
-    'Orioles': '#DF4601',  # Orange
+    'Orioles': '#df6501',  # Orange
     'Red Sox': '#BD3039',  # Red
     'Cubs': '#0E3386',  # Blue
-    'White Sox': '#27251F',  # Black
+    'White Sox': '#ffffff',  # White
     'Reds': '#C6011F',  # Red
-    'Guardians': '#00385D',  # Navy Blue
+    'Guardians': '#e50000',  # Red
     'Rockies': '#33006F',  # Purple
     'Tigers': '#0C2340',  # Navy Blue
-    'Astros': '#002D72',  # Navy Blue
+    'Astros': '#ffaa00',  # Gold
     'Royals': '#004687',  # Royal Blue
-    'Angels': '#003263',  # Blue
+    'Angels': '#ff0000',  # Red
     'Dodgers': '#005A9C',  # Dodger Blue
     'Marlins': '#00A3E0',  # Miami Blue
     'Brewers': '#12284B',  # Navy Blue
     'Twins': '#002B5C',  # Navy Blue
-    'Mets': '#002D72',  # Blue
+    'Mets': '#ff8903',  # Orange
     'Yankees': '#003087',  # Navy Blue
-    'Athletics': '#003831',  # Green
+    'Athletics': '#06cb3e',  # Green
     'Phillies': '#E81828',  # Red
-    'Pirates': '#27251F',  # Black
-    'Padres': '#2F241D',  # Brown
+    'Pirates': '#ffff00',  # Yellow
+    'Padres': '#fae608',  # Yellow
     'Giants': '#FD5A1E',  # Orange
     'Mariners': '#0C2C56',  # Navy Blue
     'Cardinals': '#C41E3A',  # Red
@@ -89,7 +90,9 @@ MLB_TEAM_COLORS_DEFAULT = {
 # AppBar constants
 ABM_NEW = 0x00000000
 ABM_REMOVE = 0x00000001
+ABM_QUERYPOS = 0x00000002
 ABM_SETPOS = 0x00000003
+ABM_ACTIVATE = 0x00000006
 ABE_TOP = 1
 
 class APPBARDATA(ctypes.Structure):
@@ -111,18 +114,18 @@ def get_settings():
         except Exception:
             pass
     return {
-        "speed": 2,
+        "speed": 5,
         "update_interval": 10,
-        "ticker_height": 60,
-        "font": "LED Board-7",
-        "font_scale_percent": 120,
+        "ticker_height": 64,
+        "font": "Ozone",
+        "font_scale_percent": 150,
         "show_team_records": True,
-        "show_team_cities": True,
+        "show_team_cities": False,
         "include_final_games": True,
         "include_scheduled_games": True,
         "led_background": True,
         "glass_overlay": True,
-        "background_opacity": 230,
+        "background_opacity": 255,
         "team_colors": {}  # Custom team colors (empty = use defaults)
     }
 
@@ -203,6 +206,25 @@ def load_record_font_family():
                     return families[0]
 
     print("[FONT] PixelFont7-G02A.ttf not found, using ticker font for records")
+    return None
+
+
+def load_ozone_font():
+    """Load Ozone-xRRO.ttf and return its font family name."""
+    font_locations = [
+        os.path.join(APPDATA_DIR, "Ozone-xRRO.ttf"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "Ozone-xRRO.ttf"),
+        "Ozone-xRRO.ttf",
+    ]
+    for font_path in font_locations:
+        if os.path.exists(font_path):
+            font_id = QtGui.QFontDatabase.addApplicationFont(font_path)
+            if font_id != -1:
+                families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
+                if families:
+                    print(f"[FONT] Loaded Ozone font: {families[0]} from {font_path}")
+                    return families[0]
+    print("[FONT] Ozone-xRRO.ttf not found, falling back to ticker font")
     return None
 
 
@@ -566,7 +588,7 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0):
         size: size in logical pixels
         dpr: device pixel ratio (pass screen DPR for crisp rendering)
     """
-    total_width = size + 40  # Extra right gutter so inning indicator doesn't overlap outs/bases
+    total_width = size + 14  # Right gutter for inning indicator
     pixmap = QtGui.QPixmap(int(total_width * dpr), int(size * dpr))
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(QtCore.Qt.transparent)
@@ -640,22 +662,29 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0):
         painter.drawEllipse(QtCore.QPointF(x, outs_y), out_radius, out_radius)
     
     # Draw inning indicator (T5 or B5 format, or F for final)
-    inning_x = size + 4
-    inning_y = size / 2 + 1  # Center vertically with diamond bases
-    
+    inning_x = size - 3  # Closer to the diamond field
+
     # Handle final games (inning_num will be "F")
     if isinstance(inning_num, str) and inning_num == 'F':
         inning_text = 'F'
     else:
         inning_letter = 'T' if is_top else 'B'
         inning_text = f"{inning_letter}{inning_num}"
-    
-    # Use custom font if available, otherwise Arial - 50% larger
+
+    # Use custom font if available, otherwise Arial
     font_family = load_custom_font()
-    font = QtGui.QFont(font_family, 13, QtGui.QFont.Bold)
+    font = QtGui.QFont(font_family, 10, QtGui.QFont.Bold)  # ~1.5pt smaller than before
     painter.setFont(font)
+
+    # Vertically center the inning text within the base diamond field
+    # (between top of 2nd base and bottom of 1st/3rd bases, ignoring out circles)
+    field_top = second_y - diamond_size / 2
+    field_bottom = first_y + diamond_size / 2
+    fm = QtGui.QFontMetrics(font)
+    inning_y = (field_top + field_bottom) / 2 + (fm.ascent() - fm.descent()) / 2
+
     painter.setPen(QtGui.QPen(QtGui.QColor('#FFD700')))  # Gold color
-    painter.drawText(int(inning_x), int(inning_y) + 5, inning_text)
+    painter.drawText(int(inning_x), int(inning_y), inning_text)
     
     painter.end()
     return pixmap
@@ -680,7 +709,24 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.is_fetching = False
         self.waiting_for_next_day = False
         self.last_fetch_date = None
-        
+
+        # Intro pixel-reveal animation state
+        self.intro_active = True
+        self.intro_phase = 'in'   # 'in' | 'hold' | 'out' | 'done'
+        self.intro_pixmap = None  # Full rendered intro frame
+        self.intro_display = None # Incrementally revealed display pixmap
+        self.intro_all_blocks = []
+        self.intro_revealed_count = 0
+        self.intro_hold_frames = 0
+        self.intro_block_size = 3  # Logical pixels per block (small pixels for fine pixelation)
+        self._intro_bpf = 1        # Blocks per frame (set in build_intro_animation)
+        self._intro_bs_phys = 3    # Physical block size (set in build_intro_animation)
+        self.intro_timer_started = False  # True once the 2-s delay has fired
+
+        # Scroll pause state (P key toggle) and hover tracking
+        self.scroll_paused = False
+        self.is_hovered = False
+
         # Window setup
         self.setWindowFlags(
             QtCore.Qt.FramelessWindowHint |
@@ -688,7 +734,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             QtCore.Qt.Tool
         )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+
         # Enable hardware acceleration for smoother rendering
         self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, False)
         self.setAttribute(QtCore.Qt.WA_NoSystemBackground, False)
@@ -727,14 +774,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
         
-        # Setup AppBar
-        self.setup_appbar()
-        
-        # Animation timer - 60 FPS for smooth scrolling
+        # Animation timer - 60 FPS for smooth scrolling (started after intro finishes)
         self.scroll_timer = QtCore.QTimer()
         self.scroll_timer.timeout.connect(self.update_scroll)
-        self.scroll_timer.start(16)  # 60 FPS (16ms) for smoother scrolling
         self.scroll_timer.setTimerType(QtCore.Qt.PreciseTimer)  # More accurate timing
+
+        # Intro pixel-reveal timer (~30 fps)
+        self.intro_timer = QtCore.QTimer()
+        self.intro_timer.timeout.connect(self.update_intro)
+        self.intro_timer.setTimerType(QtCore.Qt.PreciseTimer)
         
         # Update timer for live games
         self.update_timer = QtCore.QTimer()
@@ -748,33 +796,79 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         # Initial fetch
         self.start_data_fetch()
-        
+
         self.show()
+
+        # Setup AppBar after window is shown (requires valid, visible HWND)
+        self.setup_appbar()
+
+        # Build intro animation geometry now (window is shown, size is final).
+        # The timer is NOT started yet — it fires after the first ticker draw + 2 s.
+        self.build_intro_animation()
     
+    def _start_intro(self):
+        """Launch the intro pixel-reveal timer (called after 2-s delay)."""
+        if self.intro_active:
+            self.intro_timer.start(33)  # ~30 fps
+            print("[INTRO] Starting pixel-reveal animation")
+
     def setup_appbar(self):
-        """Register as Windows AppBar"""
+        """Register as Windows AppBar to reserve desktop space at the top.
+
+        SHAppBarMessage works in *physical* pixels (device pixels), while Qt
+        geometry and self.ticker_height are in *logical* pixels.  We must scale
+        up by the device pixel ratio before handing values to Win32, then scale
+        back down when calling setGeometry so Qt positions the window correctly
+        at every DPI / display-scale setting (100 %, 125 %, 150 %, 200 % …).
+        """
         if sys.platform != "win32":
             return
-        
+
         shell32 = ctypes.windll.shell32
-        user32 = ctypes.windll.user32
-        
+
         hwnd = int(self.winId())
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-        
+        screen = QtWidgets.QApplication.primaryScreen()
+        dpr = screen.devicePixelRatio()  # e.g. 1.25 at 125 % scaling
+
+        # Physical (device) dimensions — what Win32 actually sees
+        phys_width  = int(screen.geometry().width()  * dpr)
+        phys_height = int(self.ticker_height * dpr)
+
         abd = APPBARDATA()
         abd.cbSize = ctypes.sizeof(APPBARDATA)
         abd.hWnd = hwnd
         abd.uEdge = ABE_TOP
-        abd.rc.left = 0
-        abd.rc.top = 0
-        abd.rc.right = screen.width()
-        abd.rc.bottom = self.ticker_height
-        
+        abd.rc.left  = 0
+        abd.rc.top   = 0
+        abd.rc.right = phys_width
+        abd.rc.bottom = phys_height
+
+        # Step 1: Register the appbar
         shell32.SHAppBarMessage(ABM_NEW, ctypes.byref(abd))
+
+        # Step 2: Ask Windows where it wants us (respects taskbar / other bars)
+        shell32.SHAppBarMessage(ABM_QUERYPOS, ctypes.byref(abd))
+
+        # Step 3: Clamp bottom to exactly our desired physical height
+        abd.rc.bottom = abd.rc.top + phys_height
+
+        # Step 4: Commit — reserves the working area so windows won't overlap
         shell32.SHAppBarMessage(ABM_SETPOS, ctypes.byref(abd))
-        
-        print(f"[AppBar] Registered at top of screen, height={self.ticker_height}")
+
+        # Step 5: Move/size the Qt window using *logical* pixels
+        self.setGeometry(
+            int(abd.rc.left   / dpr),
+            int(abd.rc.top    / dpr),
+            int((abd.rc.right  - abd.rc.left) / dpr),
+            int((abd.rc.bottom - abd.rc.top)  / dpr),
+        )
+
+        # Step 6: Notify shell the bar is active
+        shell32.SHAppBarMessage(ABM_ACTIVATE, ctypes.byref(abd))
+
+        print(f"[AppBar] Registered — DPR={dpr}, "
+              f"phys rect=({abd.rc.left},{abd.rc.top},{abd.rc.right},{abd.rc.bottom}), "
+              f"logical height={int((abd.rc.bottom - abd.rc.top) / dpr)}px")
     
     def start_data_fetch(self):
         """Start background data fetch (non-blocking)"""
@@ -812,6 +906,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         self.last_fetch_date = current_date
         self.build_ticker_pixmap()
+
+        # First time the ticker is ready: schedule intro to start after 2 s
+        if self.intro_active and not self.intro_timer_started:
+            self.intro_timer_started = True
+            QtCore.QTimer.singleShot(2000, self._start_intro)
+            print("[INTRO] Ticker ready — intro will start in 2 s")
+
         self.update()
     
     def on_fetch_complete(self):
@@ -846,7 +947,167 @@ class MLBTickerWindow(QtWidgets.QWidget):
             current_hour = datetime.datetime.now().hour
             if current_hour >= 6:  # Only log during reasonable hours
                 print(f"[MLB] Waiting for next day's games (current: {current_date})")
-    
+
+    # ------------------------------------------------------------------
+    # Startup intro animation
+    # ------------------------------------------------------------------
+
+    def build_intro_animation(self):
+        """Build the intro pixmap and initialise the pixel-reveal state.
+
+        All pixmaps are created at native PHYSICAL resolution WITHOUT DPR set so
+        that the block-painting loop can work in raw physical pixel coordinates
+        regardless of the display scale factor.
+        """
+        w = self.width() or QtWidgets.QApplication.primaryScreen().geometry().width()
+        h = self.ticker_height
+        bs = self.intro_block_size  # logical block size
+
+        # Convert everything to physical pixels so block ops are 1:1
+        w_phys = int(w * self.dpr)
+        h_phys = int(h * self.dpr)
+        bs_phys = max(1, int(bs * self.dpr))  # physical block size
+        self._intro_bs_phys = bs_phys
+
+        # Font: use Ozone-xRRO for the intro, fall back to ticker font
+        ozone_family = load_ozone_font() or self.font_family
+        intro_font = QtGui.QFont(ozone_family)
+        intro_font.setPixelSize(max(12, int(h_phys * 0.35 * 1.5)))  # size in physical px
+        intro_font.setBold(True)
+
+        text = "MLB-TCKR"
+        metrics = QtGui.QFontMetrics(intro_font)
+        text_width = metrics.horizontalAdvance(text)
+
+        # Logo – pass physical height so _load_intro_logo returns a raw physical pixmap
+        logo_h_phys = int(h_phys * 0.82)
+        logo_pm = self._load_intro_logo(logo_h_phys)
+        logo_w = logo_pm.width() if logo_pm else 0  # already in physical pixels
+        gap = int(14 * self.dpr)
+
+        content_w = logo_w + (gap if logo_pm else 0) + text_width
+        start_x = (w_phys - content_w) // 2
+        logo_y = (h_phys - logo_h_phys) // 2
+        text_y = (h_phys + metrics.ascent() - metrics.descent()) // 2
+
+        # Full intro pixmap at physical resolution — NO DPR set (raw pixel surface)
+        self.intro_pixmap = QtGui.QPixmap(w_phys, h_phys)
+        self.intro_pixmap.fill(QtCore.Qt.black)
+
+        p = QtGui.QPainter(self.intro_pixmap)
+        p.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
+        if logo_pm:
+            p.drawPixmap(start_x, logo_y, logo_pm)
+        p.setFont(intro_font)
+        p.setPen(QtGui.QColor('#00FF00'))
+        p.drawText(start_x + logo_w + (gap if logo_pm else 0), text_y, text)
+        p.end()
+
+        # Display pixmap starts fully black — NO DPR set
+        self.intro_display = QtGui.QPixmap(w_phys, h_phys)
+        self.intro_display.fill(QtCore.Qt.black)
+
+        # Build shuffled block list in physical pixel grid
+        cols = max(1, w_phys // bs_phys)
+        rows = max(1, h_phys // bs_phys)
+        blocks = [(r, c) for r in range(rows) for c in range(cols)]
+        random.shuffle(blocks)
+        self.intro_all_blocks = blocks
+        self.intro_revealed_count = 0
+        # ~3 s at 30 fps for both in and out transitions (90 frames per phase)
+        self._intro_bpf = max(1, len(blocks) // 90)
+        self.intro_hold_frames = 0
+        print(f"[INTRO] {len(blocks)} blocks ({cols}x{rows}), {self._intro_bpf} blocks/frame, ~3 s per phase")
+
+    def _load_intro_logo(self, phys_size):
+        """Find and return mlb-reverse.png scaled to `phys_size` PHYSICAL pixels tall.
+
+        Returns a raw (no DPR set) pixmap so it can be painted directly onto the
+        physical-resolution intro_pixmap surface.
+        """
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
+        search_dirs = [
+            os.path.join(APPDATA_DIR, "MLB-TCKR.images"),
+            APPDATA_DIR,
+            os.path.join(_script_dir, "MLB-TCKR.images"),
+            _script_dir,
+        ]
+        runtime_base = getattr(sys, '_MEIPASS', None)
+        if runtime_base:
+            search_dirs.insert(1, os.path.join(runtime_base, "MLB-TCKR.images"))
+            search_dirs.insert(2, runtime_base)
+        for d in search_dirs:
+            path = os.path.join(d, "mlb-reverse.png")
+            if os.path.exists(path):
+                pm = QtGui.QPixmap(path)
+                if not pm.isNull():
+                    scaled = pm.scaled(
+                        int(phys_size), int(phys_size),
+                        QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+                    )
+                    # No setDevicePixelRatio — raw physical surface
+                    print(f"[INTRO] Loaded mlb-reverse.png from {path}")
+                    return scaled
+        print("[INTRO] mlb-reverse.png not found")
+        return None
+
+    def update_intro(self):
+        """Advance the pixel-reveal animation by one frame (~30 fps)."""
+        if not self.intro_active:
+            self.intro_timer.stop()
+            return
+
+        blocks = self.intro_all_blocks
+        bpf = self._intro_bpf
+        bs = self._intro_bs_phys  # physical block size — matches raw pixmap coordinates
+
+        if self.intro_phase == 'in':
+            end = min(self.intro_revealed_count + bpf, len(blocks))
+            p = QtGui.QPainter(self.intro_display)
+            for i in range(self.intro_revealed_count, end):
+                r, c = blocks[i]
+                p.drawPixmap(
+                    QtCore.QRect(c * bs, r * bs, bs, bs),
+                    self.intro_pixmap,
+                    QtCore.QRect(c * bs, r * bs, bs, bs),
+                )
+            p.end()
+            self.intro_revealed_count = end
+            if self.intro_revealed_count >= len(blocks):
+                # Snap to the full frame to eliminate any sub-block gaps
+                self.intro_display = self.intro_pixmap.copy()
+                self.intro_phase = 'hold'
+                self.intro_hold_frames = 0
+
+        elif self.intro_phase == 'hold':
+            self.intro_hold_frames += 1
+            if self.intro_hold_frames >= 150:   # 5 s × 30 fps
+                random.shuffle(self.intro_all_blocks)
+                self.intro_revealed_count = len(blocks)
+                self.intro_phase = 'out'
+
+        elif self.intro_phase == 'out':
+            end = max(self.intro_revealed_count - bpf, 0)
+            p = QtGui.QPainter(self.intro_display)
+            for i in range(end, self.intro_revealed_count):
+                r, c = blocks[i]
+                p.fillRect(QtCore.QRect(c * bs, r * bs, bs, bs), QtGui.QColor(0, 0, 0))
+            p.end()
+            self.intro_revealed_count = end
+            if self.intro_revealed_count <= 0:
+                self.intro_active = False
+                self.intro_phase = 'done'
+                self.intro_timer.stop()
+                self.intro_pixmap = None
+                self.intro_display = None
+                # Start from off-screen right so the ticker scrolls in from the edge
+                self.scroll_offset = -float(self.width())
+                # Kick off normal scrolling now that intro is finished
+                self.scroll_timer.start(16)
+                print("[INTRO] Complete — starting ticker scroll from off-screen right")
+
+        self.update()
+
     def build_ticker_pixmap(self):
         """Build the complete ticker pixmap with all games"""
         if not self.games:
@@ -854,7 +1115,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             width = 800
             self.ticker_pixmap = QtGui.QPixmap(int(width * self.dpr), int(self.ticker_height * self.dpr))
             self.ticker_pixmap.setDevicePixelRatio(self.dpr)
-            self.ticker_pixmap.fill(QtCore.Qt.transparent)
+            self.ticker_pixmap.fill(QtCore.Qt.black)
             
             painter = QtGui.QPainter(self.ticker_pixmap)
             painter.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
@@ -867,9 +1128,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.end()
             return
         
+        # MLB logo shown at the start of each ticker loop
+        logo_size = int(self.ticker_height * 0.625)
+        logo_padding = 40  # logical pixels of space on each side of the MLB logo
+        mlb_pm = self._load_mlb_logo(logo_size)
+        mlb_logical_w = int(mlb_pm.width() / self.dpr) if mlb_pm else 0
+        logo_segment_w = (logo_padding + mlb_logical_w + logo_padding) if mlb_pm else 0
+
         # Calculate total width needed
         game_pixmaps = []
-        total_width = 0
+        total_width = logo_segment_w
         spacing = 100
         
         for game in self.games:
@@ -888,12 +1156,41 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Draw games twice for seamless loop
         for repeat in [0, 1]:
             x_offset = repeat * total_width
+
+            # MLB logo at the head of each repetition
+            if mlb_pm:
+                logo_y = (self.ticker_height - int(mlb_pm.height() / self.dpr)) // 2
+                painter.drawPixmap(x_offset + logo_padding, logo_y, mlb_pm)
+                x_offset += logo_segment_w
+
             for pixmap in game_pixmaps:
                 logical_width = int(pixmap.width() / self.dpr)
                 painter.drawPixmap(x_offset, 0, pixmap)
                 x_offset += logical_width + spacing
         
         painter.end()
+
+    def _load_mlb_logo(self, logo_size):
+        """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware."""
+        images_dirs = [
+            os.path.join(APPDATA_DIR, "MLB-TCKR.images"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "MLB-TCKR.images"),
+        ]
+        runtime_base = getattr(sys, '_MEIPASS', None)
+        if runtime_base:
+            images_dirs.insert(1, os.path.join(runtime_base, "MLB-TCKR.images"))
+        for d in images_dirs:
+            path = os.path.join(d, "mlb.png")
+            if os.path.exists(path):
+                pm = QtGui.QPixmap(path)
+                if not pm.isNull():
+                    phys = int(logo_size * self.dpr)
+                    scaled = pm.scaled(phys, phys, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                    scaled.setDevicePixelRatio(self.dpr)
+                    print(f"[TICKER] Loaded mlb.png from {path}")
+                    return scaled
+        print("[TICKER] mlb.png not found in images dirs")
+        return None
     
     def build_game_pixmap(self, game):
         """Build pixmap for a single game"""
@@ -965,9 +1262,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
             diamond_logical_width = int(diamond_pixmap.width() / self.dpr)
 
             # Layout: Team, Logo, Score, Diamond, Score, Logo, Team
+            # Gaps mirror each other: name(5)logo(15)score(8)diamond(2)score(15)logo(5)name
             total_width = (away_block_width + 5 + logo_size + 15 + 
                           score_width + 8 + diamond_logical_width + 2 + 
-                          score_width + 20 + logo_size + 20 + home_block_width)
+                          score_width + 15 + logo_size + 5 + home_block_width)
         else:
             # Scheduled games only: Team Logo @ Logo Team Time
             status_text = format_game_time_local(game.get('game_datetime'))
@@ -1035,19 +1333,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Diamond
             diamond_y = (self.ticker_height - int(diamond_pixmap.height() / self.dpr)) // 2 - 2
             painter.drawPixmap(x, diamond_y, diamond_pixmap)
-            x += diamond_logical_width + 2  # Minimal spacing after inning indicator
+            x += diamond_logical_width + 2  # Tight gap to home score
             
             # Home score (on same line as team name)
             painter.setFont(self.font)
             painter.setPen(QtGui.QColor('#FFFFFF'))
             score_width = metrics.horizontalAdvance(str(home_score))
             painter.drawText(x, text_y, str(home_score))
-            x += score_width + 20  # Match total_width calculation
+            x += score_width + 15  # Mirror: logo→score gap on away side
             
             # Home logo
             home_logo = get_team_logo(home_team_full, logo_size)
             painter.drawPixmap(x, logo_y, home_logo)
-            x += logo_size + 20  # Match total_width calculation
+            x += logo_size + 5  # Mirror: name→logo gap on away side
             
             # Home team name (colored)
             painter.setFont(self.font)
@@ -1135,76 +1433,121 @@ class MLBTickerWindow(QtWidgets.QWidget):
     
     def paintEvent(self, event):
         """Optimized paint event with cached backgrounds"""
-        if not self.ticker_pixmap:
-            return
-        
         painter = QtGui.QPainter(self)
         # Use SmoothPixmapTransform for better quality at sub-pixel positions
         painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        
-        # Get settings
+
+        # Always draw the dark background first so the bar is never transparent/white
         settings = get_settings()
         led_background = settings.get('led_background', True)
         glass_overlay = settings.get('glass_overlay', True)
         bg_opacity = settings.get('background_opacity', 230)
-        
-        # Cache background if settings haven't changed
+
         current_settings = {'led': led_background, 'opacity': bg_opacity, 'height': self.height()}
         if self.cached_background is None or self.last_bg_settings != current_settings:
             self.cached_background = QtGui.QPixmap(self.width(), self.height())
             self.cached_background.fill(QtCore.Qt.transparent)
-            
+
             bg_painter = QtGui.QPainter(self.cached_background)
             if led_background:
+                # Deep near-black gradient — dark charcoal at edges, true black center
                 gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
-                gradient.setColorAt(0.0, QtGui.QColor(20, 20, 20, bg_opacity))
-                gradient.setColorAt(0.5, QtGui.QColor(0, 0, 0, bg_opacity))
-                gradient.setColorAt(1.0, QtGui.QColor(20, 20, 20, bg_opacity))
+                gradient.setColorAt(0.0, QtGui.QColor(8, 8, 8, bg_opacity))
+                gradient.setColorAt(0.35, QtGui.QColor(0, 0, 0, bg_opacity))
+                gradient.setColorAt(0.65, QtGui.QColor(0, 0, 0, bg_opacity))
+                gradient.setColorAt(1.0, QtGui.QColor(8, 8, 8, bg_opacity))
                 bg_painter.fillRect(self.cached_background.rect(), gradient)
+
+                # Horizontal scanlines — every other row is slightly darker,
+                # mimicking the gap between LED rows on a real board
+                scan_color = QtGui.QColor(0, 0, 0, 55)
+                for y in range(0, self.height(), 2):
+                    bg_painter.fillRect(0, y, self.width(), 1, scan_color)
             else:
                 bg_painter.fillRect(self.cached_background.rect(), QtGui.QColor(0, 0, 0, bg_opacity))
             bg_painter.end()
-            
+
             self.last_bg_settings = current_settings
-        
-        # Draw cached background
+
         painter.drawPixmap(0, 0, self.cached_background)
-        
+
+        # Intro animation takes priority — draw its display pixmap and return.
+        # Scale the raw physical pixmap to fill the logical widget rect so it
+        # renders correctly at any display scale factor (DPR).
+        if self.intro_active and self.intro_display is not None:
+            painter.drawPixmap(QtCore.QRect(0, 0, self.width(), self.height()), self.intro_display)
+            painter.end()
+            return
+
+        # Normal ticker (may be None if first fetch hasn't completed yet)
+        if not self.ticker_pixmap:
+            painter.end()
+            return
+
         # Draw scrolling ticker with optimized pixel positioning
         pixel_x = get_pixel_position(self.scroll_offset)
         painter.drawPixmap(-pixel_x, 0, self.ticker_pixmap)
-        
+
         # Cache overlay if settings haven't changed
         if glass_overlay:
             if self.cached_overlay is None or self.last_height != self.height():
                 self.cached_overlay = QtGui.QPixmap(self.width(), self.height())
                 self.cached_overlay.fill(QtCore.Qt.transparent)
-                
+
                 overlay_painter = QtGui.QPainter(self.cached_overlay)
                 overlay_gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
-                overlay_gradient.setColorAt(0.0, QtGui.QColor(255, 255, 255, 25))
-                overlay_gradient.setColorAt(0.3, QtGui.QColor(255, 255, 255, 10))
-                overlay_gradient.setColorAt(0.7, QtGui.QColor(0, 0, 0, 5))
-                overlay_gradient.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
+                # Very subtle edge-only sheen — keeps the LED look without lightening
+                overlay_gradient.setColorAt(0.0, QtGui.QColor(255, 255, 255, 8))
+                overlay_gradient.setColorAt(0.15, QtGui.QColor(255, 255, 255, 3))
+                overlay_gradient.setColorAt(0.5, QtGui.QColor(0, 0, 0, 0))
+                overlay_gradient.setColorAt(0.85, QtGui.QColor(0, 0, 0, 3))
+                overlay_gradient.setColorAt(1.0, QtGui.QColor(0, 0, 0, 6))
                 overlay_painter.fillRect(self.cached_overlay.rect(), overlay_gradient)
                 overlay_painter.end()
-                
+
                 self.last_height = self.height()
-            
+
             painter.drawPixmap(0, 0, self.cached_overlay)
-        
+
         painter.end()
     
     def enterEvent(self, event):
         """Pause scrolling when mouse enters ticker"""
+        self.is_hovered = True
         self.scroll_timer.stop()
         super().enterEvent(event)
-    
+
     def leaveEvent(self, event):
         """Resume scrolling when mouse leaves ticker"""
-        self.scroll_timer.start(16)  # Resume 60 FPS scrolling
+        self.is_hovered = False
+        if not self.intro_active and not self.scroll_paused:
+            self.scroll_timer.start(16)  # Resume 60 FPS scrolling
         super().leaveEvent(event)
+
+    def keyPressEvent(self, event):
+        """Keyboard shortcuts (active when ticker window has focus).
+        Q = quit, S = settings, R = refresh data, P = pause/unpause scroll.
+        """
+        key = event.text().lower()
+        if key == 'q':
+            self.close()
+        elif key == 's':
+            SettingsDialog(self).exec_()
+        elif key == 'r':
+            self.start_data_fetch()
+            print("[KB] Manual data refresh triggered")
+        elif key == 'p':
+            self.scroll_paused = not self.scroll_paused
+            if self.scroll_paused:
+                self.scroll_timer.stop()
+                print("[KB] Scroll paused")
+            else:
+                if not self.intro_active and not self.is_hovered:
+                    self.scroll_timer.start(16)
+                print("[KB] Scroll unpaused")
+        else:
+            super().keyPressEvent(event)
     
     def closeEvent(self, event):
         """Cleanup on close"""
@@ -1212,6 +1555,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.scroll_timer.stop()
         self.update_timer.stop()
         self.next_day_timer.stop()
+        self.intro_timer.stop()
         
         # Clean up worker thread if running
         if self.data_worker and self.data_worker.isRunning():
@@ -1227,6 +1571,32 @@ class MLBTickerWindow(QtWidgets.QWidget):
             shell32.SHAppBarMessage(ABM_REMOVE, ctypes.byref(abd))
         
         event.accept()
+
+
+class FontPreviewDelegate(QtWidgets.QStyledItemDelegate):
+    """Renders each font family name in its own typeface inside the combo dropdown."""
+    _SUFFIX = "  —  AaBbCc 123"
+
+    def paint(self, painter, option, index):
+        family = index.data(QtCore.Qt.DisplayRole) or ""
+        is_selected = bool(option.state & QtWidgets.QStyle.State_Selected)
+        painter.save()
+        bg = option.palette.highlight() if is_selected else option.palette.base()
+        painter.fillRect(option.rect, bg)
+        item_font = QtGui.QFont(family)
+        item_font.setPixelSize(18)
+        painter.setFont(item_font)
+        fg = option.palette.highlightedText() if is_selected else option.palette.text()
+        painter.setPen(fg.color())
+        painter.drawText(
+            option.rect.adjusted(6, 0, -4, 0),
+            QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft,
+            family + self._SUFFIX,
+        )
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QtCore.QSize(option.rect.width(), 30)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -1305,6 +1675,13 @@ class SettingsDialog(QtWidgets.QDialog):
             self.font_combo.setCurrentIndex(index)
         else:
             self.font_combo.setCurrentIndex(0)
+        # Render each item in the dropdown in its own typeface
+        self.font_combo.setItemDelegate(FontPreviewDelegate(self.font_combo))
+        self.font_combo.setMinimumHeight(32)
+        self.font_combo.setFont(QtGui.QFont(current_font, 13))
+        self.font_combo.currentTextChanged.connect(
+            lambda f: self.font_combo.setFont(QtGui.QFont(f, 13))
+        )
         layout.addRow("Font:", self.font_combo)
 
         # Font size scale (percent)
@@ -1314,17 +1691,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.font_scale_spin.setSuffix("%")
         self.font_scale_spin.setToolTip("Scale ticker text size without changing logo size")
         layout.addRow("Font Size Scale:", self.font_scale_spin)
-
-        # Font preview label
-        self.font_preview = QtWidgets.QLabel("AaBbCc 0123 MLB")
-        self.font_preview.setFixedHeight(36)
-        self.font_preview.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
-        self.font_preview.setStyleSheet(
-            "background: #1a1a1a; color: #ffffff; padding: 4px 8px; border: 1px solid #555;"
-        )
-        self._update_font_preview(current_font)
-        self.font_combo.currentTextChanged.connect(self._update_font_preview)
-        layout.addRow("Preview:", self.font_preview)
 
         # Show team records
         self.records_check = QtWidgets.QCheckBox()
@@ -1365,11 +1731,6 @@ class SettingsDialog(QtWidgets.QDialog):
         
         widget.setLayout(layout)
         return widget
-
-    def _update_font_preview(self, family):
-        """Update the font preview label to render in the chosen font"""
-        preview_font = QtGui.QFont(family, 14)
-        self.font_preview.setFont(preview_font)
 
     def create_team_colors_tab(self):
         """Create team colors customization tab"""

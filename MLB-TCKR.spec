@@ -40,6 +40,7 @@ _datas = [
     ('PixelFont7-G02A.ttf', '.'),
     # System-tray / taskbar icon
     ('mlb.ico',          '.'),
+    ('mlb-reverse.png',  '.'),
 ]
 
 # Include any extra .ttf / .otf fonts sitting in the project directory
