@@ -9,6 +9,9 @@ import numpy as np
 cimport numpy as np
 from libc.math cimport fmod, floor
 
+# Required when cimporting numpy — initialises the C-level numpy API.
+np.import_array()
+
 DTYPE_F32 = np.float32
 DTYPE_I32 = np.int32
 

@@ -1,6 +1,149 @@
 MLB-TCKR Changelog
 ==================
 
+Version 2.5.0 (2026-03-17)
+--------------------------
+Desktop reservation hardening, Standings overhaul, About dialog, context menu additions,
+intro text fix
+
+FEATURES:
++ About dialog — accessible via right-click menu → "About MLB-TCKR..."
+  - Displays app name, version, author, copyright, license, clickable website link
+  - MLB trademark disclaimer included
+  - Same LED-style dark background with white border and scanlines as Standings window
+  - Draggable; modal
++ Pause Ticker / Unpause Ticker — added to right-click context menu
+  - Label reflects current state (shows "Unpause Ticker" when already paused)
+  - Identical behaviour to the P keyboard shortcut
++ Standings: MLB STANDINGS title — window heading updated from "STANDINGS"
+
+IMPROVEMENTS:
+* AppBar desktop space reservation hardened
+  - Physical height now read via Win32 GetClientRect() instead of int(height * DPR);
+    eliminates 1-pixel truncation at certain DPI scaling factors (125 %, 175 % …)
+  - Monitor origin and width sourced from GetMonitorInfo() rather than hard-coded (0,0);
+    correct on multi-monitor setups where the primary screen is not at the virtual origin
+  - ABM_WINDOWPOSCHANGED message sent after setGeometry(); required by the AppBar
+    protocol to force the shell to fully update the desktop work-area boundary
+    (root cause of the ~85 % reservation issue)
+  - Prior top-edge reservations by other programs detected via GetMonitorInfo().rcWork
+    and logged; ABM_QUERYPOS automatically slots MLB-TCKR below them without clobbering
+* Standings window — not always-on-top; other windows can now be focused normally
+  when overlapping the Standings window (Qt.WindowStaysOnTopHint removed)
+* Standings outer border changed from green (#00FF44) to white (#FFFFFF)
+* Standings header divider now tracks the active league:
+  - Red (#FF2222) when American League is selected
+  - Blue (#2266FF) when National League is selected
+  - Updates immediately on league switch
+* Standings team name column widened (160 → 210 logical px at 100 % scale) so that
+  long names such as "D-backs" / "Diamondbacks" are never clipped; ideal-width
+  constant updated to prevent over-compression on smaller screens
+* Intro text gap fixed — "MLB-" and "TCKR" were rendering with a visible inter-word
+  gap due to the font's right-side bearing after the hyphen; now draws the two
+  segments using tightBoundingRect() for pixel-precise placement
+
+FIXES:
+* NameError: _StandingsWorker not defined — class definition header was missing;
+  the done signal and run() method were accidentally indented inside StandingsWindow
+  instead of their own QThread subclass; extracted into proper class
+
+
+Version 2.4.0 (2026-03-16)
+--------------------------
+Right-click context menu, LED/glass visual match, Cython EXE fix, warning suppression
+
+FEATURES:
++ Right-click context menu on ticker bar — same options as the system tray icon
+  - Refresh Games / Standings... / Settings... / Quit
+  - Shares the same StandingsWindow instance with the tray icon (no duplicate windows)
+  - Handled via Qt.CustomContextMenu policy + mousePressEvent for reliability on
+    frameless AppBar/Tool windows where contextMenuEvent alone is not always delivered
+
+VISUAL:
+* LED background gradient updated to match reference (blue-tinted near-black):
+  - Top: rgb(15,18,22) → mid: rgb(10,12,16) → bottom: rgb(8,10,14)
+  - Previously was neutral charcoal; now has the steel-blue tone of a real LED board
+* Glass overlay updated to match reference:
+  - Alpha stops changed from near-invisible (8,3,0,3,6) to (48,12,4,0)  
+  - Added 1px top-edge highlight at y=2, alpha 55 — simulates glass catching light
+    at the bezel (was absent entirely before)
+
+FIXES:
+* Cython extension not loading in PyInstaller EXE — two root causes fixed:
+  - numpy.import_array() call was missing from mlb_ticker_utils_cython.pyx; any
+    Cython extension that cimports numpy must call this to initialise the C API
+  - numpy was in the excludes list of both spec files; removed and added to
+    hiddenimports so it is bundled correctly
+* build_performance.bat / build_performance_laptop.bat now run PyInstaller
+  automatically after compiling the Cython .pyd, so the EXE is always rebuilt
+  with the current extension bundled (step labels updated to [1/5]–[5/5])
+* RequestsDependencyWarning (urllib3/charset_normalizer version mismatch) suppressed
+  at startup in MLB-TCKR.py and in the PyInstaller runtime hook
+  pyi_rth_requests_charset.py — purely cosmetic warning; requests works correctly
+* ImportError message from failed Cython import now printed in full so the real
+  reason is visible instead of the generic fallback message
+
+TECHNICAL:
+* mousePressEvent, contextMenuEvent, and _show_context_menu correctly placed inside
+  MLBTickerWindow class (previous session had them accidentally inside StandingsWindow)
+
+
+Version 2.3.0 (2026-03-16)
+--------------------------
+Performance optimizations, smooth scrolling, FPS overlay, and network/proxy settings
+
+FEATURES:
++ Network Tab in Settings — dedicated tab for proxy and SSL certificate configuration
+  - Enable Proxy checkbox + URL field (auto-prefixes http:// if scheme is missing)
+  - Use Certificate File checkbox + file path input + Browse button (file dialog)
+  - Proxy settings applied immediately on Save without requiring a restart
+  - Settings persisted as use_proxy, proxy, use_cert, cert_file in JSON
++ FPS Overlay — "Show FPS Overlay" checkbox in General settings
+  - Displays live FPS value (e.g. "61.2 FPS") in bottom-right corner of ticker bar
+  - Bright green (#00FF44) text using small_font; subtle dark backing for readability
+  - Updated once per second; only rendered when overlay is enabled
++ Delta-time scrolling — scroll rate is now independent of Windows timer jitter
+  - Uses QElapsedTimer to measure real elapsed milliseconds between frames
+  - Eliminates the ~2x/sec judder caused by Windows 15.6 ms timer resolution
+
+IMPROVEMENTS:
+* Home team score gap — guaranteed minimum 6px gap after inning indicator text
+  (previously the score could overlap "B15" or other multi-digit inning labels)
+* MLB logo caching — mlb.png now cached in MLB_LOGO_CACHE keyed by (size, dpr);
+  avoids repeated disk scans and rescaling on every ticker rebuild
+* Multi-word player name display — names with 3+ words show last two
+  (e.g. "Michael Harris II" → "Harris II")
+* Standings window dynamic resize — window and font sizes computed from screen
+  geometry and device pixel ratio; never overflows smaller displays
+* Ticker bar small_font size increased by 1pt for player names and W-L records
+* Font loading consolidated — _CUSTOM_FONT_FAMILY, _RECORD_FONT_FAMILY, and
+  _OZONE_FONT_FAMILY are module-level globals; each font loaded at most once
+
+PERFORMANCE:
+* Fingerprint-based pixmap rebuild — _games_fingerprint() encodes all visual state
+  as a tuple; build_ticker_pixmap() is only called when data actually changes,
+  eliminating the brief main-thread stall on each 10-second refresh cycle
+* Per-game pixmap cache — _game_pixmap_cache keyed by game_id + fingerprint tuple;
+  unchanged games are never repainted on a data refresh
+* Background key cached as tuple (led_background, bg_opacity, height) instead of
+  dict; avoids per-frame heap allocation in paintEvent
+* _scroll_speed_px_per_ms and _scroll_max_width pre-computed when pixmap changes;
+  no math in the 60hz scroll path
+* QTimer.PreciseTimer type applied to both scroll timer (16ms/60fps) and intro timer
+
+TECHNICAL:
+* normalize_proxy_url() — prepends http:// if no scheme prefix present
+* apply_proxy_settings() — writes HTTP_PROXY, HTTPS_PROXY, REQUESTS_CA_BUNDLE
+  environment variables so requests/statsapi pick them up transparently
+* apply_proxy_settings() called at startup (main()) and on every Settings save
+* Windows system certificate store injected into requests at startup via
+  pip_system_certs.wrapt_requests.inject_truststore(); when no custom cert file
+  is configured, all SSL verification uses the system trust store automatically;
+  degrades gracefully if pip_system_certs is not installed
+* draw_baseball_diamond() stores pixmap._inning_text_right_phys attribute so
+  build_game_pixmap() can compute the exact home-score x position
+
+
 Version 2.2.0 (2026-03-16)
 --------------------------
 Standings window, keyboard shortcuts, font preview, DPI-aware AppBar, custom defaults

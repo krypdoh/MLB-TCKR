@@ -37,7 +37,14 @@ def _install_chardet_shim_from_charset_normalizer():
 
 _install_chardet_shim_from_charset_normalizer()
 
-# Avoid importing requests here; only filter by warning text pattern.
+# Suppress noisy version-guard warnings from requests that fire when urllib3 or
+# charset_normalizer are newer than what requests was pinned against at release.
+# The library still functions correctly with newer versions.
+warnings.filterwarnings(
+    'ignore',
+    message=r'.*doesn.*t match a supported version.*',
+    category=Warning,
+)
 warnings.filterwarnings(
     'ignore',
     message=r'.*Unable to find acceptable character detection dependency.*',

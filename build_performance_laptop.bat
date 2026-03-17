@@ -2,8 +2,8 @@
 REM Build script for MLB ticker Cython optimizations
 REM Run this to compile the performance-critical code
 
-set PYTHON_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python313\python.exe
-set PIP_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python313\Scripts\pip.exe
+set PYTHON_EXE=C:\Users\pchar\AppData\Local\Programs\Python\Python313\python.exe
+set PIP_EXE=C:\Users\pchar\AppData\Local\Programs\Python\Python313\pip.exe
 
 echo ========================================
 echo MLB-TCKR Performance Build Script
@@ -19,7 +19,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/5] Checking Cython installation...
+echo [1/4] Checking Cython installation...
 "%PYTHON_EXE%" -c "import Cython" >nul 2>&1
 if errorlevel 1 (
     echo Cython not found. Installing...
@@ -29,7 +29,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/5] Checking NumPy installation...
+echo [2/4] Checking NumPy installation...
 "%PYTHON_EXE%" -c "import numpy" >nul 2>&1
 if errorlevel 1 (
     echo NumPy not found. Installing...
@@ -39,7 +39,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/5] Building MLB ticker Cython module...
+echo [3/4] Building MLB ticker Cython module...
 "%PYTHON_EXE%" setup_mlb_cython.py build_ext --inplace
 
 if errorlevel 1 (
@@ -61,7 +61,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [4/5] Cleaning up build artifacts...
+echo [4/4] Cleaning up build artifacts...
 if exist mlb_ticker_utils_cython.c del mlb_ticker_utils_cython.c
 
 echo.

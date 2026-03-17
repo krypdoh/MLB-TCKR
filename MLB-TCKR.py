@@ -1,8 +1,8 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.03.14
-Version: 2.0.0
+Date: 2026.03.16
+Version: 0.9 beta
 License: GNU AGPLv3
 
 Description:
@@ -11,9 +11,27 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
+import warnings
+warnings.filterwarnings(
+    'ignore',
+    message=r'.*doesn.*t match a supported version.*',
+    category=Warning,
+)
+
+# Inject the Windows system certificate store into the requests library so that
+# SSL verification works with corporate/internal CAs out of the box.  This is a
+# no-op on non-Windows platforms and degrades gracefully if the package is absent.
+try:
+    import pip_system_certs.wrapt_requests
+    pip_system_certs.wrapt_requests.inject_truststore()
+    print("[SSL] System certificate store injected into requests")
+except Exception:
+    pass  # Package not installed — requests falls back to its bundled certifi CA
+
 import sys
 import os
 import json
+import math
 import time
 import datetime
 import random
@@ -21,6 +39,7 @@ import statsapi
 from PyQt5 import QtWidgets, QtCore, QtGui
 import ctypes
 from ctypes import wintypes
+
 
 # Try to import Cython optimizations for smoother scrolling
 try:
@@ -31,9 +50,9 @@ try:
     )
     CYTHON_AVAILABLE = True
     print("[MLB-PERF] Using Cython-optimized scrolling")
-except ImportError:
+except ImportError as _cython_err:
     CYTHON_AVAILABLE = False
-    print("[MLB-PERF] Cython not available, using Python scrolling")
+    print(f"[MLB-PERF] Cython not available, using Python scrolling ({_cython_err})")
     
     # Fallback Python implementations
     def calculate_smooth_scroll(current_offset, speed, max_width):
@@ -52,6 +71,8 @@ except ImportError:
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "MLB-TCKR")
 SETTINGS_FILE = os.path.join(APPDATA_DIR, "MLB-TCKR.Settings.json")
 TEAM_LOGO_CACHE = {}
+MLB_LOGO_CACHE  = {}  # keyed by (logo_size, dpr)
+_DIAMOND_CACHE  = {}  # keyed by (runners_key, outs, inning_text, size, dpr)
 
 #  MLB Team Colors (Primary colors from official MLB color table)
 MLB_TEAM_COLORS_DEFAULT = {
@@ -88,12 +109,13 @@ MLB_TEAM_COLORS_DEFAULT = {
 }
 
 # AppBar constants
-ABM_NEW = 0x00000000
-ABM_REMOVE = 0x00000001
-ABM_QUERYPOS = 0x00000002
-ABM_SETPOS = 0x00000003
-ABM_ACTIVATE = 0x00000006
-ABE_TOP = 1
+ABM_NEW              = 0x00000000
+ABM_REMOVE           = 0x00000001
+ABM_QUERYPOS         = 0x00000002
+ABM_SETPOS           = 0x00000003
+ABM_WINDOWPOSCHANGED = 0x00000009  # notify shell after window move/resize
+ABM_ACTIVATE         = 0x00000006
+ABE_TOP              = 1
 
 class APPBARDATA(ctypes.Structure):
     _fields_ = [
@@ -126,6 +148,11 @@ def get_settings():
         "led_background": True,
         "glass_overlay": True,
         "background_opacity": 255,
+        "show_fps_overlay": False,
+        "use_proxy": False,
+        "proxy": "",
+        "use_cert": False,
+        "cert_file": "",
         "team_colors": {}  # Custom team colors (empty = use defaults)
     }
 
@@ -134,6 +161,43 @@ def save_settings(settings):
     os.makedirs(APPDATA_DIR, exist_ok=True)
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=4)
+
+
+def normalize_proxy_url(proxy_value):
+    """Ensure proxy URL has a scheme prefix (http:// added if missing)."""
+    if not proxy_value:
+        return ""
+    proxy_value = proxy_value.strip()
+    if not proxy_value:
+        return ""
+    if not proxy_value.lower().startswith(("http://", "https://")):
+        proxy_value = f"http://{proxy_value}"
+    return proxy_value
+
+
+def apply_proxy_settings():
+    """Push proxy/cert config into environment variables so that the
+    requests library (used by statsapi and all HTTP calls) picks them up
+    automatically for all subsequent network requests."""
+    settings = get_settings()
+    proxy_value = normalize_proxy_url(settings.get('proxy', ''))
+    if settings.get('use_proxy') and proxy_value:
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'):
+            os.environ[key] = proxy_value
+        print(f"[PROXY] Enabled: {proxy_value}")
+    else:
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'):
+            os.environ.pop(key, None)
+
+    cert_file = settings.get('cert_file', '')
+    if settings.get('use_cert') and cert_file and os.path.exists(cert_file):
+        # User specified a custom certificate file — point requests at it explicitly.
+        os.environ['REQUESTS_CA_BUNDLE'] = cert_file
+        print(f"[PROXY] Certificate: {cert_file}")
+    else:
+        # No custom cert specified — clear the override so that pip_system_certs
+        # (if installed) or requests' default CA bundle handles verification.
+        os.environ.pop('REQUESTS_CA_BUNDLE', None)
 
 
 def register_all_font_files():
@@ -161,15 +225,23 @@ def register_all_font_files():
     return registered
 
 
+# Module-level font family caches — populated once on first call
+_CUSTOM_FONT_FAMILY  = None
+_RECORD_FONT_FAMILY  = None
+_OZONE_FONT_FAMILY   = None
+
+
 def load_custom_font():
-    """Load the LED board font from TTF file"""
-    # Try multiple locations for the font file
+    """Load the LED board font from TTF file (cached after first call)."""
+    global _CUSTOM_FONT_FAMILY
+    if _CUSTOM_FONT_FAMILY is not None:
+        return _CUSTOM_FONT_FAMILY
+
     font_locations = [
         os.path.join(APPDATA_DIR, "led_board-7.ttf"),
         os.path.join(os.path.dirname(__file__), "led_board-7.ttf"),
         "led_board-7.ttf"
     ]
-    
     for font_path in font_locations:
         if os.path.exists(font_path):
             font_id = QtGui.QFontDatabase.addApplicationFont(font_path)
@@ -177,25 +249,31 @@ def load_custom_font():
                 font_families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
                 if font_families:
                     print(f"[FONT] Loaded custom font: {font_families[0]} from {font_path}")
-                    return font_families[0]
-    
+                    _CUSTOM_FONT_FAMILY = font_families[0]
+                    return _CUSTOM_FONT_FAMILY
+
     print("[FONT] LED board font not found, using Arial fallback")
-    return "Arial"
+    _CUSTOM_FONT_FAMILY = "Arial"
+    return _CUSTOM_FONT_FAMILY
 
 
 def load_record_font_family():
-    """Load PixelFont7 font for W-L line and return its family name."""
+    """Load PixelFont7 font for W-L line and return its family name (cached)."""
+    global _RECORD_FONT_FAMILY
+    if _RECORD_FONT_FAMILY is not None:
+        return _RECORD_FONT_FAMILY
+
     target_family = "PixelFont7-G02A"
     db = QtGui.QFontDatabase()
     if target_family in db.families():
-        return target_family
+        _RECORD_FONT_FAMILY = target_family
+        return _RECORD_FONT_FAMILY
 
     font_locations = [
         os.path.join(APPDATA_DIR, "PixelFont7-G02A.ttf"),
         os.path.join(os.path.dirname(__file__), "PixelFont7-G02A.ttf"),
         "PixelFont7-G02A.ttf"
     ]
-
     for font_path in font_locations:
         if os.path.exists(font_path):
             font_id = QtGui.QFontDatabase.addApplicationFont(font_path)
@@ -203,14 +281,21 @@ def load_record_font_family():
                 families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
                 if families:
                     print(f"[FONT] Loaded record font: {families[0]} from {font_path}")
-                    return families[0]
+                    _RECORD_FONT_FAMILY = families[0]
+                    return _RECORD_FONT_FAMILY
 
     print("[FONT] PixelFont7-G02A.ttf not found, using ticker font for records")
+    # Cache None sentinel as empty string so we don't retry on every call
+    _RECORD_FONT_FAMILY = ""
     return None
 
 
 def load_ozone_font():
-    """Load Ozone-xRRO.ttf and return its font family name."""
+    """Load Ozone-xRRO.ttf and return its font family name (cached)."""
+    global _OZONE_FONT_FAMILY
+    if _OZONE_FONT_FAMILY is not None:
+        return _OZONE_FONT_FAMILY
+
     font_locations = [
         os.path.join(APPDATA_DIR, "Ozone-xRRO.ttf"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "Ozone-xRRO.ttf"),
@@ -223,8 +308,11 @@ def load_ozone_font():
                 families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
                 if families:
                     print(f"[FONT] Loaded Ozone font: {families[0]} from {font_path}")
-                    return families[0]
+                    _OZONE_FONT_FAMILY = families[0]
+                    return _OZONE_FONT_FAMILY
+
     print("[FONT] Ozone-xRRO.ttf not found, falling back to ticker font")
+    _OZONE_FONT_FAMILY = ""
     return None
 
 
@@ -361,7 +449,9 @@ def fetch_todays_games():
         full_name = str(player_obj.get('fullName', '')).strip()
         if not full_name:
             return "Unknown"
-        return full_name.split()[-1]
+        parts = full_name.split()
+        # Return last two words for names like "Michael Harris II" → "Harris II"
+        return ' '.join(parts[-2:]) if len(parts) > 2 else parts[-1]
 
     def get_player_stat(players_map, player_id, stat_group, stat_key):
         if not player_id:
@@ -588,6 +678,13 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0):
         size: size in logical pixels
         dpr: device pixel ratio (pass screen DPR for crisp rendering)
     """
+    # Cache avoids repainting identical diamond states (same runners/outs/inning)
+    runners_key = (bool(runners.get('first')), bool(runners.get('second')), bool(runners.get('third')))
+    inning_txt  = 'F' if (isinstance(inning_num, str) and inning_num == 'F') else f"{'T' if is_top else 'B'}{inning_num}"
+    _dc_key = (runners_key, int(outs), inning_txt, int(size), dpr)
+    if _dc_key in _DIAMOND_CACHE:
+        return _DIAMOND_CACHE[_dc_key]
+
     total_width = size + 14  # Right gutter for inning indicator
     pixmap = QtGui.QPixmap(int(total_width * dpr), int(size * dpr))
     pixmap.setDevicePixelRatio(dpr)
@@ -685,8 +782,15 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0):
 
     painter.setPen(QtGui.QPen(QtGui.QColor('#FFD700')))  # Gold color
     painter.drawText(int(inning_x), int(inning_y), inning_text)
-    
+
+    # Expose the rendered inning text width (in logical px) so callers can
+    # guarantee a gap between the diamond and the home score.
+    inning_text_right_phys = inning_x + fm.horizontalAdvance(inning_text)
+    # Store as an attribute on the pixmap so build_game_pixmap can read it
+    pixmap._inning_text_right_phys = inning_text_right_phys
+
     painter.end()
+    _DIAMOND_CACHE[_dc_key] = pixmap
     return pixmap
 
 
@@ -710,6 +814,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.waiting_for_next_day = False
         self.last_fetch_date = None
 
+        # Per-game and ticker-level render caches
+        self._game_pixmap_cache = {}  # game_id → (fingerprint_tuple, QPixmap)
+        self._last_ticker_fp = None   # overall fingerprint; None forces first build
+
         # Intro pixel-reveal animation state
         self.intro_active = True
         self.intro_phase = 'in'   # 'in' | 'hold' | 'out' | 'done'
@@ -727,6 +835,24 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.scroll_paused = False
         self.is_hovered = False
 
+        # Delta-time scrolling — tracks real elapsed ms so scroll rate is
+        # independent of timer jitter (Windows QTimer is only ~15.6 ms accurate).
+        self._elapsed_timer = QtCore.QElapsedTimer()
+        self._elapsed_timer.start()
+        self._last_frame_ms = 0  # QElapsedTimer value at last scroll update
+
+        # Cached per-frame scroll constants (recomputed when pixmap changes)
+        self._scroll_speed_px_per_ms = 0.0  # logical pixels per millisecond
+        self._scroll_max_width = 0.0        # half the (doubled) ticker pixmap width
+
+        # Cached background settings tuple to avoid per-frame dict allocation
+        self._cached_bg_key = None
+
+        # FPS tracking
+        self._fps_frame_count = 0
+        self._fps_last_ms = 0
+        self._fps_display = 0.0
+
         # Window setup
         self.setWindowFlags(
             QtCore.Qt.FramelessWindowHint |
@@ -739,9 +865,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Enable hardware acceleration for smoother rendering
         self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, False)
         self.setAttribute(QtCore.Qt.WA_NoSystemBackground, False)
-        
+
         # Enable mouse tracking for hover-to-pause functionality
         self.setMouseTracking(True)
+
+        # Use CustomContextMenu policy — more reliable than contextMenuEvent on
+        # frameless AppBar/Tool windows where Qt may not generate the context event.
+        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self._show_context_menu(self.mapToGlobal(pos))
+        )
         
         # Size and position
         screen = QtWidgets.QApplication.primaryScreen().geometry()
@@ -770,7 +903,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.font.setPixelSize(max(12, int(self.ticker_height * 0.35 * font_scale)))
         self.font.setBold(True)
         self.small_font = QtGui.QFont(record_font_family)
-        self.small_font.setPixelSize(max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 2)
+        self.small_font.setPixelSize(max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3)
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
         
@@ -815,59 +948,112 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def setup_appbar(self):
         """Register as Windows AppBar to reserve desktop space at the top.
 
-        SHAppBarMessage works in *physical* pixels (device pixels), while Qt
-        geometry and self.ticker_height are in *logical* pixels.  We must scale
-        up by the device pixel ratio before handing values to Win32, then scale
-        back down when calling setGeometry so Qt positions the window correctly
-        at every DPI / display-scale setting (100 %, 125 %, 150 %, 200 % …).
+        Physical pixel dimensions are sourced directly from Win32
+        (GetClientRect + GetMonitorInfo) rather than computed via Qt's DPR
+        so the reservation is immune to rounding errors at any scaling factor
+        (100 %, 125 %, 150 %, 175 %, 200 % …).
+
+        Any desktop space already reserved by other programs is detected via
+        GetMonitorInfo's rcWork rectangle.  ABM_QUERYPOS automatically adjusts
+        our requested rectangle to sit below those existing reservations, so we
+        never override or clobber another program's reserved region.
         """
         if sys.platform != "win32":
             return
 
         shell32 = ctypes.windll.shell32
+        user32  = ctypes.windll.user32
 
-        hwnd = int(self.winId())
+        hwnd   = int(self.winId())
         screen = QtWidgets.QApplication.primaryScreen()
-        dpr = screen.devicePixelRatio()  # e.g. 1.25 at 125 % scaling
+        dpr    = screen.devicePixelRatio()
 
-        # Physical (device) dimensions — what Win32 actually sees
-        phys_width  = int(screen.geometry().width()  * dpr)
-        phys_height = int(self.ticker_height * dpr)
+        # ── Physical height: read directly from the live HWND so we get the
+        #    exact number of device pixels the window already occupies —
+        #    no DPR arithmetic, no truncation/rounding risk.
+        client_rect = wintypes.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(client_rect))
+        phys_height = client_rect.bottom - client_rect.top
 
+        # Safety fallback if the window isn't fully laid out yet.
+        if phys_height <= 0:
+            phys_height = math.ceil(self.ticker_height * dpr)
+            print(f"[AppBar] Warning: GetClientRect returned 0 height; "
+                  f"falling back to DPR-scaled height={phys_height}px")
+
+        # ── Physical monitor rectangle: gives us the correct origin for the
+        #    AppBar rect (non-zero on secondary/offset monitors) and the full
+        #    physical width without any DPR rounding.
+        class _MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ('cbSize',    ctypes.c_uint32),
+                ('rcMonitor', wintypes.RECT),
+                ('rcWork',    wintypes.RECT),
+                ('dwFlags',   ctypes.c_uint32),
+            ]
+
+        MONITOR_DEFAULTTONEAREST = 0x00000002
+        hmonitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        user32.GetMonitorInfoW(hmonitor, ctypes.byref(mi))
+
+        phys_x     = mi.rcMonitor.left
+        phys_y     = mi.rcMonitor.top
+        phys_width = mi.rcMonitor.right - mi.rcMonitor.left
+
+        # ── Pre-flight: report any space already reserved at the top edge so
+        #    the operator knows another program's reservation will be honoured.
+        #    (ABM_QUERYPOS below will place us below that region automatically.)
+        prior_top_reserved = mi.rcWork.top - phys_y
+        if prior_top_reserved > 0:
+            print(f"[AppBar] {prior_top_reserved}px already reserved at the top "
+                  f"of this monitor by another program — honouring that space")
+
+        # ── Build the full-width strip at the top of this monitor. ────────────
         abd = APPBARDATA()
-        abd.cbSize = ctypes.sizeof(APPBARDATA)
-        abd.hWnd = hwnd
-        abd.uEdge = ABE_TOP
-        abd.rc.left  = 0
-        abd.rc.top   = 0
-        abd.rc.right = phys_width
-        abd.rc.bottom = phys_height
+        abd.cbSize    = ctypes.sizeof(APPBARDATA)
+        abd.hWnd      = hwnd
+        abd.uEdge     = ABE_TOP
+        abd.rc.left   = phys_x
+        abd.rc.top    = phys_y
+        abd.rc.right  = phys_x + phys_width
+        abd.rc.bottom = phys_y + phys_height
 
-        # Step 1: Register the appbar
+        # Step 1: Register the appbar.
         shell32.SHAppBarMessage(ABM_NEW, ctypes.byref(abd))
 
-        # Step 2: Ask Windows where it wants us (respects taskbar / other bars)
+        # Step 2: Query — Windows adjusts rc.top downward past any existing
+        #         AppBars / taskbar so our bar slots in below them, not on top.
         shell32.SHAppBarMessage(ABM_QUERYPOS, ctypes.byref(abd))
 
-        # Step 3: Clamp bottom to exactly our desired physical height
+        # Step 3: Clamp bottom to preserve our exact height from the
+        #         (possibly adjusted) top.
         abd.rc.bottom = abd.rc.top + phys_height
 
-        # Step 4: Commit — reserves the working area so windows won't overlap
+        # Step 4: Commit — tell the shell to reserve [rc.top … rc.bottom] and
+        #         shrink the desktop work area so other windows won't overlap.
         shell32.SHAppBarMessage(ABM_SETPOS, ctypes.byref(abd))
 
-        # Step 5: Move/size the Qt window using *logical* pixels
+        # Step 5: Reposition the Qt window in logical pixels to match the
+        #         physical rectangle the shell just registered.
         self.setGeometry(
-            int(abd.rc.left   / dpr),
-            int(abd.rc.top    / dpr),
-            int((abd.rc.right  - abd.rc.left) / dpr),
-            int((abd.rc.bottom - abd.rc.top)  / dpr),
+            int(abd.rc.left                  / dpr),
+            int(abd.rc.top                   / dpr),
+            int((abd.rc.right - abd.rc.left) / dpr),
+            int((abd.rc.bottom - abd.rc.top) / dpr),
         )
 
-        # Step 6: Notify shell the bar is active
+        # Step 6: Tell the shell the HWND has been moved/resized.  Without
+        #         this the work-area boundary may not fully update.
+        shell32.SHAppBarMessage(ABM_WINDOWPOSCHANGED, ctypes.byref(abd))
+
+        # Step 7: Notify shell the bar is active.
         shell32.SHAppBarMessage(ABM_ACTIVATE, ctypes.byref(abd))
 
         print(f"[AppBar] Registered — DPR={dpr}, "
-              f"phys rect=({abd.rc.left},{abd.rc.top},{abd.rc.right},{abd.rc.bottom}), "
+              f"monitor phys=({phys_x},{phys_y},{phys_x+phys_width},{phys_y+phys_height}), "
+              f"reserved phys=({abd.rc.left},{abd.rc.top},{abd.rc.right},{abd.rc.bottom}), "
               f"logical height={int((abd.rc.bottom - abd.rc.top) / dpr)}px")
     
     def start_data_fetch(self):
@@ -905,7 +1091,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.next_day_timer.start()  # Start checking for next day
         
         self.last_fetch_date = current_date
-        self.build_ticker_pixmap()
+
+        # Only rebuild when displayed data has actually changed, avoiding the
+        # brief main-thread stall on every refresh where nothing is different.
+        new_fp = self._games_fingerprint()
+        if new_fp != self._last_ticker_fp:
+            self._last_ticker_fp = new_fp
+            self.build_ticker_pixmap()
+            if self.ticker_pixmap:
+                raw_speed = self.settings.get('speed', 2)
+                self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
+                self._scroll_max_width = (self.ticker_pixmap.width() / self.dpr) / 2.0
+            self._last_frame_ms = self._elapsed_timer.elapsed()
 
         # First time the ticker is ready: schedule intro to start after 2 s
         if self.intro_active and not self.intro_timer_started:
@@ -975,9 +1172,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
         intro_font.setPixelSize(max(12, int(h_phys * 0.35 * 1.5)))  # size in physical px
         intro_font.setBold(True)
 
-        text = "MLB-TCKR++"
+        text = "MLB-TCKR"
         metrics = QtGui.QFontMetrics(intro_font)
         text_width = metrics.horizontalAdvance(text)
+        # Use tightBoundingRect for "MLB-" so only the actual ink width is used
+        # (horizontalAdvance includes the font's right-side bearing after the
+        # hyphen, which renders as a visible gap before "TCKR").
+        part1 = "MLB-"
+        part2 = "TCKR"
+        # right() of tightBoundingRect is the x of the last ink pixel — draw
+        # part2 immediately after that, plus 1px so they don't touch.
+        part1_ink_right = metrics.tightBoundingRect(part1).right() + 1
 
         # Logo – pass physical height so _load_intro_logo returns a raw physical pixmap
         logo_h_phys = int(h_phys * 0.82)
@@ -1000,7 +1205,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             p.drawPixmap(start_x, logo_y, logo_pm)
         p.setFont(intro_font)
         p.setPen(QtGui.QColor('#00FF00'))
-        p.drawText(start_x + logo_w + (gap if logo_pm else 0), text_y, text)
+        text_x = start_x + logo_w + (gap if logo_pm else 0)
+        p.drawText(text_x, text_y, part1)
+        p.drawText(text_x + part1_ink_right, text_y, part2)
         p.end()
 
         # Display pixmap starts fully black — NO DPR set
@@ -1102,11 +1309,31 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self.intro_display = None
                 # Start from off-screen right so the ticker scrolls in from the edge
                 self.scroll_offset = -float(self.width())
+                # Reset elapsed timer so first delta_ms is sane after the intro pause
+                self._last_frame_ms = self._elapsed_timer.elapsed()
                 # Kick off normal scrolling now that intro is finished
                 self.scroll_timer.start(16)
                 print("[INTRO] Complete — starting ticker scroll from off-screen right")
 
         self.update()
+
+    def _games_fingerprint(self):
+        """Return a tuple encoding all data that visually affects the ticker.
+        If it matches the last build's fingerprint the rebuild is skipped entirely."""
+        s = self.settings
+        settings_key = (s.get('show_team_records', True), s.get('show_team_cities', False))
+        parts = []
+        for g in self.games:
+            r = g.get('runners', {})
+            parts.append((
+                g.get('game_id'), g.get('status'),
+                g.get('away_score'), g.get('home_score'),
+                g.get('current_inning'), g.get('inning_state'), g.get('outs'),
+                g.get('away_subtext'), g.get('home_subtext'),
+                bool(r.get('first')), bool(r.get('second')), bool(r.get('third')),
+                g.get('away_record'), g.get('home_record'),
+            ))
+        return (settings_key, tuple(parts))
 
     def build_ticker_pixmap(self):
         """Build the complete ticker pixmap with all games"""
@@ -1139,9 +1366,28 @@ class MLBTickerWindow(QtWidgets.QWidget):
         game_pixmaps = []
         total_width = logo_segment_w
         spacing = 100
-        
+
+        _settings_key = (
+            self.settings.get('show_team_records', True),
+            self.settings.get('show_team_cities', False),
+        )
         for game in self.games:
-            pixmap = self.build_game_pixmap(game)
+            game_id = game.get('game_id')
+            r = game.get('runners', {})
+            game_fp = (
+                game.get('status'), game.get('away_score'), game.get('home_score'),
+                game.get('current_inning'), game.get('inning_state'), game.get('outs'),
+                game.get('away_subtext'), game.get('home_subtext'),
+                bool(r.get('first')), bool(r.get('second')), bool(r.get('third')),
+                game.get('away_record'), game.get('home_record'),
+                game.get('away_name'), game.get('home_name'), _settings_key,
+            )
+            cached_entry = self._game_pixmap_cache.get(game_id)
+            if cached_entry is not None and cached_entry[0] == game_fp:
+                pixmap = cached_entry[1]
+            else:
+                pixmap = self.build_game_pixmap(game)
+                self._game_pixmap_cache[game_id] = (game_fp, pixmap)
             game_pixmaps.append(pixmap)
             # pixmap.width() is physical pixels; divide by dpr to get logical width
             total_width += int(pixmap.width() / self.dpr) + spacing
@@ -1171,7 +1417,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
         painter.end()
 
     def _load_mlb_logo(self, logo_size):
-        """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware."""
+        """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware (cached)."""
+        cache_key = (int(logo_size), self.dpr)
+        cached = MLB_LOGO_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         images_dirs = [
             os.path.join(APPDATA_DIR, "MLB-TCKR.images"),
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "MLB-TCKR.images"),
@@ -1188,8 +1439,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     scaled = pm.scaled(phys, phys, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
                     scaled.setDevicePixelRatio(self.dpr)
                     print(f"[TICKER] Loaded mlb.png from {path}")
+                    MLB_LOGO_CACHE[cache_key] = scaled
                     return scaled
         print("[TICKER] mlb.png not found in images dirs")
+        MLB_LOGO_CACHE[cache_key] = None  # cache the miss so we don't re-scan
         return None
     
     def build_game_pixmap(self, game):
@@ -1333,8 +1586,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Diamond
             diamond_y = (self.ticker_height - int(diamond_pixmap.height() / self.dpr)) // 2 - 2
             painter.drawPixmap(x, diamond_y, diamond_pixmap)
-            x += diamond_logical_width + 2  # Tight gap to home score
-            
+            # Guarantee a minimum 6 px gap after the inning indicator text.
+            # For long labels like "B15" the text extends further right than
+            # the base diamond geometry alone, so we measure it explicitly.
+            inning_text_right_phys = getattr(diamond_pixmap, '_inning_text_right_phys', 0)
+            inning_text_right_logical = inning_text_right_phys / self.dpr
+            home_score_x = max(x + diamond_logical_width, x + inning_text_right_logical) + 6
+            x = int(home_score_x)
+
             # Home score (on same line as team name)
             painter.setFont(self.font)
             painter.setPen(QtGui.QColor('#FFFFFF'))
@@ -1413,53 +1672,65 @@ class MLBTickerWindow(QtWidgets.QWidget):
         return pixmap
     
     def update_scroll(self):
-        """Update scroll position with Cython-optimized smooth scrolling"""
-        if not self.ticker_pixmap:
+        """Advance scroll offset using real elapsed time (delta-time).
+
+        Using actual milliseconds elapsed instead of a fixed per-tick step
+        makes the scroll rate independent of Windows timer jitter, eliminating
+        the periodic judder caused by ~15.6 ms timer resolution.
+        """
+        if not self.ticker_pixmap or self._scroll_max_width == 0:
             return
-        
-        # Use optimized scroll calculation
-        speed = self.settings.get('speed', 2)
-        adjusted_speed = adjust_speed_for_framerate(speed, 60, 30)
-        # ticker_pixmap.width() is physical pixels; convert to logical for scroll range
-        max_width = (self.ticker_pixmap.width() / self.dpr) / 2.0
-        
-        self.scroll_offset = calculate_smooth_scroll(
-            self.scroll_offset, 
-            adjusted_speed, 
-            max_width
-        )
-        
+
+        now_ms = self._elapsed_timer.elapsed()
+        delta_ms = now_ms - self._last_frame_ms
+        self._last_frame_ms = now_ms
+
+        # Clamp delta to avoid a large jump after a pause/hover resume
+        delta_ms = min(delta_ms, 100)
+
+        self.scroll_offset += self._scroll_speed_px_per_ms * delta_ms
+        if self.scroll_offset >= self._scroll_max_width:
+            self.scroll_offset = 0.0
+
+        # FPS counter: update display value once per second
+        self._fps_frame_count += 1
+        elapsed_since = now_ms - self._fps_last_ms
+        if elapsed_since >= 1000:
+            self._fps_display = self._fps_frame_count * 1000.0 / elapsed_since
+            self._fps_frame_count = 0
+            self._fps_last_ms = now_ms
+
         self.update()
     
     def paintEvent(self, event):
         """Optimized paint event with cached backgrounds"""
         painter = QtGui.QPainter(self)
-        # Use SmoothPixmapTransform for better quality at sub-pixel positions
-        painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        # No Antialiasing/SmoothPixmapTransform: we're blitting pre-rendered
+        # pixel-perfect HiDPI pixmaps — filtering adds GPU overhead for zero gain.
 
         # Always draw the dark background first so the bar is never transparent/white
-        settings = get_settings()
+        settings = self.settings  # already in memory — never read disk inside paintEvent
         led_background = settings.get('led_background', True)
         glass_overlay = settings.get('glass_overlay', True)
         bg_opacity = settings.get('background_opacity', 230)
 
-        current_settings = {'led': led_background, 'opacity': bg_opacity, 'height': self.height()}
-        if self.cached_background is None or self.last_bg_settings != current_settings:
+        # Use a tuple instead of a dict to avoid per-frame heap allocation
+        bg_key = (led_background, bg_opacity, self.height())
+        if self._cached_bg_key != bg_key or self.cached_background is None:
             self.cached_background = QtGui.QPixmap(self.width(), self.height())
             self.cached_background.fill(QtCore.Qt.transparent)
 
             bg_painter = QtGui.QPainter(self.cached_background)
             if led_background:
-                # Deep near-black gradient — dark charcoal at edges, true black center
+                # Blue-tinted near-black gradient matching the reference LED board look
                 gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
-                gradient.setColorAt(0.0, QtGui.QColor(8, 8, 8, bg_opacity))
-                gradient.setColorAt(0.35, QtGui.QColor(0, 0, 0, bg_opacity))
-                gradient.setColorAt(0.65, QtGui.QColor(0, 0, 0, bg_opacity))
-                gradient.setColorAt(1.0, QtGui.QColor(8, 8, 8, bg_opacity))
+                gradient.setColorAt(0.0, QtGui.QColor(15, 18, 22, bg_opacity))
+                gradient.setColorAt(0.35, QtGui.QColor(10, 12, 16, bg_opacity))
+                gradient.setColorAt(0.65, QtGui.QColor(10, 12, 16, bg_opacity))
+                gradient.setColorAt(1.0, QtGui.QColor(8, 10, 14, bg_opacity))
                 bg_painter.fillRect(self.cached_background.rect(), gradient)
 
-                # Horizontal scanlines — every other row is slightly darker,
+                # Horizontal scanlines — every other row slightly darker,
                 # mimicking the gap between LED rows on a real board
                 scan_color = QtGui.QColor(0, 0, 0, 55)
                 for y in range(0, self.height(), 2):
@@ -1468,7 +1739,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 bg_painter.fillRect(self.cached_background.rect(), QtGui.QColor(0, 0, 0, bg_opacity))
             bg_painter.end()
 
-            self.last_bg_settings = current_settings
+            self._cached_bg_key = bg_key
+            self.last_bg_settings = bg_key  # keep attribute for compat
 
         painter.drawPixmap(0, 0, self.cached_background)
 
@@ -1496,19 +1768,35 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self.cached_overlay.fill(QtCore.Qt.transparent)
 
                 overlay_painter = QtGui.QPainter(self.cached_overlay)
+                # Glass glare — bright top sheen fading to transparent, matching reference
                 overlay_gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
-                # Very subtle edge-only sheen — keeps the LED look without lightening
-                overlay_gradient.setColorAt(0.0, QtGui.QColor(255, 255, 255, 8))
-                overlay_gradient.setColorAt(0.15, QtGui.QColor(255, 255, 255, 3))
-                overlay_gradient.setColorAt(0.5, QtGui.QColor(0, 0, 0, 0))
-                overlay_gradient.setColorAt(0.85, QtGui.QColor(0, 0, 0, 3))
-                overlay_gradient.setColorAt(1.0, QtGui.QColor(0, 0, 0, 6))
+                overlay_gradient.setColorAt(0.00, QtGui.QColor(255, 255, 255, 48))
+                overlay_gradient.setColorAt(0.25, QtGui.QColor(255, 255, 255, 12))
+                overlay_gradient.setColorAt(0.65, QtGui.QColor(255, 255, 255, 4))
+                overlay_gradient.setColorAt(1.00, QtGui.QColor(255, 255, 255, 0))
                 overlay_painter.fillRect(self.cached_overlay.rect(), overlay_gradient)
+                # 1px top-edge highlight — simulates glass catching light at the bezel
+                overlay_painter.fillRect(0, 2, self.width(), 1, QtGui.QColor(255, 255, 255, 55))
                 overlay_painter.end()
 
                 self.last_height = self.height()
 
             painter.drawPixmap(0, 0, self.cached_overlay)
+
+        # FPS overlay — bottom-right corner, bright green, small_font
+        if settings.get('show_fps_overlay', False) and self._fps_display > 0:
+            fps_text = f"{self._fps_display:.1f} FPS"
+            painter.setFont(self.small_font)
+            fm = QtGui.QFontMetrics(self.small_font)
+            tw = fm.horizontalAdvance(fps_text)
+            th = fm.height()
+            margin = 4
+            tx = self.width() - tw - margin
+            ty = self.height() - margin
+            # Subtle dark backing so the text is readable over any content
+            painter.fillRect(tx - 2, ty - th, tw + 4, th + 2, QtGui.QColor(0, 0, 0, 140))
+            painter.setPen(QtGui.QColor('#00FF44'))
+            painter.drawText(tx, ty, fps_text)
 
         painter.end()
     
@@ -1522,6 +1810,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Resume scrolling when mouse leaves ticker"""
         self.is_hovered = False
         if not self.intro_active and not self.scroll_paused:
+            self._last_frame_ms = self._elapsed_timer.elapsed()  # reset baseline to avoid jump
             self.scroll_timer.start(16)  # Resume 60 FPS scrolling
         super().leaveEvent(event)
 
@@ -1556,6 +1845,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 print("[KB] Scroll paused")
             else:
                 if not self.intro_active and not self.is_hovered:
+                    self._last_frame_ms = self._elapsed_timer.elapsed()
                     self.scroll_timer.start(16)
                 print("[KB] Scroll unpaused")
         else:
@@ -1583,6 +1873,71 @@ class MLBTickerWindow(QtWidgets.QWidget):
             shell32.SHAppBarMessage(ABM_REMOVE, ctypes.byref(abd))
         
         event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+        elif event.button() == QtCore.Qt.RightButton:
+            self._show_context_menu(event.globalPos())
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & QtCore.Qt.LeftButton and hasattr(self, '_drag_pos'):
+            self.move(event.globalPos() - self._drag_pos)
+
+    def contextMenuEvent(self, event):
+        self._show_context_menu(event.globalPos())
+
+    def _show_context_menu(self, global_pos):
+        """Build and display the right-click context menu."""
+        menu = QtWidgets.QMenu(self)
+
+        refresh_action = menu.addAction("Refresh Games")
+        refresh_action.triggered.connect(self.start_data_fetch)
+
+        menu.addSeparator()
+
+        pause_label = "Unpause Ticker" if self.scroll_paused else "Pause Ticker"
+        pause_action = menu.addAction(pause_label)
+        def _toggle_pause():
+            self.scroll_paused = not self.scroll_paused
+            if self.scroll_paused:
+                self.scroll_timer.stop()
+            else:
+                if not self.intro_active and not self.is_hovered:
+                    self._last_frame_ms = self._elapsed_timer.elapsed()
+                    self.scroll_timer.start(16)
+        pause_action.triggered.connect(_toggle_pause)
+
+        menu.addSeparator()
+
+        standings_action = menu.addAction("Standings...")
+        def _open_standings():
+            if not hasattr(self, '_standings_win') or \
+                    self._standings_win is None or \
+                    not self._standings_win.isVisible():
+                self._standings_win = StandingsWindow()
+                self._standings_win.show()
+            else:
+                self._standings_win.raise_()
+                self._standings_win.activateWindow()
+        standings_action.triggered.connect(_open_standings)
+
+        menu.addSeparator()
+
+        settings_action = menu.addAction("Settings...")
+        settings_action.triggered.connect(lambda: SettingsDialog(self).exec_())
+
+        menu.addSeparator()
+
+        about_action = menu.addAction("About MLB-TCKR...")
+        about_action.triggered.connect(lambda: AboutDialog(self).exec_())
+
+        menu.addSeparator()
+
+        quit_action = menu.addAction("Quit")
+        quit_action.triggered.connect(QtWidgets.QApplication.instance().quit)
+
+        menu.exec_(global_pos)
 
 
 # ---------------------------------------------------------------------------
@@ -1697,6 +2052,19 @@ class FontPreviewDelegate(QtWidgets.QStyledItemDelegate):
 
 
 # ---------------------------------------------------------------------------
+# Standings worker thread
+# ---------------------------------------------------------------------------
+
+class _StandingsWorker(QtCore.QThread):
+    """Background thread that calls fetch_standings() without blocking the UI."""
+    done = QtCore.pyqtSignal(object)
+
+    def run(self):
+        data = fetch_standings()
+        self.done.emit(data)
+
+
+# ---------------------------------------------------------------------------
 # Standings window
 # ---------------------------------------------------------------------------
 
@@ -1710,17 +2078,46 @@ class StandingsWindow(QtWidgets.QWidget):
 
     _DIVISIONS = ['East', 'Central', 'West']
 
-    # Fixed pixel widths for every cell — guarantees perfect table alignment
-    _W_LOGO = 44    # logo square
-    _W_NAME = 160   # team nickname
-    _W_WL   = 90    # W-L
-    _W_PCT  = 90    # Pct.
-    _W_L10  = 90    # L10
-    _ROW_H  = 40    # row height
+    def _compute_scale(self):
+        """Return a scale factor ≤ 1.0 so the window fits available screen space."""
+        avail = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        # Design dimensions match the layout at 100 % scale on a 1080p monitor.
+        # ideal_w = 3 columns (524 each) + 2 dividers (34 each) + h-margins (56)
+        ideal_w = 1696
+        # ideal_h = title + league row + divider + div-header + 5 rows + footer
+        ideal_h = 580
+        scale = min(avail.width()  * 0.92 / ideal_w,
+                    avail.height() * 0.92 / ideal_h,
+                    1.0)
+        return max(scale, 0.5)   # never compress below 50 %
+
+    def _compute_sizes(self):
+        """Derive all pixel dimensions from self._scale."""
+        s = self._scale
+        # Cell widths
+        self._W_LOGO = max(24, int(44  * s))
+        self._W_NAME = max(110, int(210 * s))
+        self._W_WL   = max(48, int(90  * s))
+        self._W_PCT  = max(48, int(90  * s))
+        self._W_L10  = max(48, int(90  * s))
+        self._ROW_H  = max(22, int(40  * s))
+        # Font pixel sizes
+        self._FS_TITLE   = max(28, int(64 * s))
+        self._FS_LEAGUE  = max(18, int(40 * s))
+        self._FS_DIV     = max(16, int(36 * s))
+        self._FS_HDR     = max(12, int(26 * s))
+        self._FS_NAME    = max(14, int(30 * s))
+        self._FS_STAT    = max(12, int(26 * s))
+        self._FS_LOADING = max(18, int(40 * s))
+        self._FS_CLOSE   = max(13, int(26 * s))
+        # Layout
+        self._MARGIN_H  = max(12, int(28 * s))
+        self._MARGIN_V  = max(10, int(20 * s))
+        self._CLOSE_W   = max(90,  int(160 * s))
+        self._CLOSE_H   = max(30,  int(52  * s))
 
     def __init__(self, parent=None):
-        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint |
-                         QtCore.Qt.WindowStaysOnTopHint)
+        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setWindowTitle("MLB Standings")
 
@@ -1728,6 +2125,8 @@ class StandingsWindow(QtWidgets.QWidget):
         self._data    = None
         self._loading = False
 
+        self._scale = self._compute_scale()
+        self._compute_sizes()
         self._build_ui()
         self._center_on_desktop()
         self._fetch()
@@ -1741,20 +2140,20 @@ class StandingsWindow(QtWidgets.QWidget):
         self._record_family = load_record_font_family() or self._ozone_family
 
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(28, 20, 28, 20)
+        outer.setContentsMargins(self._MARGIN_H, self._MARGIN_V, self._MARGIN_H, self._MARGIN_V)
         outer.setSpacing(0)
 
         # ── Header ────────────────────────────────────────────────
         title_font = QtGui.QFont(self._ozone_family)
-        title_font.setPixelSize(64)
-        title_lbl = QtWidgets.QLabel("STANDINGS")
+        title_font.setPixelSize(self._FS_TITLE)
+        title_lbl = QtWidgets.QLabel("MLB STANDINGS")
         title_lbl.setAlignment(QtCore.Qt.AlignCenter)
         title_lbl.setFont(title_font)
         title_lbl.setStyleSheet("color: #FFFFFF; padding: 10px 0 4px 0;")
         outer.addWidget(title_lbl)
 
         league_font = QtGui.QFont(self._ozone_family)
-        league_font.setPixelSize(40)
+        league_font.setPixelSize(self._FS_LEAGUE)
 
         self._al_lbl = QtWidgets.QLabel("American League")
         self._al_lbl.setAlignment(QtCore.Qt.AlignCenter)
@@ -1766,7 +2165,9 @@ class StandingsWindow(QtWidgets.QWidget):
         sep_lbl = QtWidgets.QLabel("  |  ")
         sep_lbl.setAlignment(QtCore.Qt.AlignCenter)
         sep_lbl.setFont(league_font)
-        sep_lbl.setStyleSheet("color: #444444; padding: 4px 0 18px 0;")
+        _sp_top = max(2, int(4  * self._scale))
+        _sp_bot = max(6, int(18 * self._scale))
+        sep_lbl.setStyleSheet(f"color: #444444; padding: {_sp_top}px 0 {_sp_bot}px 0;")
 
         self._nl_lbl = QtWidgets.QLabel("National League")
         self._nl_lbl.setAlignment(QtCore.Qt.AlignCenter)
@@ -1786,12 +2187,11 @@ class StandingsWindow(QtWidgets.QWidget):
 
         self._update_header_colors()
 
-        # Thin gold divider under header
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.HLine)
-        sep.setStyleSheet("color: #00FF44; background: #00FF44; max-height: 2px;")
-        outer.addWidget(sep)
-        outer.addSpacing(16)
+        # Thin divider under header — colour tracks the active league
+        self._header_sep = QtWidgets.QFrame()
+        self._header_sep.setFrameShape(QtWidgets.QFrame.HLine)
+        outer.addWidget(self._header_sep)
+        outer.addSpacing(self._MARGIN_V)
 
         # ── Division columns ─────────────────────────────────────────
         cols_row = QtWidgets.QHBoxLayout()
@@ -1805,7 +2205,7 @@ class StandingsWindow(QtWidgets.QWidget):
             # Division title
             div_lbl = QtWidgets.QLabel(div)
             div_font = QtGui.QFont(self._ozone_family)
-            div_font.setPixelSize(36)
+            div_font.setPixelSize(self._FS_DIV)
             div_lbl.setFont(div_font)
             div_lbl.setAlignment(QtCore.Qt.AlignCenter)
             div_lbl.setStyleSheet("color: #AAAAAA; padding-bottom: 8px;")
@@ -1834,18 +2234,19 @@ class StandingsWindow(QtWidgets.QWidget):
             if i < len(self._DIVISIONS) - 1:
                 vsep = QtWidgets.QFrame()
                 vsep.setFrameShape(QtWidgets.QFrame.VLine)
+                _vsep_m = max(8, int(16 * self._scale))
                 vsep.setStyleSheet(
-                    "color: #555; background: #555; max-width: 2px; margin: 0 16px;"
+                    f"color: #555; background: #555; max-width: 2px; margin: 0 {_vsep_m}px;"
                 )
                 cols_row.addWidget(vsep)
 
         outer.addLayout(cols_row)
-        outer.addSpacing(20)
+        outer.addSpacing(self._MARGIN_V)
 
         # ── Loading indicator ─────────────────────────────────────────
         self._loading_lbl = QtWidgets.QLabel("Loading…")
         loading_font = QtGui.QFont(self._ozone_family)
-        loading_font.setPixelSize(40)
+        loading_font.setPixelSize(self._FS_LOADING)
         self._loading_lbl.setFont(loading_font)
         self._loading_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self._loading_lbl.setStyleSheet("color: #888;")
@@ -1857,9 +2258,9 @@ class StandingsWindow(QtWidgets.QWidget):
         bottom.addStretch()
         close_btn = QtWidgets.QPushButton("✕  Close")
         close_btn_font = QtGui.QFont(self._ozone_family)
-        close_btn_font.setPixelSize(26)
+        close_btn_font.setPixelSize(self._FS_CLOSE)
         close_btn.setFont(close_btn_font)
-        close_btn.setFixedSize(160, 52)
+        close_btn.setFixedSize(self._CLOSE_W, self._CLOSE_H)
         close_btn.setStyleSheet("""
             QPushButton {
                 background: #2a2a2a; color: #cccccc;
@@ -1885,7 +2286,7 @@ class StandingsWindow(QtWidgets.QWidget):
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(0)
         hdr_font = QtGui.QFont(self._record_family)
-        hdr_font.setPixelSize(26)
+        hdr_font.setPixelSize(self._FS_HDR)
 
         # Logo placeholder
         spacer = QtWidgets.QLabel()
@@ -1934,9 +2335,9 @@ class StandingsWindow(QtWidgets.QWidget):
             return
         league_data = self._data.get(self._league, {})
         name_font = QtGui.QFont(self._ozone_family)
-        name_font.setPixelSize(30)
+        name_font.setPixelSize(self._FS_NAME)
         stat_font = QtGui.QFont(self._record_family)
-        stat_font.setPixelSize(26)
+        stat_font.setPixelSize(self._FS_STAT)
 
         for div in self._DIVISIONS:
             col = self._col_widgets[div]
@@ -2002,10 +2403,17 @@ class StandingsWindow(QtWidgets.QWidget):
     # ------------------------------------------------------------------
 
     def _update_header_colors(self):
-        al_color = "#FF2222" if self._league == 'AL' else "#555555"
-        nl_color = "#2266FF" if self._league == 'NL' else "#555555"
-        self._al_lbl.setStyleSheet(f"color: {al_color}; padding: 4px 0 18px 0;")
-        self._nl_lbl.setStyleSheet(f"color: {nl_color}; padding: 4px 0 18px 0;")
+        al_color  = "#FF2222" if self._league == 'AL' else "#555555"
+        nl_color  = "#2266FF" if self._league == 'NL' else "#555555"
+        sep_color = "#FF2222" if self._league == 'AL' else "#2266FF"
+        pad_top = max(2, int(4  * self._scale))
+        pad_bot = max(6, int(18 * self._scale))
+        self._al_lbl.setStyleSheet(f"color: {al_color}; padding: {pad_top}px 0 {pad_bot}px 0;")
+        self._nl_lbl.setStyleSheet(f"color: {nl_color}; padding: {pad_top}px 0 {pad_bot}px 0;")
+        if hasattr(self, '_header_sep'):
+            self._header_sep.setStyleSheet(
+                f"color: {sep_color}; background: {sep_color}; max-height: 2px;"
+            )
 
     def _select_league(self, league):
         if self._league == league:
@@ -2034,7 +2442,7 @@ class StandingsWindow(QtWidgets.QWidget):
 
         # Rounded dark background
         painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 240)))
-        painter.setPen(QtGui.QPen(QtGui.QColor('#00FF44'), 1.5))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#FFFFFF'), 1.5))
         painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
 
         # Scanlines
@@ -2054,12 +2462,130 @@ class StandingsWindow(QtWidgets.QWidget):
             self.move(event.globalPos() - self._drag_pos)
 
 
-class _StandingsWorker(QtCore.QThread):
-    done = QtCore.pyqtSignal(object)
+# ---------------------------------------------------------------------------
+# About dialog
+# ---------------------------------------------------------------------------
 
-    def run(self):
-        data = fetch_standings()
-        self.done.emit(data)
+class AboutDialog(QtWidgets.QDialog):
+    """Modal About dialog with LED-board aesthetic."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setWindowTitle("About MLB-TCKR")
+        self.setModal(True)
+
+        font_family = load_ozone_font() or load_custom_font()
+        record_family = load_record_font_family() or font_family
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(32, 28, 32, 24)
+        outer.setSpacing(0)
+
+        def _lbl(text, size, color, bold=False, top_pad=0, bot_pad=0, family=None):
+            l = QtWidgets.QLabel(text)
+            f = QtGui.QFont(family or font_family)
+            f.setPixelSize(size)
+            f.setBold(bold)
+            l.setFont(f)
+            l.setAlignment(QtCore.Qt.AlignCenter)
+            l.setStyleSheet(
+                f"color: {color};"
+                f" padding-top: {top_pad}px; padding-bottom: {bot_pad}px;"
+            )
+            l.setWordWrap(True)
+            return l
+
+        # App name
+        outer.addWidget(_lbl("MLB-TCKR", 52, "#FFFFFF", bold=True, bot_pad=4))
+
+        # Version
+        outer.addWidget(_lbl("Version 0.9 Beta", 22, "#AAAAAA", bot_pad=14))
+
+        # Green rule
+        rule = QtWidgets.QFrame()
+        rule.setFrameShape(QtWidgets.QFrame.HLine)
+        rule.setStyleSheet("background: #00FF44; max-height: 2px;")
+        outer.addWidget(rule)
+        outer.addSpacing(14)
+
+        # Credits block
+        outer.addWidget(_lbl("Created by: Paul R. Charovkine",  20, "#DDDDDD", bot_pad=4,  family=record_family))
+        outer.addWidget(_lbl("Copyright \u00a9 2026 — All Rights Reserved", 18, "#AAAAAA", bot_pad=4,  family=record_family))
+        outer.addWidget(_lbl("License: GNU AGPLv3",              18, "#AAAAAA", bot_pad=16, family=record_family))
+
+        # Website (clickable)
+        url_lbl = QtWidgets.QLabel(
+            '<a href="https://krypdoh.github.io/MLB-TCKR/" '
+            'style="color:#00AAFF; text-decoration:none;">'
+            'https://krypdoh.github.io/MLB-TCKR/</a>'
+        )
+        url_font = QtGui.QFont(record_family)
+        url_font.setPixelSize(18)
+        url_lbl.setFont(url_font)
+        url_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        url_lbl.setOpenExternalLinks(True)
+        url_lbl.setTextInteractionFlags(QtCore.Qt.TextBrowserInteraction)
+        url_lbl.setStyleSheet("padding-bottom: 14px;")
+        outer.addWidget(url_lbl)
+
+        # Second rule
+        rule2 = QtWidgets.QFrame()
+        rule2.setFrameShape(QtWidgets.QFrame.HLine)
+        rule2.setStyleSheet("background: #333333; max-height: 1px;")
+        outer.addWidget(rule2)
+        outer.addSpacing(12)
+
+        # Disclaimer
+        outer.addWidget(_lbl(
+            "Major League Baseball trademarks, team names, logos, and related marks\n"
+            "are the property of their respective owners.\n"
+            "MLB-TCKR is an independent fan project and is not affiliated\n"
+            "with or endorsed by Major League Baseball.",
+            14, "#777777", bot_pad=16, family=record_family
+        ))
+
+        # Close button
+        close_btn = QtWidgets.QPushButton("\u2715  Close")
+        close_font = QtGui.QFont(font_family)
+        close_font.setPixelSize(18)
+        close_btn.setFont(close_font)
+        close_btn.setFixedSize(140, 44)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #2a2a2a; color: #cccccc;
+                border: 1px solid #555; border-radius: 6px;
+            }
+            QPushButton:hover  { background: #3a3a3a; color: #ffffff; }
+            QPushButton:pressed { background: #111; }
+        """)
+        close_btn.clicked.connect(self.accept)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        outer.addLayout(btn_row)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect()
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 245)))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#FFFFFF'), 1.5))
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
+        scan = QtGui.QColor(0, 0, 0, 30)
+        for y in range(0, rect.height(), 2):
+            painter.fillRect(0, y, rect.width(), 1, scan)
+        painter.end()
+
+    # Allow dragging
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & QtCore.Qt.LeftButton and hasattr(self, '_drag_pos'):
+            self.move(event.globalPos() - self._drag_pos)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -2083,6 +2609,10 @@ class SettingsDialog(QtWidgets.QDialog):
         # Team colors tab
         colors_tab = self.create_team_colors_tab()
         tabs.addTab(colors_tab, "Team Colors")
+
+        # Network / proxy tab
+        network_tab = self.create_network_tab()
+        tabs.addTab(network_tab, "Network")
         
         # Buttons
         button_box = QtWidgets.QDialogButtonBox(
@@ -2191,7 +2721,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self.opacity_spin.setValue(self.settings.get('background_opacity', 230))
         self.opacity_spin.setToolTip("0 = Fully Transparent, 255 = Fully Opaque")
         layout.addRow("Background Opacity:", self.opacity_spin)
-        
+
+        # FPS Overlay
+        self.fps_check = QtWidgets.QCheckBox()
+        self.fps_check.setChecked(self.settings.get('show_fps_overlay', False))
+        layout.addRow("Show FPS Overlay:", self.fps_check)
+
         widget.setLayout(layout)
         return widget
 
@@ -2320,6 +2855,76 @@ class SettingsDialog(QtWidgets.QDialog):
                     f"background-color: {default_color}; border: 1px solid #000;"
                 )
     
+    def create_network_tab(self):
+        """Create network/proxy settings tab"""
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.setAlignment(QtCore.Qt.AlignTop)
+        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        # Proxy group
+        proxy_group = QtWidgets.QGroupBox("Proxy")
+        proxy_form = QtWidgets.QFormLayout()
+        proxy_form.setSpacing(8)
+        proxy_form.setContentsMargins(10, 12, 10, 10)
+
+        self.use_proxy_check = QtWidgets.QCheckBox("Enable Proxy")
+        self.use_proxy_check.setChecked(bool(self.settings.get('use_proxy', False)))
+        proxy_form.addRow(self.use_proxy_check)
+
+        self.proxy_url_edit = QtWidgets.QLineEdit(
+            normalize_proxy_url(self.settings.get('proxy', ''))
+        )
+        self.proxy_url_edit.setPlaceholderText("http://proxy.example.com:8080")
+        self.proxy_url_edit.setEnabled(self.use_proxy_check.isChecked())
+        self.use_proxy_check.toggled.connect(self.proxy_url_edit.setEnabled)
+        proxy_form.addRow("Proxy URL:", self.proxy_url_edit)
+
+        proxy_group.setLayout(proxy_form)
+        layout.addWidget(proxy_group)
+
+        # Certificate group
+        cert_group = QtWidgets.QGroupBox("SSL Certificate (Optional)")
+        cert_form = QtWidgets.QFormLayout()
+        cert_form.setSpacing(8)
+        cert_form.setContentsMargins(10, 12, 10, 10)
+
+        self.use_cert_check = QtWidgets.QCheckBox("Use Certificate File")
+        self.use_cert_check.setChecked(bool(self.settings.get('use_cert', False)))
+        cert_form.addRow(self.use_cert_check)
+
+        cert_row = QtWidgets.QHBoxLayout()
+        self.cert_file_edit = QtWidgets.QLineEdit(self.settings.get('cert_file', ''))
+        self.cert_file_edit.setPlaceholderText("Path to .pem / .crt certificate file")
+        self.cert_file_edit.setEnabled(self.use_cert_check.isChecked())
+        self.use_cert_check.toggled.connect(self.cert_file_edit.setEnabled)
+        self._cert_browse_btn = QtWidgets.QPushButton("Browse…")
+        self._cert_browse_btn.setFixedWidth(80)
+        self._cert_browse_btn.setEnabled(self.use_cert_check.isChecked())
+        self.use_cert_check.toggled.connect(self._cert_browse_btn.setEnabled)
+        self._cert_browse_btn.clicked.connect(self.browse_cert_file)
+        cert_row.addWidget(self.cert_file_edit)
+        cert_row.addWidget(self._cert_browse_btn)
+        cert_form.addRow("Certificate File:", cert_row)
+
+        cert_group.setLayout(cert_form)
+        layout.addWidget(cert_group)
+
+        widget.setLayout(layout)
+        return widget
+
+    def browse_cert_file(self):
+        """Open a file dialog to select an SSL certificate file."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Certificate File",
+            "",
+            "Certificate Files (*.pem *.crt *.cer *.ca-bundle);;All Files (*)"
+        )
+        if path:
+            self.cert_file_edit.setText(path)
+
     def save_and_close(self):
         """Save settings and close dialog"""
         # General settings
@@ -2335,6 +2940,13 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['led_background'] = self.led_bg_check.isChecked()
         self.settings['glass_overlay'] = self.glass_check.isChecked()
         self.settings['background_opacity'] = self.opacity_spin.value()
+        self.settings['show_fps_overlay'] = self.fps_check.isChecked()
+
+        # Network / proxy settings
+        self.settings['use_proxy'] = self.use_proxy_check.isChecked()
+        self.settings['proxy'] = self.proxy_url_edit.text().strip()
+        self.settings['use_cert'] = self.use_cert_check.isChecked()
+        self.settings['cert_file'] = self.cert_file_edit.text().strip()
         
         # Team colors
         team_colors = {}
@@ -2348,6 +2960,9 @@ class SettingsDialog(QtWidgets.QDialog):
         
         # Save to file
         save_settings(self.settings)
+
+        # Apply proxy settings immediately so subsequent fetches use the new config
+        apply_proxy_settings()
         
         # Notify user
         QtWidgets.QMessageBox.information(
@@ -2374,6 +2989,9 @@ def main():
     # Register ALL font files from app directories so user-chosen fonts work.
     # Must happen after QApplication is created and before any window/dialog.
     register_all_font_files()
+
+    # Apply proxy / certificate settings from config before any network calls
+    apply_proxy_settings()
 
     # Print performance info
     print("\n" + "="*60)
@@ -2435,15 +3053,17 @@ def main():
     tray_menu.addSeparator()
 
     standings_action = tray_menu.addAction("Standings...")
-    standings_win = [None]  # mutable container so lambda can replace it
 
     def open_standings():
-        if standings_win[0] is None or not standings_win[0].isVisible():
-            standings_win[0] = StandingsWindow()
-            standings_win[0].show()
+        # Share the same standings window with the ticker bar context menu
+        if not hasattr(window, '_standings_win') or \
+                window._standings_win is None or \
+                not window._standings_win.isVisible():
+            window._standings_win = StandingsWindow()
+            window._standings_win.show()
         else:
-            standings_win[0].raise_()
-            standings_win[0].activateWindow()
+            window._standings_win.raise_()
+            window._standings_win.activateWindow()
 
     standings_action.triggered.connect(open_standings)
 

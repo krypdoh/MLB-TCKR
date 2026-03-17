@@ -151,7 +151,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='MLB-TCKR',
+    name='MLB-TCKR-console',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -163,7 +163,7 @@ exe = EXE(
         'Qt5Widgets.dll',
     ],
     runtime_tmpdir=None,
-    console=False,            # No console window – pure GUI app
+    console=True,            # With Console
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
