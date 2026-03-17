@@ -149,6 +149,7 @@ def get_settings():
         "glass_overlay": True,
         "background_opacity": 255,
         "show_fps_overlay": False,
+        "monitor_index": 0,
         "use_proxy": False,
         "proxy": "",
         "use_cert": False,
@@ -876,15 +877,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
             lambda pos: self._show_context_menu(self.mapToGlobal(pos))
         )
         
-        # Size and position
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
+        # Size and position — use the user-selected monitor (falls back to primary)
+        _screens = QtWidgets.QApplication.screens()
+        _mon_idx = min(self.settings.get('monitor_index', 0), max(0, len(_screens) - 1))
+        self._target_screen = _screens[_mon_idx]
+        screen = self._target_screen.geometry()
         self.ticker_height = self.settings.get('ticker_height', 60)
-        self.setGeometry(0, 0, screen.width(), self.ticker_height)
+        self.setGeometry(screen.x(), screen.y(), screen.width(), self.ticker_height)
         
         # Device pixel ratio – needed to create off-screen pixmaps at native
         # physical resolution so the compositor doesn't have to upscale them
         # (upscaling is what makes the font look blurry/compressed vs the preview).
-        self.dpr = QtWidgets.QApplication.primaryScreen().devicePixelRatio()
+        self.dpr = self._target_screen.devicePixelRatio()
 
         # Load custom LED board font
         self.font_family = load_custom_font()
@@ -906,6 +910,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.small_font.setPixelSize(max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3)
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
+        self.vs_font = QtGui.QFont(font_to_use)
+        self.vs_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.5)))
+        self.vs_font.setBold(True)
         
         # Animation timer - 60 FPS for smooth scrolling (started after intro finishes)
         self.scroll_timer = QtCore.QTimer()
@@ -965,7 +972,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         user32  = ctypes.windll.user32
 
         hwnd   = int(self.winId())
-        screen = QtWidgets.QApplication.primaryScreen()
+        screen = getattr(self, '_target_screen', QtWidgets.QApplication.primaryScreen())
         dpr    = screen.devicePixelRatio()
 
         # ── Physical height: read directly from the live HWND so we get the
@@ -1524,7 +1531,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             status_text = format_game_time_local(game.get('game_datetime'))
             
             status_width = time_metrics.horizontalAdvance(status_text) + 20
-            at_width = metrics.horizontalAdvance("@") + 10
+            vs_metrics = QtGui.QFontMetrics(self.vs_font)
+            at_width = vs_metrics.horizontalAdvance("vs.") + 10
             
             total_width = (away_block_width + 5 + logo_size + 10 + 
                           at_width + 10 + logo_size + 10 + home_block_width + 10 + 
@@ -1635,11 +1643,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawPixmap(x, logo_y, away_logo)
             x += logo_size + 20  # 20px before @ for symmetric centering
             
-            # @
-            painter.setFont(self.font)
-            painter.setPen(QtGui.QColor("#B1ABAB"))
-            painter.drawText(x, text_y, "@")
-            x += metrics.horizontalAdvance("@") + 15  # 15px after @ (symmetric)
+            # vs.
+            vs_metrics_paint = QtGui.QFontMetrics(self.vs_font)
+            vs_y = text_y
+            painter.setFont(self.vs_font)
+            painter.setPen(QtGui.QColor("#FFFFFF"))
+            painter.drawText(x, vs_y, "vs.")
+            x += vs_metrics_paint.horizontalAdvance("vs.") + 15  # 15px after vs. (symmetric)
             
             # Home logo
             home_logo = get_team_logo(home_team_full, logo_size)
@@ -2727,6 +2737,17 @@ class SettingsDialog(QtWidgets.QDialog):
         self.fps_check.setChecked(self.settings.get('show_fps_overlay', False))
         layout.addRow("Show FPS Overlay:", self.fps_check)
 
+        # Display selection
+        self.monitor_combo = QtWidgets.QComboBox()
+        _all_screens = QtWidgets.QApplication.screens()
+        for _i, _s in enumerate(_all_screens):
+            _g = _s.geometry()
+            _label = f"Display {_i + 1}: {_s.name()}  ({_g.width()}\u00d7{_g.height()})"
+            self.monitor_combo.addItem(_label)
+        _saved_mon = min(self.settings.get('monitor_index', 0), max(0, len(_all_screens) - 1))
+        self.monitor_combo.setCurrentIndex(_saved_mon)
+        layout.addRow("Display:", self.monitor_combo)
+
         widget.setLayout(layout)
         return widget
 
@@ -2941,6 +2962,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['glass_overlay'] = self.glass_check.isChecked()
         self.settings['background_opacity'] = self.opacity_spin.value()
         self.settings['show_fps_overlay'] = self.fps_check.isChecked()
+        self.settings['monitor_index'] = self.monitor_combo.currentIndex()
 
         # Network / proxy settings
         self.settings['use_proxy'] = self.use_proxy_check.isChecked()
