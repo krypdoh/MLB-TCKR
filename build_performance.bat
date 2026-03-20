@@ -65,26 +65,45 @@ echo [4/5] Cleaning up build artifacts...
 if exist mlb_ticker_utils_cython.c del mlb_ticker_utils_cython.c
 
 echo.
-echo [5/5] Rebuilding PyInstaller EXE with Cython bundled...
+echo [5/6] Rebuilding PyInstaller EXEs with Cython bundled...
 
 REM Confirm PyInstaller is available
 "%PYTHON_EXE%" -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
-    echo WARNING: PyInstaller not found. EXE not rebuilt.
+    echo WARNING: PyInstaller not found. EXEs not rebuilt.
     echo Run: pip install pyinstaller
-    echo Then rebuild manually: pyinstaller MLB-TCKR-console.spec
+    echo Then rebuild manually:
+    echo   pyinstaller MLB-TCKR-console.spec
+    echo   pyinstaller MLB-TCKR.spec
     goto :done
 )
 
+echo   Building MLB-TCKR-console.exe  (console visible)...
 "%PYTHON_EXE%" -m PyInstaller MLB-TCKR-console.spec --noconfirm
-if errorlevel 1 (
-    echo.
-    echo ========================================
-    echo PYINSTALLER BUILD FAILED!
-    echo ========================================
-    pause
-    exit /b 1
-)
+if not exist dist\MLB-TCKR-console.exe goto :fail_console
+
+echo.
+echo [6/6] Building MLB-TCKR.exe  (console hidden)...
+"%PYTHON_EXE%" -m PyInstaller MLB-TCKR.spec --noconfirm
+if not exist dist\MLB-TCKR.exe goto :fail_nogui
+
+goto :done
+
+:fail_console
+echo.
+echo ========================================
+echo PYINSTALLER BUILD FAILED! (console build)
+echo ========================================
+pause
+exit /b 1
+
+:fail_nogui
+echo.
+echo ========================================
+echo PYINSTALLER BUILD FAILED! (no-console build)
+echo ========================================
+pause
+exit /b 1
 
 :done
 echo.
@@ -95,6 +114,8 @@ echo.
 echo The MLB ticker will now run with Cython optimizations
 echo for ultra-smooth 60 FPS scrolling.
 echo.
-echo EXE location: dist\MLB-TCKR-console.exe
+echo EXE locations:
+echo   dist\MLB-TCKR-console.exe  (console window visible)
+echo   dist\MLB-TCKR.exe          (console window hidden)
 echo.
 pause

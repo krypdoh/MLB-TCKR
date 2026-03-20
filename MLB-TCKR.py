@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.03.16
+Date: 2026.0320.0908
 Version: 0.9 beta
 License: GNU AGPLv3
 
@@ -686,7 +686,7 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0):
     if _dc_key in _DIAMOND_CACHE:
         return _DIAMOND_CACHE[_dc_key]
 
-    total_width = size + 14  # Right gutter for inning indicator
+    total_width = size + 30  # Right gutter for inning indicator (enough for 3-char labels like "B15")
     pixmap = QtGui.QPixmap(int(total_width * dpr), int(size * dpr))
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(QtCore.Qt.transparent)
@@ -808,6 +808,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.cached_overlay = None
         self.last_height = 0
         self.last_bg_settings = {}
+        self._appbar_registered = False  # set True by setup_appbar(), cleared by remove_appbar()
         
         # Background data fetching
         self.data_worker = None
@@ -865,7 +866,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Enable hardware acceleration for smoother rendering
         self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, False)
-        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, False)
+        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
 
         # Enable mouse tracking for hover-to-pause functionality
         self.setMouseTracking(True)
@@ -1029,6 +1030,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Step 1: Register the appbar.
         shell32.SHAppBarMessage(ABM_NEW, ctypes.byref(abd))
+        self._appbar_registered = True
 
         # Step 2: Query — Windows adjusts rc.top downward past any existing
         #         AppBars / taskbar so our bar slots in below them, not on top.
@@ -1062,7 +1064,30 @@ class MLBTickerWindow(QtWidgets.QWidget):
               f"monitor phys=({phys_x},{phys_y},{phys_x+phys_width},{phys_y+phys_height}), "
               f"reserved phys=({abd.rc.left},{abd.rc.top},{abd.rc.right},{abd.rc.bottom}), "
               f"logical height={int((abd.rc.bottom - abd.rc.top) / dpr)}px")
-    
+
+    def remove_appbar(self):
+        """Unregister the AppBar and release the reserved desktop space.
+
+        Safe to call multiple times — guarded by _appbar_registered flag.
+        Also called via app.aboutToQuit so the reservation is freed even
+        when closeEvent is not delivered (common on Windows 10 when the
+        process exits via the tray Quit action).
+        """
+        if sys.platform != "win32":
+            return
+        if not getattr(self, '_appbar_registered', False):
+            return
+        self._appbar_registered = False
+        try:
+            shell32 = ctypes.windll.shell32
+            abd = APPBARDATA()
+            abd.cbSize = ctypes.sizeof(APPBARDATA)
+            abd.hWnd   = int(self.winId())
+            shell32.SHAppBarMessage(ABM_REMOVE, ctypes.byref(abd))
+            print("[AppBar] Unregistered — desktop space released")
+        except Exception as e:
+            print(f"[AppBar] Warning: ABM_REMOVE failed: {e}")
+
     def start_data_fetch(self):
         """Start background data fetch (non-blocking)"""
         # Don't start a new fetch if one is already running
@@ -1520,11 +1545,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
             
             score_width = metrics.horizontalAdvance("99")
             diamond_logical_width = int(diamond_pixmap.width() / self.dpr)
+            # _inning_text_right_phys is stored in logical coords (painter operates in logical space)
+            inning_text_right = getattr(diamond_pixmap, '_inning_text_right_phys', 0)
+            effective_after_diamond = max(diamond_logical_width, int(inning_text_right)) + 6
 
-            # Layout: Team, Logo, Score, Diamond, Score, Logo, Team
-            # Gaps mirror each other: name(5)logo(15)score(8)diamond(2)score(15)logo(5)name
+            # Layout: Team, Logo, Score, Diamond+gap, Score, Logo, Team
+            # Gaps mirror each other: name(5)logo(15)score(8)diamond+gap(6)score(15)logo(5)name
             total_width = (away_block_width + 5 + logo_size + 15 + 
-                          score_width + 8 + diamond_logical_width + 2 + 
+                          score_width + 8 + effective_after_diamond + 
                           score_width + 15 + logo_size + 5 + home_block_width)
         else:
             # Scheduled games only: Team Logo @ Logo Team Time
@@ -1594,13 +1622,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Diamond
             diamond_y = (self.ticker_height - int(diamond_pixmap.height() / self.dpr)) // 2 - 2
             painter.drawPixmap(x, diamond_y, diamond_pixmap)
-            # Guarantee a minimum 6 px gap after the inning indicator text.
-            # For long labels like "B15" the text extends further right than
-            # the base diamond geometry alone, so we measure it explicitly.
-            inning_text_right_phys = getattr(diamond_pixmap, '_inning_text_right_phys', 0)
-            inning_text_right_logical = inning_text_right_phys / self.dpr
-            home_score_x = max(x + diamond_logical_width, x + inning_text_right_logical) + 6
-            x = int(home_score_x)
+            x += effective_after_diamond
 
             # Home score (on same line as team name)
             painter.setFont(self.font)
@@ -1725,7 +1747,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         bg_opacity = settings.get('background_opacity', 230)
 
         # Use a tuple instead of a dict to avoid per-frame heap allocation
-        bg_key = (led_background, bg_opacity, self.height())
+        bg_key = (led_background, bg_opacity, self.width(), self.height())
         if self._cached_bg_key != bg_key or self.cached_background is None:
             self.cached_background = QtGui.QPixmap(self.width(), self.height())
             self.cached_background.fill(QtCore.Qt.transparent)
@@ -1874,14 +1896,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.data_worker.quit()
             self.data_worker.wait()
         
-        # Unregister AppBar
-        if sys.platform == "win32":
-            shell32 = ctypes.windll.shell32
-            abd = APPBARDATA()
-            abd.cbSize = ctypes.sizeof(APPBARDATA)
-            abd.hWnd = int(self.winId())
-            shell32.SHAppBarMessage(ABM_REMOVE, ctypes.byref(abd))
-        
+        # Unregister AppBar (guarded against double-call)
+        self.remove_appbar()
+
         event.accept()
 
     def mousePressEvent(self, event):
@@ -2364,8 +2381,8 @@ class StandingsWindow(QtWidgets.QWidget):
                 row_widget.setFixedWidth(self._div_width())
                 row_widget.setFixedHeight(self._ROW_H)
                 row_widget.setStyleSheet(
-                    "background: rgba(255,255,255,12);" if rank % 2 == 0
-                    else "background: transparent;"
+                    "background: rgba(255,255,255,35);" if rank % 2 == 0
+                    else "background: rgba(255,255,255,10);"
                 )
                 hl = QtWidgets.QHBoxLayout(row_widget)
                 hl.setContentsMargins(0, 0, 0, 0)
@@ -3028,7 +3045,11 @@ def main():
     print("="*60 + "\n")
     
     window = MLBTickerWindow()
-    
+
+    # Ensure AppBar reservation is always freed when the process exits,
+    # even on Windows 10 where closeEvent can arrive after the event loop ends.
+    app.aboutToQuit.connect(window.remove_appbar)
+
     # System tray icon: support bundled onefile/onedir assets and both ICO/PNG.
     runtime_base = getattr(sys, '_MEIPASS', None)
     icon_locations = [

@@ -1,6 +1,72 @@
 MLB-TCKR Changelog
 ==================
 
+Version 2.5.3 (2026-03-20)
+--------------------------
+Inning indicator overlap fix, Standings row contrast improvement
+
+FIXES:
+* Inning indicator text (e.g. "B15") could be clipped by or overlap the home
+  team logo in the ticker for extra-inning games
+  - Diamond pixmap right gutter widened from +14 px to +30 px, giving 3-char
+    inning labels (T10, B12, etc.) room to fully render within the pixmap
+  - build_game_pixmap now derives effective_after_diamond from the actual
+    inning text right-edge (already stored in logical px on the pixmap), so
+    both total_width and the drawing x-advance guarantee a clean 6 px gap
+    between the inning label and the home score regardless of DPR
+  - Removed an erroneous / self.dpr division on the inning_text_right value
+    that was under-counting the needed space on HiDPI displays
+
+IMPROVEMENTS:
+* Standings window alternating row backgrounds made more readable
+  - Even rows: rgba(255,255,255,12) → rgba(255,255,255,35) — clearly visible
+    as dark grey on the near-black window background (~14 % white vs. ~5 %)
+  - Odd rows: transparent → rgba(255,255,255,10) — a slight step above pure
+    black so each row type is visually distinct without harming dark team name
+    readability
+
+
+Version 2.5.2 (2026-03-20)
+--------------------------
+AppBar desktop space not freed on exit (Windows 10), dual EXE build
+
+FIXES:
+* Reserved desktop space not released on exit — reproducible on Windows 10
+  - Extracted ABM_REMOVE into a dedicated remove_appbar() method guarded by
+    an _appbar_registered flag (safe against double-calls)
+  - Connected app.aboutToQuit signal to remove_appbar() so the reservation is
+    always freed before the event loop exits, regardless of how quit was
+    triggered (tray menu, sys.exit, etc.)
+  - closeEvent still calls remove_appbar() as a secondary path; the flag
+    prevents double-removal if aboutToQuit already ran first
+  - On Windows 10 closeEvent could arrive after the event loop ended when
+    quitting via the tray icon; aboutToQuit fires synchronously first and is
+    the reliable guarantee on all Windows versions
+
+BUILD:
+* build_performance.bat now builds both EXE targets in one run
+  - MLB-TCKR-console.exe — console window visible (for diagnostics)
+  - MLB-TCKR.exe          — console window hidden (production)
+  - Both spec files (MLB-TCKR-console.spec / MLB-TCKR.spec) were already
+    correct; only the batch script was updated
+  - Failure detection uses file-existence checks instead of errorlevel so
+    PyInstaller warnings do not abort the second build
+
+
+Version 2.5.1 (2026-03-20)
+--------------------------
+LED black background fix
+
+FIXES:
+* Ticker background rendering as grey instead of the LED black gradient
+  - WA_NoSystemBackground was set to False, causing Qt to paint the system
+    palette colour (grey) onto the window surface before paintEvent ran;
+    corrected to True so only the custom dark gradient is drawn
+  - Background cache key now includes widget width (was height-only); prevents
+    stale narrower pixmap being reused on resize, which left grey unpainted
+    regions on the right side of the ticker
+
+
 Version 2.5.0 (2026-03-17)
 --------------------------
 Desktop reservation hardening, Standings overhaul, About dialog, context menu additions,
