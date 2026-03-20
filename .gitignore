@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+dist/
+*.exe
+*.pkg
+*.pyc
+__pycache__/
+# PyInstaller
+*.spec
+# C extensions build
+build/temp.*
+*.pyd
+# virtualenv
+venv/
+.env
