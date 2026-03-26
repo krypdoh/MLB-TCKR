@@ -1,8 +1,8 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0325.2200
-Version: 0.9.4 beta
+Date: 2026.0320.0908
+Version: 0.9 beta
 License: GNU AGPLv3
 
 Description:
@@ -606,43 +606,6 @@ def fetch_todays_games():
                     traceback.print_exc()
                     game_info['outs'] = 0
                     game_info['runners'] = {'first': False, 'second': False, 'third': False}
-            elif game_info['status'] in ['Final', 'Completed', 'Game Over']:
-                game_info['outs'] = 0
-                game_info['runners'] = {'first': False, 'second': False, 'third': False}
-                try:
-                    game_feed = statsapi.get('game', {'gamePk': game_info['game_id']})
-                    live_data = game_feed.get('liveData', {})
-                    players_map = {}
-                    for side in ['away', 'home']:
-                        team_players = (live_data.get('boxscore', {})
-                                        .get('teams', {}).get(side, {}).get('players', {}))
-                        if team_players:
-                            players_map.update(team_players)
-                    decisions = live_data.get('decisions', {})
-                    winner = decisions.get('winner', {})
-                    loser  = decisions.get('loser', {})
-                    if winner and loser:
-                        wp_id = winner.get('id')
-                        lp_id = loser.get('id')
-                        wp_era = format_era(get_player_stat(players_map, wp_id, 'pitching', 'era'))
-                        wp_w   = get_player_stat(players_map, wp_id, 'pitching', 'wins')
-                        wp_l   = get_player_stat(players_map, wp_id, 'pitching', 'losses')
-                        wp_rec = f"{wp_w}-{wp_l}" if (wp_w is not None and wp_l is not None) else "-"
-                        lp_era = format_era(get_player_stat(players_map, lp_id, 'pitching', 'era'))
-                        lp_w   = get_player_stat(players_map, lp_id, 'pitching', 'wins')
-                        lp_l   = get_player_stat(players_map, lp_id, 'pitching', 'losses')
-                        lp_rec = f"{lp_w}-{lp_l}" if (lp_w is not None and lp_l is not None) else "-"
-                        wp_text = f"WP: {format_last_name(winner)} {wp_era} {wp_rec}"
-                        lp_text = f"LP: {format_last_name(loser)} {lp_era} {lp_rec}"
-                        if game_info['away_score'] > game_info['home_score']:
-                            game_info['away_subtext'] = wp_text
-                            game_info['home_subtext'] = lp_text
-                        else:
-                            game_info['home_subtext'] = wp_text
-                            game_info['away_subtext'] = lp_text
-                        print(f"[MLB] Final decisions — {wp_text} | {lp_text}")
-                except Exception as e:
-                    print(f"[MLB] Could not get final game decisions: {e}")
             else:
                 game_info['outs'] = 0
                 game_info['runners'] = {'first': False, 'second': False, 'third': False}
@@ -673,7 +636,7 @@ def fetch_todays_games():
         
     except Exception as e:
         print(f"[MLB ERROR] Failed to fetch games: {e}")
-        raise  # Re-raise so GameDataWorker can emit fetch_error instead of empty list
+        return []
 
 
 def format_game_time_local(game_datetime):
@@ -699,16 +662,11 @@ def format_game_time_local(game_datetime):
 class GameDataWorker(QtCore.QThread):
     """Background thread for fetching game data without blocking UI"""
     data_fetched = QtCore.pyqtSignal(list)  # Signal to emit fetched game data
-    fetch_error = QtCore.pyqtSignal()       # Emitted when a network/API error prevents fetch
     
     def run(self):
         """Fetch game data in background thread"""
-        try:
-            games = fetch_todays_games()
-            self.data_fetched.emit(games)
-        except Exception as e:
-            print(f"[MLB WORKER] Fetch failed — emitting fetch_error: {e}")
-            self.fetch_error.emit()
+        games = fetch_todays_games()
+        self.data_fetched.emit(games)
 
 
 def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0):
@@ -859,12 +817,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.is_fetching = False
         self.waiting_for_next_day = False
         self.last_fetch_date = None
-
-        # Network resilience: keep last-known-good games for display during outages
-        self._cached_games = []    # Last successful fetch result
-        self._data_delayed = False  # True while showing stale data due to network error
-        self._no_data_mode = False  # True when no internet; False when confirmed no games
-        self._message_text = ''    # Last message built into the no-games pixmap (detects changes)
 
         # Per-game and ticker-level render caches
         self._game_pixmap_cache = {}  # game_id → (fingerprint_tuple, QPixmap)
@@ -1149,132 +1101,32 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.is_fetching = True
         self.data_worker = GameDataWorker()
         self.data_worker.data_fetched.connect(self.on_data_received)
-        self.data_worker.fetch_error.connect(self.on_fetch_error)
         self.data_worker.finished.connect(self.on_fetch_complete)
         self.data_worker.start()
     
-    def on_fetch_error(self):
-        """Network/API error: keep cached games visible with a 'Data Delayed' badge.
-        If there is no cache yet (first-ever launch with no internet), show the
-        no-games message so the ticker bar is never completely blank."""
-        if not self._cached_games:
-            print("[MLB] Fetch error with no cache — showing no-data message")
-            self._no_data_mode = True
-            # Build the no-data pixmap so the bar isn't blank
-            self.games = []
-            self.build_ticker_pixmap()
-            if self.ticker_pixmap:
-                raw_speed = self.settings.get('speed', 2)
-                self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-                # _scroll_max_width is set inside build_ticker_pixmap
-            self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-            # Slow down retries while offline (no point hammering every 10 s)
-            self._reschedule_update_timer()
-            # Kick off the intro animation on the first no-cache error
-            if self.intro_active and not self.intro_timer_started:
-                self.intro_timer_started = True
-                QtCore.QTimer.singleShot(2000, self._start_intro)
-                print("[INTRO] Ticker ready (no-data path) — intro will start in 2 s")
-            self.update()
-            return
-        print("[MLB] Fetch error — showing cached data with Data Delayed indicator")
-        self._data_delayed = True
-        self.games = self._cached_games
-        # Force a pixmap rebuild to add the delay banner
-        self._last_ticker_fp = None
-        new_fp = self._games_fingerprint()
-        self._last_ticker_fp = new_fp
-        self.build_ticker_pixmap()
-        if self.ticker_pixmap:
-            raw_speed = self.settings.get('speed', 2)
-            self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-            # _scroll_max_width is set inside build_ticker_pixmap
-        self.update()
-
-    def _reschedule_update_timer(self):
-        """Compute the right polling interval from current game states and apply it.
-
-        Rules:
-          - Any game In Progress / Live          → normal interval (user setting)
-          - Any game starting within 2 minutes   → normal interval
-          - All games Final / done               → stop; switch to next-day mode
-          - Otherwise (scheduled, >2 min away)   → idle: poll every 5 minutes
-        """
-        live_statuses  = {'In Progress', 'Live'}
-        final_statuses = {'Final', 'Completed', 'Game Over'}
-        normal_ms = self.settings.get('update_interval', 10) * 1000
-        idle_ms   = 300_000  # 5 minutes
-
-        has_live  = any(g.get('status') in live_statuses  for g in self.games)
-        all_final = bool(self.games) and all(
-            g.get('status') in final_statuses for g in self.games
-        )
-
-        # Resume from next-day mode if new games appeared
-        if self.waiting_for_next_day and not all_final:
-            print("[MLB] New day's games detected — resuming normal updates")
-            self.waiting_for_next_day = False
-            self.next_day_timer.stop()
-
-        if all_final and not self.waiting_for_next_day:
-            print("[MLB] All games finished — switching to next-day polling")
-            self.waiting_for_next_day = True
-            self.update_timer.stop()
-            self.next_day_timer.start()
-            return
-
-        if self.waiting_for_next_day:
-            return  # next_day_timer is already running
-
-        if has_live:
-            interval_ms = normal_ms
-            label = f"live ({normal_ms // 1000}s)"
-        else:
-            # Check whether any scheduled game starts within 2 minutes
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            soon = False
-            for g in self.games:
-                if g.get('status') in final_statuses:
-                    continue
-                gdt = g.get('game_datetime')
-                if not gdt:
-                    continue
-                try:
-                    dt_str = str(gdt)
-                    if dt_str.endswith('Z'):
-                        dt = datetime.datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-                    else:
-                        dt = datetime.datetime.fromisoformat(dt_str)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=datetime.timezone.utc)
-                    if abs((dt - now_utc).total_seconds()) <= 120:
-                        soon = True
-                        break
-                except Exception:
-                    pass
-            if soon:
-                interval_ms = normal_ms
-                label = f"pre-game soon ({normal_ms // 1000}s)"
-            else:
-                interval_ms = idle_ms
-                label = "idle (300s)"
-
-        self.update_timer.stop()
-        self.update_timer.start(interval_ms)
-        print(f"[MLB] Polling interval → {label}")
-
     def on_data_received(self, games):
         """Handle newly fetched game data (runs on main thread)"""
-        # Successful fetch — update cache and clear any delayed-data flag
-        self._cached_games = games
-        self._no_data_mode = False  # Connectivity restored
-        if self._data_delayed:
-            self._data_delayed = False
-            self._last_ticker_fp = None  # Force rebuild to remove the delay banner
         self.games = games
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
+        
+        # Check if all games are finished
+        all_finished = self.check_all_games_finished()
+        
+        # If we were waiting for next day and found new games, resume normal updates
+        if self.waiting_for_next_day and not all_finished:
+            print("[MLB] New day's games detected, resuming normal updates")
+            self.waiting_for_next_day = False
+            self.next_day_timer.stop()
+            self.update_timer.start(self.settings.get('update_interval', 10) * 1000)
+        
+        # If all games just finished, switch to next-day mode
+        elif all_finished and not self.waiting_for_next_day:
+            print("[MLB] All games finished for today, switching to next-day polling")
+            self.waiting_for_next_day = True
+            self.update_timer.stop()  # Stop frequent polling
+            self.next_day_timer.start()  # Start checking for next day
+        
         self.last_fetch_date = current_date
-        self._reschedule_update_timer()
 
         # Only rebuild when displayed data has actually changed, avoiding the
         # brief main-thread stall on every refresh where nothing is different.
@@ -1285,8 +1137,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if self.ticker_pixmap:
                 raw_speed = self.settings.get('speed', 2)
                 self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-                # _scroll_max_width is set inside build_ticker_pixmap
-            self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                self._scroll_max_width = (self.ticker_pixmap.width() / self.dpr) / 2.0
+            self._last_frame_ms = self._elapsed_timer.elapsed()
 
         # First time the ticker is ready: schedule intro to start after 2 s
         if self.intro_active and not self.intro_timer_started:
@@ -1353,7 +1205,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Font: use Ozone-xRRO for the intro, fall back to ticker font
         ozone_family = load_ozone_font() or self.font_family
         intro_font = QtGui.QFont(ozone_family)
-        intro_font.setPixelSize(max(12, int(h_phys * 0.35 * 1.875)))  # size in physical px
+        intro_font.setPixelSize(max(12, int(h_phys * 0.35 * 1.5)))  # size in physical px
         intro_font.setBold(True)
 
         text = "MLB-TCKR"
@@ -1494,9 +1346,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 # Start from off-screen right so the ticker scrolls in from the edge
                 self.scroll_offset = -float(self.width())
                 # Reset elapsed timer so first delta_ms is sane after the intro pause
-                self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                self._last_frame_ms = self._elapsed_timer.elapsed()
                 # Kick off normal scrolling now that intro is finished
-                self.scroll_timer.start(8)
+                self.scroll_timer.start(16)
                 print("[INTRO] Complete — starting ticker scroll from off-screen right")
 
         self.update()
@@ -1522,41 +1374,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def build_ticker_pixmap(self):
         """Build the complete ticker pixmap with all games"""
         if not self.games:
-            # No games today OR no network data — pick the right message
-            if self._no_data_mode:
-                text = "No data — check network connection"
-            else:
-                text = "No MLB games scheduled today"
-
-            metrics = QtGui.QFontMetrics(self.font)
-            text_w = metrics.horizontalAdvance(text)
-            margin_l = 40
-            margin_r = 120  # gap after the text before the next loop copy
-            win_w = max(self.width(), 100)
-            # Make each segment at least as wide as the window so only ONE copy of
-            # the text is ever visible at a time — no "3 copies" side-by-side.
-            segment_w = max(margin_l + text_w + margin_r, win_w + margin_r)
-            # Tile enough copies to guarantee the pixmap always fills the window
-            # even after the seamless offset-0 wrap.
-            num_copies = max(2, (win_w // segment_w) + 2)
-            full_w = segment_w * num_copies
-            self.ticker_pixmap = QtGui.QPixmap(int(full_w * self.dpr), int(self.ticker_height * self.dpr))
+            # No games today
+            width = 800
+            self.ticker_pixmap = QtGui.QPixmap(int(width * self.dpr), int(self.ticker_height * self.dpr))
             self.ticker_pixmap.setDevicePixelRatio(self.dpr)
             self.ticker_pixmap.fill(QtCore.Qt.black)
-            text_y = (self.ticker_height + metrics.ascent() - metrics.descent()) // 2
+            
             painter = QtGui.QPainter(self.ticker_pixmap)
             painter.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
             painter.setFont(self.font)
             painter.setPen(QtGui.QColor('#FFFFFF'))
-            for i in range(num_copies):
-                painter.drawText(i * segment_w + margin_l, text_y, text)
+            text = "No MLB games scheduled today"
+            metrics = QtGui.QFontMetrics(self.font)
+            text_y = (self.ticker_height + metrics.ascent() - metrics.descent()) // 2
+            painter.drawText(40, text_y, text)
             painter.end()
-            self._scroll_max_width = float(segment_w)
-            # Only reset the scroll position when the message itself has changed
-            # (avoids jarring off-screen snap on every periodic re-fetch failure).
-            if text != self._message_text:
-                self._message_text = text
-                self.scroll_offset = -float(win_w)
             return
         
         # MLB logo shown at the start of each ticker loop
@@ -1595,19 +1427,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
             game_pixmaps.append(pixmap)
             # pixmap.width() is physical pixels; divide by dpr to get logical width
             total_width += int(pixmap.width() / self.dpr) + spacing
-
-        # Tile enough copies so the window is always fully covered at any scroll offset.
-        # num_copies >= 2 ensures the seamless loop works even when content > window.
-        win_w = max(self.width(), 1)
-        num_copies = max(2, (win_w // total_width) + 2)
-        self.ticker_pixmap = QtGui.QPixmap(int(total_width * num_copies * self.dpr), int(self.ticker_height * self.dpr))
+        
+        # Create full ticker pixmap (double width for seamless scrolling)
+        self.ticker_pixmap = QtGui.QPixmap(int(total_width * 2 * self.dpr), int(self.ticker_height * self.dpr))
         self.ticker_pixmap.setDevicePixelRatio(self.dpr)
         self.ticker_pixmap.fill(QtCore.Qt.transparent)
-
+        
         painter = QtGui.QPainter(self.ticker_pixmap)
-
-        # Draw all copies for seamless tiled loop
-        for repeat in range(num_copies):
+        
+        # Draw games twice for seamless loop
+        for repeat in [0, 1]:
             x_offset = repeat * total_width
 
             # MLB logo at the head of each repetition
@@ -1620,10 +1449,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 logical_width = int(pixmap.width() / self.dpr)
                 painter.drawPixmap(x_offset, 0, pixmap)
                 x_offset += logical_width + spacing
-
+        
         painter.end()
-        # One content-width is the loop period regardless of how many copies were tiled.
-        self._scroll_max_width = float(total_width)
 
     def _load_mlb_logo(self, logo_size):
         """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware (cached)."""
@@ -1677,7 +1504,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         away_record = game.get('away_record', '0-0')
         home_record = game.get('home_record', '0-0')
         show_records = self.settings.get('show_team_records', True)
-        live_subtext_enabled = status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']
+        live_subtext_enabled = status in ['In Progress', 'Live']
 
         away_subtext = game.get('away_subtext') if live_subtext_enabled else None
         home_subtext = game.get('home_subtext') if live_subtext_enabled else None
@@ -1881,13 +1708,27 @@ class MLBTickerWindow(QtWidgets.QWidget):
         return pixmap
     
     def update_scroll(self):
-        """Trigger a repaint; scroll position is computed at actual render time
-        inside paintEvent to avoid timer-callback lag and missed-tick jumps."""
+        """Advance scroll offset using real elapsed time (delta-time).
+
+        Using actual milliseconds elapsed instead of a fixed per-tick step
+        makes the scroll rate independent of Windows timer jitter, eliminating
+        the periodic judder caused by ~15.6 ms timer resolution.
+        """
         if not self.ticker_pixmap or self._scroll_max_width == 0:
             return
 
-        # FPS counter: count timer firings (≈ render rate)
-        now_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        now_ms = self._elapsed_timer.elapsed()
+        delta_ms = now_ms - self._last_frame_ms
+        self._last_frame_ms = now_ms
+
+        # Clamp delta to avoid a large jump after a pause/hover resume
+        delta_ms = min(delta_ms, 100)
+
+        self.scroll_offset += self._scroll_speed_px_per_ms * delta_ms
+        if self.scroll_offset >= self._scroll_max_width:
+            self.scroll_offset = 0.0
+
+        # FPS counter: update display value once per second
         self._fps_frame_count += 1
         elapsed_since = now_ms - self._fps_last_ms
         if elapsed_since >= 1000:
@@ -1900,9 +1741,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def paintEvent(self, event):
         """Optimized paint event with cached backgrounds"""
         painter = QtGui.QPainter(self)
-        # Antialiasing is off for backgrounds/overlays (pixel-perfect blits).
-        # SmoothPixmapTransform is enabled only for the scrolling ticker blit
-        # so it can be positioned at sub-pixel offsets without quantization stutter.
+        # No Antialiasing/SmoothPixmapTransform: we're blitting pre-rendered
+        # pixel-perfect HiDPI pixmaps — filtering adds GPU overhead for zero gain.
 
         # Always draw the dark background first so the bar is never transparent/white
         settings = self.settings  # already in memory — never read disk inside paintEvent
@@ -1953,24 +1793,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.end()
             return
 
-        # Advance scroll position at actual render time so the displayed position
-        # is accurate to *this frame*, not to when the timer callback fired.
-        # nsecsElapsed() gives float-ms precision; elapsed() only returns integer ms
-        # which causes ~6% delta error at 16 ms frame intervals.
-        render_now_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-        if not self.is_hovered and not self.scroll_paused and self._scroll_speed_px_per_ms > 0:
-            delta_ms = min(render_now_ms - self._last_frame_ms, 100)
-            self.scroll_offset += self._scroll_speed_px_per_ms * delta_ms
-            if self.scroll_offset >= self._scroll_max_width:
-                self.scroll_offset = 0.0
-        self._last_frame_ms = render_now_ms
-
-        # Draw ticker at the nearest physical-pixel boundary.
-        # Rounding to 1/dpr logical pixels means Qt composites at an exact physical
-        # pixel — no bilinear filtering, no per-frame sharpness variation, smooth
-        # motion at DPR×1 resolution (0.5 logical-px steps at DPR 2, etc.).
-        phys_x = round(self.scroll_offset * self.dpr) / self.dpr
-        painter.drawPixmap(QtCore.QPointF(-phys_x, 0), self.ticker_pixmap)
+        # Draw scrolling ticker with optimized pixel positioning
+        pixel_x = get_pixel_position(self.scroll_offset)
+        painter.drawPixmap(-pixel_x, 0, self.ticker_pixmap)
 
         # Cache overlay if settings haven't changed
         if glass_overlay:
@@ -1993,20 +1818,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self.last_height = self.height()
 
             painter.drawPixmap(0, 0, self.cached_overlay)
-
-        # "Data Delayed" badge — amber text at top-right when showing stale data
-        if self._data_delayed:
-            delay_text = "DATA DELAYED"
-            painter.setFont(self.small_font)
-            fm_d = QtGui.QFontMetrics(self.small_font)
-            dw = fm_d.horizontalAdvance(delay_text)
-            dh = fm_d.height()
-            margin = 6
-            dx = self.width() - dw - margin
-            dy = dh + margin - 2
-            painter.fillRect(dx - 3, margin - 2, dw + 6, dh + 2, QtGui.QColor(0, 0, 0, 160))
-            painter.setPen(QtGui.QColor('#FFA500'))
-            painter.drawText(dx, dy, delay_text)
 
         # FPS overlay — bottom-right corner, bright green, small_font
         if settings.get('show_fps_overlay', False) and self._fps_display > 0:
@@ -2035,8 +1846,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Resume scrolling when mouse leaves ticker"""
         self.is_hovered = False
         if not self.intro_active and not self.scroll_paused:
-            self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0  # reset baseline to avoid jump
-            self.scroll_timer.start(8)  # ≥120 Hz tick ensures vsync always has a fresh frame
+            self._last_frame_ms = self._elapsed_timer.elapsed()  # reset baseline to avoid jump
+            self.scroll_timer.start(16)  # Resume 60 FPS scrolling
         super().leaveEvent(event)
 
     def keyPressEvent(self, event):
@@ -2070,8 +1881,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 print("[KB] Scroll paused")
             else:
                 if not self.intro_active and not self.is_hovered:
-                    self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-                    self.scroll_timer.start(8)
+                    self._last_frame_ms = self._elapsed_timer.elapsed()
+                    self.scroll_timer.start(16)
                 print("[KB] Scroll unpaused")
         else:
             super().keyPressEvent(event)
@@ -2124,8 +1935,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self.scroll_timer.stop()
             else:
                 if not self.intro_active and not self.is_hovered:
-                    self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-                    self.scroll_timer.start(8)
+                    self._last_frame_ms = self._elapsed_timer.elapsed()
+                    self.scroll_timer.start(16)
         pause_action.triggered.connect(_toggle_pause)
 
         menu.addSeparator()
@@ -2720,7 +2531,7 @@ class AboutDialog(QtWidgets.QDialog):
         outer.addWidget(_lbl("MLB-TCKR", 52, "#FFFFFF", bold=True, bot_pad=4))
 
         # Version
-        outer.addWidget(_lbl("Version 0.9.4 Beta", 22, "#AAAAAA", bot_pad=14))
+        outer.addWidget(_lbl("Version 0.9 Beta", 22, "#AAAAAA", bot_pad=14))
 
         # Green rule
         rule = QtWidgets.QFrame()
@@ -2731,7 +2542,7 @@ class AboutDialog(QtWidgets.QDialog):
 
         # Credits block
         outer.addWidget(_lbl("Created by: Paul R. Charovkine",  20, "#DDDDDD", bot_pad=4,  family=record_family))
-        outer.addWidget(_lbl("Copyright \u00a9 2026\nAll Rights Reserved", 18, "#AAAAAA", bot_pad=4,  family=record_family))
+        outer.addWidget(_lbl("Copyright \u00a9 2026 — All Rights Reserved", 18, "#AAAAAA", bot_pad=4,  family=record_family))
         outer.addWidget(_lbl("License: GNU AGPLv3",              18, "#AAAAAA", bot_pad=16, family=record_family))
 
         # Website (clickable)
@@ -2758,9 +2569,9 @@ class AboutDialog(QtWidgets.QDialog):
 
         # Disclaimer
         outer.addWidget(_lbl(
-            "Major League Baseball trademarks, team names, logos, and related marks"
-            "are the property of their respective owners.\n\n"
-            "MLB-TCKR is an independent fan project and is not affiliated "
+            "Major League Baseball trademarks, team names, logos, and related marks\n"
+            "are the property of their respective owners.\n"
+            "MLB-TCKR is an independent fan project and is not affiliated\n"
             "with or endorsed by Major League Baseball.",
             14, "#777777", bot_pad=16, family=record_family
         ))
@@ -3207,14 +3018,6 @@ class SettingsDialog(QtWidgets.QDialog):
 
 
 def main():
-    # Set Windows multimedia timer resolution to 1 ms so QTimer(8 ms) fires
-    # accurately instead of at the default 15.6 ms system-clock granularity.
-    # The OS automatically restores the previous resolution when the process exits.
-    try:
-        ctypes.windll.winmm.timeBeginPeriod(1)
-    except Exception:
-        pass
-
     # Must be set before QApplication is created so Qt renders at native DPI
     # instead of letting Windows stretch a low-DPI bitmap (fixes font compression
     # at display scales like 125%, 150%, 200%, etc.)
@@ -3296,23 +3099,6 @@ def main():
 
     tray_menu.addSeparator()
 
-    pause_action = tray_menu.addAction("Pause Ticker")
-    def _tray_toggle_pause():
-        window.scroll_paused = not window.scroll_paused
-        if window.scroll_paused:
-            window.scroll_timer.stop()
-        else:
-            if not window.intro_active and not window.is_hovered:
-                window._last_frame_ms = window._elapsed_timer.nsecsElapsed() / 1_000_000.0
-                window.scroll_timer.start(8)
-    pause_action.triggered.connect(_tray_toggle_pause)
-
-    def _update_tray_pause_label():
-        pause_action.setText("Unpause Ticker" if window.scroll_paused else "Pause Ticker")
-    tray_menu.aboutToShow.connect(_update_tray_pause_label)
-
-    tray_menu.addSeparator()
-
     standings_action = tray_menu.addAction("Standings...")
 
     def open_standings():
@@ -3332,11 +3118,6 @@ def main():
 
     settings_action = tray_menu.addAction("Settings...")
     settings_action.triggered.connect(lambda: SettingsDialog(window).exec_())
-
-    tray_menu.addSeparator()
-
-    about_action = tray_menu.addAction("About MLB-TCKR...")
-    about_action.triggered.connect(lambda: AboutDialog(window).exec_())
     
     tray_menu.addSeparator()
     

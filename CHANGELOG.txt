@@ -1,6 +1,136 @@
 MLB-TCKR Changelog
 ==================
 
+Version 2.5.5 (2026-03-25)
+--------------------------
+Scroll judder eliminated — glass-smooth motion at all speeds
+
+IMPROVEMENTS:
+* Completely eliminated the constant ~2.5 Hz scroll judder visible at all speeds
+  and the irregular position jumps more noticeable at higher speeds.
+  Four compounding root causes were identified and fixed:
+
+  1. Sub-pixel quantization stutter (the primary ~2.5 Hz pattern)
+     - At speed=2 the ticker advanced ~0.96 px/frame; floor(0.96)=0, so the
+       ticker held the same pixel column for two consecutive frames then jumped.
+       This repeated every 25 frames (~400 ms = 2.5 Hz) exactly matching what
+       was observed.
+     - Fixed by drawing with QPointF and physical-pixel quantization:
+       phys_x = round(offset * dpr) / dpr
+       This snaps to the nearest physical pixel (0.5 logical-px steps at DPR 2)
+       with zero bilinear filtering or per-frame sharpness variation.
+
+  2. Timer-callback lag
+     - Scroll position was computed when the QTimer fired, but paintEvent ran
+       some milliseconds later. A busy event loop caused late ticks to produce
+       double-sized position jumps on the next frame.
+     - Fixed by moving delta-time position computation into paintEvent itself,
+       so the displayed position is accurate to the exact moment of rendering.
+
+  3. Integer millisecond precision (QElapsedTimer::elapsed())
+     - elapsed() returns qint64 integer ms giving ±1 ms (~6% error at 16 ms
+       intervals), causing alternating short/long deltas each frame.
+     - Fixed by switching to nsecsElapsed() / 1_000_000.0 everywhere for
+       sub-microsecond float-ms precision.
+
+  4. Windows system timer resolution (15.6 ms default)
+     - Even with Qt.PreciseTimer, the OS clock granularity meant the 8 ms
+       timer fired at wildly inconsistent intervals.
+     - Fixed by calling timeBeginPeriod(1) at startup (ctypes, already imported)
+       to set the Windows multimedia timer resolution to 1 ms. The OS restores
+       the previous resolution automatically when the process exits.
+
+* Timer interval reduced from 16 ms to 8 ms (~120 Hz tick rate)
+  - At 16 ms, a single late/coalesced tick caused a missed vsync and the next
+    tick produced a double-sized position jump that was visible as judder.
+  - At 8 ms, multiple update() calls are always queued when vsync fires so
+    no frames are skipped. Qt coalesces them into a single paint anyway.
+
+ROOT CAUSE ANALYSIS:
+  The judder had two initial compounding problems identified in the first pass,
+  then two more discovered in the second pass:
+
+  Pass 1 — What was causing it (initial diagnosis):
+
+  Problem 1: Sub-pixel quantization stutter (~2.5 Hz)
+    At speed=2, the scroll moved ~0.96 px/frame. floor(0.96) = 0, so the ticker
+    stayed locked at the same pixel column for two consecutive frames — then
+    jumped 1 pixel. Since 0.96 = 24/25, this repeated every 25 frames = 400 ms
+    ≈ 2.5 Hz. Exactly what was seen. Fixed by moving to QPointF drawing so the
+    blit could be positioned at fractional-pixel offsets.
+
+  Problem 2: Timer-callback lag + double-pixel catch-up jumps
+    Scroll position was computed in update_scroll() at the moment the QTimer
+    fired, but paintEvent() ran some milliseconds later. When the event loop was
+    briefly busy, a tick fired late — the next tick then had a double-sized
+    delta, skipping 2 pixels at once and producing an irregular secondary judder
+    on top of the 2.5 Hz pattern. Fixed by moving delta-time computation into
+    paintEvent itself, so position is accurate to the actual render moment.
+
+  Pass 2 — Residual judder at higher speeds (second diagnosis):
+
+  Problem 3: QElapsedTimer::elapsed() integer quantization
+    elapsed() returns a qint64 integer millisecond count. At ~16 ms frame
+    intervals, ±1 ms is a ~6% error per delta — alternating frames computed
+    delta_ms=15 and delta_ms=17, creating a slight but consistent advance
+    irregularity. Fixed by switching to nsecsElapsed() / 1_000_000.0 for
+    sub-microsecond float-ms precision.
+
+  Problem 4: Windows 15.6 ms system clock granularity
+    Even with Qt.PreciseTimer, the Windows default multimedia timer resolution
+    is 15.625 ms. An 8 ms QTimer would fire at either 0 ms or 15.6 ms — wildly
+    inconsistent. Fixed by calling timeBeginPeriod(1) at startup via ctypes
+    (winmm.dll, already present) so the system clock ticks every 1 ms, making
+    the 8 ms timer fire within ±1 ms of target. OS auto-restores on exit.
+
+
+Version 2.5.4 (2026-03-25)
+--------------------------
+Smart polling, seamless ticker tiling, network resilience, WP/LP final display
+
+FEATURES:
++ Smart polling intervals — no longer fetches at a fixed rate regardless of game state
+  - Any game In Progress / Live              → normal interval (user setting, default 10 s)
+  - Any scheduled game starting within 2 min → normal interval (pre-game urgency window)
+  - All games scheduled and >2 min away      → idle mode: poll every 5 minutes
+  - All games Final                          → stop update_timer; hand off to next-day mode
+  - Interval is re-evaluated after every successful fetch via _reschedule_update_timer()
+
++ Winning/Losing pitcher line on Final games
+  - When a game ends, the live P: / AB: subtext is replaced with:
+      WP: LastName ERA W-L   (under the winning team)
+      LP: LastName ERA W-L   (under the losing team)
+  - Data sourced from liveData.decisions (winner/loser) and boxscore seasonStats
+  - Falls back gracefully if decisions are not yet available in the API response
+
++ Network resilience — ticker stays visible during internet outages
+  - Last successful fetch is cached in _cached_games
+  - On a network/API failure, cached games are shown unchanged and a small
+    amber "DATA DELAYED" badge appears in the top-right corner of the bar
+  - When connectivity resumes the badge is automatically removed on next
+    successful fetch without requiring a restart
+  - First-launch with no connectivity shows the "No MLB games scheduled today"
+    message until data can be obtained
+
+FIXES:
+* "No MLB games scheduled today" message started mid-screen instead of scrolling in
+  from the right edge
+  - Fixed by resetting scroll_offset to -window_width after building the no-games
+    pixmap, matching the same off-screen-right start used by normal game content
+
+* With only 1–2 games the ticker showed a large blank gap followed by a hard reset
+  - Root cause: double-width pixmap strategy only works when total_width ≥ window_width;
+    shorter content left visible blank regions and the offset-0 wrap produced a visible jump
+  - Fix: build_ticker_pixmap now computes num_copies = max(2, window_width // total_width + 2)
+    and tiles that many complete content repetitions so the pixmap always covers
+    (window_width + total_width) pixels — the window is fully covered at every scroll position
+  - _scroll_max_width is now set inside build_ticker_pixmap (= one total_width period)
+    rather than derived from the pixmap's physical width, making the loop period correct
+    regardless of how many copies were tiled
+  - scroll wrap always returns to 0.0 (seamless); the previous "jump to -window_width"
+    workaround for narrow content is removed
+
+
 Version 2.5.3 (2026-03-20)
 --------------------------
 Inning indicator overlap fix, Standings row contrast improvement
