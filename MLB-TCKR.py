@@ -1,8 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0327.2010
-Version: 0.9.6 beta
+Date: 2026.0328.1744
 License: GNU AGPLv3
 
 Description:
@@ -10,6 +9,8 @@ MLB ticker application that displays live baseball game data in a scrolling tick
 Shows team logos, scores, runners on base, outs, innings, and game times just like a
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
+
+VERSION = "0.9.9 beta"
 
 import warnings
 warnings.filterwarnings(
@@ -30,6 +31,25 @@ except Exception:
 
 import sys
 import os
+
+# Fix certifi CA bundle path when running as PyInstaller executable
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # The runtime hook (pyi_rth_mlb_qt.py) caches cacert.pem to AppData
+    # and sets REQUESTS_CA_BUNDLE before this code runs.  Trust that value
+    # if it already points to a real file — this protects against the parent
+    # process deleting _MEIPASS before the child finishes.
+    _existing_ca = os.environ.get('REQUESTS_CA_BUNDLE', '')
+    if _existing_ca and os.path.isfile(_existing_ca):
+        print(f"[SSL] CA bundle set to: {_existing_ca}")
+    else:
+        # Hook didn't cache it (shouldn't happen) — fall back to _MEIPASS
+        _ca_bundle_path = os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem')
+        if os.path.isfile(_ca_bundle_path):
+            os.environ['REQUESTS_CA_BUNDLE'] = _ca_bundle_path
+            os.environ['SSL_CERT_FILE'] = _ca_bundle_path
+            print(f"[SSL] CA bundle set to: {_ca_bundle_path}")
+        else:
+            print(f"[SSL WARNING] CA bundle not found at: {_ca_bundle_path}")
 import subprocess
 import json
 import math
@@ -67,6 +87,7 @@ except ImportError as _cython_err:
     
     def adjust_speed_for_framerate(base_speed, target_fps, base_fps=30):
         return base_speed * (base_fps / target_fps)
+
 
 # Configuration
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "MLB-TCKR")
@@ -145,6 +166,8 @@ def get_settings():
         "ticker_height": 64,
         "font": "Ozone",
         "font_scale_percent": 175,
+        "player_info_font": "Gotham Black",  # Font for W-L records, pitcher/batter names, pitch counts
+        "player_font_scale_percent": 75,  # Scale for player info fonts (W-L, names, pitch counts)
         "show_team_records": True,
         "show_team_cities": False,
         "include_final_games": True,
@@ -247,11 +270,27 @@ def apply_proxy_settings():
     if settings.get('use_cert') and cert_file and os.path.exists(cert_file):
         # User specified a custom certificate file — point requests at it explicitly.
         os.environ['REQUESTS_CA_BUNDLE'] = cert_file
+        os.environ['SSL_CERT_FILE'] = cert_file
         print(f"[PROXY] Certificate: {cert_file}")
     else:
-        # No custom cert specified — clear the override so that pip_system_certs
-        # (if installed) or requests' default CA bundle handles verification.
-        os.environ.pop('REQUESTS_CA_BUNDLE', None)
+        # No custom cert — restore the AppData-cached cacert.pem so that
+        # requests always has a working path even after _MEIPASS is deleted.
+        _local = os.environ.get('LOCALAPPDATA', '')
+        _appdata_cacert = (
+            os.path.join(_local, 'MLB-TCKR', 'certifi', 'cacert.pem')
+            if _local else ''
+        )
+        if _appdata_cacert and os.path.isfile(_appdata_cacert):
+            os.environ['REQUESTS_CA_BUNDLE'] = _appdata_cacert
+            os.environ['SSL_CERT_FILE'] = _appdata_cacert
+        elif getattr(sys, '_MEIPASS', None):
+            # First-ever run before hook has cached it — use _MEIPASS (fine, not deleted yet)
+            _meipass_cacert = os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem')
+            if os.path.isfile(_meipass_cacert):
+                os.environ['REQUESTS_CA_BUNDLE'] = _meipass_cacert
+                os.environ['SSL_CERT_FILE'] = _meipass_cacert
+        else:
+            os.environ.pop('REQUESTS_CA_BUNDLE', None)
 
 
 def register_all_font_files():
@@ -312,33 +351,19 @@ def load_custom_font():
 
 
 def load_record_font_family():
-    """Load PixelFont7 font for W-L line and return its family name (cached)."""
+    """Load Gotham Black font for standings data and return its family name (cached)."""
     global _RECORD_FONT_FAMILY
     if _RECORD_FONT_FAMILY is not None:
         return _RECORD_FONT_FAMILY
 
-    target_family = "PixelFont7-G02A"
+    target_family = "Gotham Black"
     db = QtGui.QFontDatabase()
     if target_family in db.families():
         _RECORD_FONT_FAMILY = target_family
+        print(f"[FONT] Using Gotham Black for standings data")
         return _RECORD_FONT_FAMILY
 
-    font_locations = [
-        os.path.join(APPDATA_DIR, "PixelFont7-G02A.ttf"),
-        os.path.join(os.path.dirname(__file__), "PixelFont7-G02A.ttf"),
-        "PixelFont7-G02A.ttf"
-    ]
-    for font_path in font_locations:
-        if os.path.exists(font_path):
-            font_id = QtGui.QFontDatabase.addApplicationFont(font_path)
-            if font_id != -1:
-                families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
-                if families:
-                    print(f"[FONT] Loaded record font: {families[0]} from {font_path}")
-                    _RECORD_FONT_FAMILY = families[0]
-                    return _RECORD_FONT_FAMILY
-
-    print("[FONT] PixelFont7-G02A.ttf not found, using ticker font for records")
+    print("[FONT] Gotham Black not found, using ticker font for records")
     # Cache None sentinel as empty string so we don't retry on every call
     _RECORD_FONT_FAMILY = ""
     return None
@@ -865,15 +890,17 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0, b
     diamond_size = max(6, int(10 * scale))
     pen_w       = max(1, round(2 * scale))
 
-    # Base positions — proportional triangle formation
+    # Base positions — proper square-rotated-45° diamond (all bases equidistant from center)
+    r = 8 * scale  # uniform radius keeps the diamond geometrically square
+
     second_x = center_x
-    second_y = center_y - 6 * scale
+    second_y = center_y - r      # top of diamond
 
-    first_x  = center_x + 8 * scale
-    first_y  = center_y + 5 * scale
+    first_x  = center_x + r     # right of diamond (same height as center)
+    first_y  = center_y
 
-    third_x  = center_x - 8 * scale
-    third_y  = center_y + 5 * scale
+    third_x  = center_x - r     # left of diamond (same height as center)
+    third_y  = center_y
 
     bases = [
         ('second', second_x, second_y),
@@ -1080,7 +1107,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         print(f"[FONT] Active ticker font: '{font_to_use}'")
         font_scale = self.settings.get('font_scale_percent', 120) / 100.0
-        record_font_family = load_record_font_family() or font_to_use
+        # Player info font: user-selectable (W-L records, pitcher/batter names, pitch count)
+        player_info_font = self.settings.get('player_info_font', 'Gotham Black')
+        # Fallback to record_font_family if selected font is not available, then to ticker font
+        if player_info_font not in QtGui.QFontDatabase().families():
+            player_info_font = load_record_font_family() or font_to_use
         self._qfont = QtGui.QFont(font_to_use)
         self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
         self._qfont.setStyleStrategy(
@@ -1088,15 +1119,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
             QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
         )
         self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
-        self.small_font = QtGui.QFont(record_font_family)
-        self.small_font.setPixelSize(max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3)
+        
+        # Apply player font scale to small_font and tiny_font
+        player_font_scale = self.settings.get('player_font_scale_percent', 75) / 100.0
+        self.small_font = QtGui.QFont(player_info_font)
+        base_small_px = max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3
+        self.small_font.setPixelSize(int(base_small_px * player_font_scale))
+        
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
         self.vs_font = QtGui.QFont(font_to_use)
         self.vs_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.5)))
         self.vs_font.setBold(True)
-        small_px = max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3
-        self.tiny_font = QtGui.QFont(record_font_family)
+        
+        small_px = self.small_font.pixelSize()
+        self.tiny_font = QtGui.QFont(player_info_font)
         self.tiny_font.setPixelSize(max(5, small_px - 2))
         
         # Animation timer - 60 FPS for smooth scrolling (started after intro finishes)
@@ -1140,6 +1177,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self.intro_active:
             self.intro_timer.start(33)  # ~30 fps
             print("[INTRO] Starting pixel-reveal animation")
+
+    def _restart_intro(self):
+        """Reset ticker to intro animation state."""
+        # Stop normal scrolling
+        if self.scroll_timer.isActive():
+            self.scroll_timer.stop()
+        # Reset intro state
+        self.intro_active = True
+        self.intro_phase = 'in'
+        self.intro_revealed_count = 0
+        self.intro_hold_frames = 0
+        # Rebuild and start intro animation
+        self.build_intro_animation()
+        self._start_intro()
+        print("[RESTART] Restarting intro animation")
 
     def setup_appbar(self):
         """Register as Windows AppBar to reserve desktop space at the top.
@@ -1854,26 +1906,39 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         # Calculate width based on game status
         if status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']:
-            # Live or Final game: Team Logo Score | Diamond | Score Logo Team
-            # For final games, show F instead of inning
+            # Live or Final game: Team Logo Score | Diamond/F-label | Score Logo Team
             is_final = status in ['Final', 'Completed', 'Game Over']
-            
-            diamond_pixmap = draw_baseball_diamond(
-                game['runners'],
-                game['outs'],
-                'F' if is_final else game.get('current_inning', 1),
-                game.get('inning_state', '') == 'Top',
-                size=int(self.ticker_height * 0.7),
-                dpr=self.dpr,
-                balls=game.get('balls') if not is_final else None,
-                strikes=game.get('strikes') if not is_final else None,
-            )
-            
+
             score_width = metrics.horizontalAdvance("99")
-            diamond_logical_width = int(diamond_pixmap.width() / self.dpr)
-            # _inning_text_right_phys is stored in logical coords (painter operates in logical space)
-            inning_text_right = getattr(diamond_pixmap, '_inning_text_right_phys', 0)
-            effective_after_diamond = max(diamond_logical_width, int(inning_text_right)) + 6
+
+            if is_final:
+                # "F" for 9 innings or fewer; "F10", "F11", etc. for extra innings
+                _final_inning = game.get('current_inning', 9)
+                try:
+                    _final_inning = int(_final_inning)
+                except (TypeError, ValueError):
+                    _final_inning = 9
+                final_label = f"F{_final_inning}" if _final_inning > 9 else "F"
+                _vs_fm = QtGui.QFontMetrics(self.vs_font)
+                final_label_width = _vs_fm.horizontalAdvance(final_label)
+                effective_after_diamond = final_label_width + 16  # 8 px padding each side
+                diamond_pixmap = None
+            else:
+                final_label = None
+                diamond_pixmap = draw_baseball_diamond(
+                    game['runners'],
+                    game['outs'],
+                    game.get('current_inning', 1),
+                    game.get('inning_state', '') == 'Top',
+                    size=int(self.ticker_height * 0.7),
+                    dpr=self.dpr,
+                    balls=game.get('balls'),
+                    strikes=game.get('strikes'),
+                )
+                diamond_logical_width = int(diamond_pixmap.width() / self.dpr)
+                # _inning_text_right_phys is stored in logical coords
+                inning_text_right = getattr(diamond_pixmap, '_inning_text_right_phys', 0)
+                effective_after_diamond = max(diamond_logical_width, int(inning_text_right)) + 6
 
             # Layout: Team, Logo, Score, Diamond+gap, Score, Logo, Team
             # Gaps mirror each other: name(5)logo(15)score(8)diamond+gap(6)score(15)logo(5)name
@@ -1886,7 +1951,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             
             status_width = time_metrics.horizontalAdvance(status_text) + 20
             vs_metrics = QtGui.QFontMetrics(self.vs_font)
-            at_width = vs_metrics.horizontalAdvance("vs.") + 10
+            at_width = vs_metrics.horizontalAdvance("@") + 10
             
             total_width = (away_block_width + 5 + logo_size + 10 + 
                           at_width + 10 + logo_size + 10 + home_block_width + 10 + 
@@ -1912,9 +1977,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         time_y = text_y
         record_y = None
         if show_records:
-            line_gap = 0
+            line_gap = 2  # Minimum spacing between team names and player info
             text_y = -_br.top() + 4
             record_y = text_y + _br.bottom() + line_gap + small_metrics.ascent()
+            record_y -= 5  # Move player info up by a few pixels
             max_record_y = self.ticker_height - 2 - small_metrics.descent()
             if record_y > max_record_y:
                 delta = record_y - max_record_y
@@ -1952,9 +2018,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawText(x, text_y, str(away_score))
             x += score_width + 8
             
-            # Diamond
-            diamond_y = (self.ticker_height - int(diamond_pixmap.height() / self.dpr)) // 2 - 2
-            painter.drawPixmap(x, diamond_y, diamond_pixmap)
+            # Diamond (live) or Final label (finished games)
+            if is_final:
+                _vs_fm_p = QtGui.QFontMetrics(self.vs_font)
+                _fl_w  = _vs_fm_p.horizontalAdvance(final_label)
+                _fl_br = _vs_fm_p.boundingRect(final_label)
+                _fl_x  = x + (effective_after_diamond - _fl_w) // 2 - 6  # Shift left for better centering between scores
+                _fl_y  = (self.ticker_height - _fl_br.height()) // 2 - _fl_br.top()
+                painter.setFont(self.vs_font)
+                painter.setPen(QtGui.QColor('#FFD700'))
+                painter.drawText(_fl_x, _fl_y, final_label)
+            else:
+                diamond_y = (self.ticker_height - int(diamond_pixmap.height() / self.dpr)) // 2 - 2
+                painter.drawPixmap(x, diamond_y, diamond_pixmap)
             x += effective_after_diamond
 
             # Home score (on same line as team name)
@@ -2010,8 +2086,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             vs_y = text_y
             painter.setFont(self.vs_font)
             painter.setPen(QtGui.QColor("#FFFFFF"))
-            painter.drawText(x, vs_y, "vs.")
-            x += vs_metrics_paint.horizontalAdvance("vs.") + 15  # 15px after vs. (symmetric)
+            painter.drawText(x, vs_y, "vs")
+            x += vs_metrics_paint.horizontalAdvance("vs") + 15  # 15px after "vs" (symmetric)
             
             # Home logo
             home_logo = get_team_logo(home_team_full, logo_size)
@@ -2243,7 +2319,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
         font_scale = self.settings.get('font_scale_percent', 120) / 100.0
         preferred_font = self.settings.get('font', 'LED Board-7')
         font_to_use = self.font_family if preferred_font == 'LED Board-7' else preferred_font
-        record_font_family = load_record_font_family() or font_to_use
+        # Player info font: user-selectable (W-L records, pitcher/batter names, pitch count)
+        player_info_font = self.settings.get('player_info_font', 'Gotham Black')
+        # Fallback to record_font_family if selected font is not available, then to ticker font
+        if player_info_font not in QtGui.QFontDatabase().families():
+            player_info_font = load_record_font_family() or font_to_use
         self._qfont = QtGui.QFont(font_to_use)
         self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
         self._qfont.setStyleStrategy(
@@ -2251,15 +2331,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
             QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
         )
         self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
-        self.small_font = QtGui.QFont(record_font_family)
-        self.small_font.setPixelSize(max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3)
+        
+        # Apply player font scale to small_font and tiny_font
+        player_font_scale = self.settings.get('player_font_scale_percent', 75) / 100.0
+        self.small_font = QtGui.QFont(player_info_font)
+        base_small_px = max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3
+        self.small_font.setPixelSize(int(base_small_px * player_font_scale))
+        
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
         self.vs_font = QtGui.QFont(font_to_use)
         self.vs_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.5)))
         self.vs_font.setBold(True)
-        small_px = max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3
-        self.tiny_font = QtGui.QFont(record_font_family)
+        
+        small_px = self.small_font.pixelSize()
+        self.tiny_font = QtGui.QFont(player_info_font)
         self.tiny_font.setPixelSize(max(5, small_px - 2))
 
         # Force ticker pixmap rebuild to pick up new fonts / show_records / colors
@@ -2349,6 +2435,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         refresh_action = menu.addAction("Refresh Games")
         refresh_action.triggered.connect(self.start_data_fetch)
+
+        restart_action = menu.addAction("Restart")
+        restart_action.triggered.connect(self._restart_intro)
 
         menu.addSeparator()
 
@@ -2618,7 +2707,7 @@ class StandingsWindow(QtWidgets.QWidget):
         league_font = QtGui.QFont(self._ozone_family)
         league_font.setPixelSize(self._FS_LEAGUE)
 
-        self._al_lbl = QtWidgets.QLabel("American League")
+        self._al_lbl = QtWidgets.QLabel("AMERICAN LEAGUE")
         self._al_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self._al_lbl.setFont(league_font)
         self._al_lbl.setCursor(QtCore.Qt.PointingHandCursor)
@@ -2632,7 +2721,7 @@ class StandingsWindow(QtWidgets.QWidget):
         _sp_bot = max(6, int(18 * self._scale))
         sep_lbl.setStyleSheet(f"color: #444444; padding: {_sp_top}px 0 {_sp_bot}px 0;")
 
-        self._nl_lbl = QtWidgets.QLabel("National League")
+        self._nl_lbl = QtWidgets.QLabel("NATIONAL LEAGUE")
         self._nl_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self._nl_lbl.setFont(league_font)
         self._nl_lbl.setCursor(QtCore.Qt.PointingHandCursor)
@@ -2668,7 +2757,7 @@ class StandingsWindow(QtWidgets.QWidget):
             col.setSpacing(0)
 
             # Division title
-            div_lbl = QtWidgets.QLabel(div)
+            div_lbl = QtWidgets.QLabel(div.upper())
             div_font = QtGui.QFont(self._ozone_family)
             div_font.setPixelSize(self._FS_DIV)
             div_lbl.setFont(div_font)
@@ -2753,7 +2842,7 @@ class StandingsWindow(QtWidgets.QWidget):
         hl = QtWidgets.QHBoxLayout(row)
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(0)
-        hdr_font = QtGui.QFont(self._record_family)
+        hdr_font = QtGui.QFont(self._ozone_family)
         hdr_font.setPixelSize(self._FS_HDR)
 
         # Logo placeholder
@@ -2766,7 +2855,7 @@ class StandingsWindow(QtWidgets.QWidget):
                               ("W-L",  self._W_WL),
                               ("Pct.", self._W_PCT),
                               ("L10",  self._W_L10)]:
-            lbl = QtWidgets.QLabel(label)
+            lbl = QtWidgets.QLabel(label.upper())
             lbl.setFont(hdr_font)
             lbl.setFixedWidth(width)
             lbl.setFixedHeight(self._ROW_H)
@@ -2838,7 +2927,7 @@ class StandingsWindow(QtWidgets.QWidget):
                 hl.addSpacing(max(4, int(8 * self._scale)))
 
                 # Team name
-                name_lbl = QtWidgets.QLabel(team['name'])
+                name_lbl = QtWidgets.QLabel(team['name'].upper())
                 name_lbl.setFont(name_font)
                 name_lbl.setFixedWidth(self._W_NAME)
                 name_lbl.setFixedHeight(self._ROW_H)
@@ -2990,7 +3079,7 @@ class AboutDialog(QtWidgets.QDialog):
         outer.addWidget(self._title_lbl)
 
         # Version
-        outer.addWidget(_lbl("Version 0.9.6 Beta", 22, "#AAAAAA", bot_pad=14))
+        outer.addWidget(_lbl(f"Version {VERSION}", 22, "#AAAAAA", bot_pad=14))
 
         # Green rule
         rule = QtWidgets.QFrame()
@@ -3005,6 +3094,7 @@ class AboutDialog(QtWidgets.QDialog):
         outer.addWidget(_lbl("Copyright \u00a9 2026\nAll Rights Reserved", 18, "#AAAAAA", bot_pad=4,  family=record_family))
         outer.addWidget(_lbl("License: GNU AGPLv3",              18, "#AAAAAA", bot_pad=16, family=record_family))
 
+
         # Website (clickable)
         url_lbl = QtWidgets.QLabel(
             '<a href="https://krypdoh.github.io/MLB-TCKR/" '
@@ -3017,8 +3107,18 @@ class AboutDialog(QtWidgets.QDialog):
         url_lbl.setAlignment(QtCore.Qt.AlignCenter)
         url_lbl.setOpenExternalLinks(True)
         url_lbl.setTextInteractionFlags(QtCore.Qt.TextBrowserInteraction)
-        url_lbl.setStyleSheet("padding-bottom: 14px;")
+        url_lbl.setStyleSheet("padding-bottom: 8px;")
         outer.addWidget(url_lbl)
+
+        # Donate button (bottom left)
+        donate_btn = QtWidgets.QPushButton("Donate")
+        donate_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        donate_btn.setFont(QtGui.QFont(load_custom_font(), 16))
+        donate_btn.setStyleSheet("background:#00AAFF; color:#fff; font-size:16px; padding:6px 18px; border-radius:6px;")
+        def open_donate():
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://paypal.me/paypaulc"))
+        donate_btn.clicked.connect(open_donate)
+        outer.addWidget(donate_btn)
 
         # Second rule
         rule2 = QtWidgets.QFrame()
@@ -3053,8 +3153,9 @@ class AboutDialog(QtWidgets.QDialog):
         close_btn.clicked.connect(self.accept)
 
         btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(donate_btn, alignment=QtCore.Qt.AlignLeft)
         btn_row.addStretch()
-        btn_row.addWidget(close_btn)
+        btn_row.addWidget(close_btn, alignment=QtCore.Qt.AlignRight)
         outer.addLayout(btn_row)
 
         # Rainbow pulse timer — cycles hue across title and rule in unison
@@ -3362,20 +3463,34 @@ class SettingsDialog(QtWidgets.QDialog):
         # Load current settings
         self.settings = get_settings()
         
-        # Create tab widget
-        tabs = QtWidgets.QTabWidget()
+        # Secret admin tab trigger
+        self._admin_click_count = 0
+        self._admin_click_timer = QtCore.QTimer()
+        self._admin_click_timer.setSingleShot(True)
+        self._admin_click_timer.timeout.connect(lambda: setattr(self, '_admin_click_count', 0))
+        self._admin_tab_shown = False
+        
+        # Create tab widget (instance variable so we can add admin tab later)
+        self.tabs = QtWidgets.QTabWidget()
         
         # General settings tab
         general_tab = self.create_general_tab()
-        tabs.addTab(general_tab, "General")
+        self.tabs.addTab(general_tab, "General")
         
         # Team colors tab
         colors_tab = self.create_team_colors_tab()
-        tabs.addTab(colors_tab, "Team Colors")
+        self.tabs.addTab(colors_tab, "Team Colors")
 
         # Network / proxy tab
         network_tab = self.create_network_tab()
-        tabs.addTab(network_tab, "Network")
+        self.tabs.addTab(network_tab, "Network")
+        
+        # Secret trigger label at top (click 7 times to reveal admin tab)
+        self.secret_label = QtWidgets.QLabel(f"Version: {VERSION}")
+        self.secret_label.setAlignment(QtCore.Qt.AlignRight)
+        self.secret_label.setStyleSheet("color: #555; font-size: 9px; padding: 2px 8px;")
+        self.secret_label.setCursor(QtCore.Qt.PointingHandCursor)
+        self.secret_label.installEventFilter(self)
         
         # Buttons
         button_box = QtWidgets.QDialogButtonBox(
@@ -3390,7 +3505,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
-        layout.addWidget(tabs)
+        layout.addWidget(self.secret_label)
+        layout.addWidget(self.tabs)
         layout.addWidget(button_box)
         self.setLayout(layout)
 
@@ -3408,6 +3524,81 @@ class SettingsDialog(QtWidgets.QDialog):
         _avail_h = _screen.availableGeometry().height() - 80  # leave room for taskbar/title
         _target_h = min(_content_h + _chrome_h, _avail_h)
         self.resize(800, max(640, _target_h))
+
+    def eventFilter(self, obj, event):
+        """Event filter to detect secret clicks on version label."""
+        if obj == self.secret_label and event.type() == QtCore.QEvent.MouseButtonPress:
+            if event.button() == QtCore.Qt.LeftButton:
+                self._admin_click_count += 1
+                self._admin_click_timer.start(2000)  # Reset counter after 2 seconds
+                
+                if self._admin_click_count >= 7 and not self._admin_tab_shown:
+                    # Reveal admin tab!
+                    self._admin_tab_shown = True
+                    admin_tab = self.create_admin_tab()
+                    self.tabs.addTab(admin_tab, "Admin")
+                    self.secret_label.setText("Admin Unlocked!")
+                    self.secret_label.setStyleSheet("color: #4CAF50; font-size: 9px; padding: 2px 8px; font-weight: bold;")
+                    # Switch to admin tab
+                    self.tabs.setCurrentIndex(self.tabs.count() - 1)
+                    return True
+        return super().eventFilter(obj, event)
+
+    def create_admin_tab(self):
+        """Create hidden admin settings tab with advanced options."""
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        container = QtWidgets.QWidget()
+        outer_layout = QtWidgets.QVBoxLayout(container)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(10)
+
+        # Admin settings group
+        admin_group = QtWidgets.QGroupBox("Advanced Font Settings")
+        admin_form = QtWidgets.QFormLayout(admin_group)
+        admin_form.setContentsMargins(10, 14, 10, 10)
+        admin_form.setVerticalSpacing(7)
+        admin_form.setHorizontalSpacing(16)
+
+        # Player Font Size slider
+        player_font_size_layout = QtWidgets.QHBoxLayout()
+        self.player_font_scale_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.player_font_scale_slider.setRange(50, 200)
+        self.player_font_scale_slider.setSingleStep(5)
+        self.player_font_scale_slider.setPageStep(10)
+        self.player_font_scale_slider.setValue(self.settings.get('player_font_scale_percent', 75))
+        self.player_font_scale_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.player_font_scale_slider.setTickInterval(25)
+        
+        self.player_font_scale_label = QtWidgets.QLabel(f"{self.player_font_scale_slider.value()}%")
+        self.player_font_scale_label.setMinimumWidth(50)
+        self.player_font_scale_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        
+        self.player_font_scale_slider.valueChanged.connect(
+            lambda v: self.player_font_scale_label.setText(f"{v}%")
+        )
+        
+        player_font_size_layout.addWidget(self.player_font_scale_slider)
+        player_font_size_layout.addWidget(self.player_font_scale_label)
+        
+        admin_form.addRow("Player Font Size:", player_font_size_layout)
+        
+        # Info label
+        info_label = QtWidgets.QLabel(
+            "Controls the size of pitcher/batter names, W-L records, and pitch counts.\n"
+            "Default is 75%. Changes apply immediately."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #888; font-size: 11px; padding: 8px;")
+        admin_form.addRow("", info_label)
+
+        outer_layout.addWidget(admin_group)
+        outer_layout.addStretch()
+
+        scroll.setWidget(container)
+        return scroll
 
     def create_general_tab(self):
         """Create general settings tab — grouped into logical sections."""
@@ -3462,9 +3653,9 @@ class SettingsDialog(QtWidgets.QDialog):
         grp_perf, form_perf = make_form("Performance")
 
         self.speed_spin = QtWidgets.QSpinBox()
-        self.speed_spin.setRange(1, 10)
+        self.speed_spin.setRange(1, 16)
         self.speed_spin.setValue(self.settings.get('speed', 5))
-        self.speed_spin.setToolTip("Scroll speed of the ticker (1 = slowest, 10 = fastest)")
+        self.speed_spin.setToolTip("Scroll speed of the ticker (1 = slowest, 16 = fastest)")
         form_perf.addRow("Ticker Speed:", self.speed_spin)
 
         self.update_spin = QtWidgets.QSpinBox()
@@ -3499,6 +3690,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.opacity_slider.setMinimumWidth(160)
         self._opacity_label = QtWidgets.QLabel(f"{self.opacity_slider.value()}%")
         self._opacity_label.setFixedWidth(36)
+        self._opacity_label.setStyleSheet("color: #00FF44; font-weight: bold; font-size: 13px;")
         self.opacity_slider.valueChanged.connect(
             lambda v: self._opacity_label.setText(f"{v}%")
         )
@@ -3515,6 +3707,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.content_opacity_slider.setMinimumWidth(160)
         self._content_opacity_label = QtWidgets.QLabel(f"{self.content_opacity_slider.value()}%")
         self._content_opacity_label.setFixedWidth(36)
+        self._content_opacity_label.setStyleSheet("color: #00FF44; font-weight: bold; font-size: 13px;")
         self.content_opacity_slider.valueChanged.connect(
             lambda v: self._content_opacity_label.setText(f"{v}%")
         )
@@ -3565,6 +3758,25 @@ class SettingsDialog(QtWidgets.QDialog):
         font_slider_row.addWidget(self.font_scale_slider)
         font_slider_row.addWidget(self.font_scale_label)
         form_font.addRow("Team Font Size:", font_slider_row)
+
+        # Player Info Font — for W-L records, pitcher/batter names, pitch counts
+        self.player_info_font_combo = QtWidgets.QComboBox()
+        self.player_info_font_combo.setMaxVisibleItems(20)
+        all_fonts_player = sorted(db.families(), key=lambda f: f.lstrip('@').lower())
+        # Ensure Gotham Black is in the list (it's the default)
+        if 'Gotham Black' not in all_fonts_player:
+            all_fonts_player.insert(0, 'Gotham Black')
+        self.player_info_font_combo.addItems(all_fonts_player)
+        current_player_font = self.settings.get('player_info_font', 'Gotham Black')
+        idx_player = self.player_info_font_combo.findText(current_player_font)
+        self.player_info_font_combo.setCurrentIndex(idx_player if idx_player >= 0 else 0)
+        self.player_info_font_combo.setItemDelegate(FontPreviewDelegate(self.player_info_font_combo))
+        self.player_info_font_combo.setMinimumHeight(32)
+        self.player_info_font_combo.setFont(QtGui.QFont(current_player_font, 11))
+        self.player_info_font_combo.currentTextChanged.connect(
+            lambda f: self.player_info_font_combo.setFont(QtGui.QFont(f, 11))
+        )
+        form_font.addRow("Player Info Font:", self.player_info_font_combo)
 
         outer_layout.addWidget(grp_font)
 
@@ -3885,6 +4097,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['ticker_height'] = self.height_spin.value()
         self.settings['font'] = self.font_combo.currentText()
         self.settings['font_scale_percent'] = self.font_scale_slider.value()
+        self.settings['player_info_font'] = self.player_info_font_combo.currentText()
         self.settings['show_team_records'] = self.records_check.isChecked()
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
@@ -3921,6 +4134,10 @@ class SettingsDialog(QtWidgets.QDialog):
                     team_colors[team] = hex_val         # custom hex string
             # slot 0 (Primary) = default → omit from saved dict
         self.settings['team_colors'] = team_colors
+        
+        # Admin tab settings (if shown)
+        if self._admin_tab_shown:
+            self.settings['player_font_scale_percent'] = self.player_font_scale_slider.value()
 
         save_settings(self.settings)
         apply_proxy_settings()
@@ -3947,8 +4164,37 @@ class SettingsDialog(QtWidgets.QDialog):
                 args = sys.argv          # PyInstaller .exe: argv[0] is the exe
             else:
                 args = [sys.executable] + sys.argv
-            subprocess.Popen(args)
-            QtWidgets.QApplication.instance().quit()
+            # Strip Qt env vars inherited from this (parent) process.
+            # The child's PyInstaller runtime hooks will re-set them to
+            # the child's own _MEI temp dir.  Inheriting the parent's
+            # _MEI paths (which are being deleted as the parent quits)
+            # causes Qt to report 'Could not find platform plugin in ""'.
+            _child_env = os.environ.copy()
+            for _qt_var in (
+                'QT_PLUGIN_PATH',
+                'QML2_IMPORT_PATH',
+                'QT_QPA_PLATFORM_PLUGIN_PATH',
+            ):
+                _child_env.pop(_qt_var, None)
+            # Release the AppBar reservation NOW, before spawning the child.
+            # If we wait until the 3-s quit timer fires the child will call
+            # setup_appbar() while our strip is still registered and Windows
+            # will push it below us — the "new ticker appears below the old one"
+            # symptom.  Releasing first gives the shell time to free the work
+            # area before the child process initialises Qt (which takes ~1-2 s).
+            _ticker = self.parent()
+            if _ticker and hasattr(_ticker, 'remove_appbar'):
+                _ticker.remove_appbar()
+                QtWidgets.QApplication.processEvents()  # let shell digest ABM_REMOVE
+
+            subprocess.Popen(args, env=_child_env)
+            # Delay 3 s before quitting so the child process has time to
+            # bootstrap Python and lock its Qt DLLs before our atexit
+            # handler sweeps the shared _MEI temp folder.  Without this
+            # delay, qwindows.dll (locked lazily at QApplication creation)
+            # can be deleted by the parent before the child ever uses it.
+            _app = QtWidgets.QApplication.instance()
+            QtCore.QTimer.singleShot(3000, _app.quit)
 
     def apply_settings(self):
         """Save settings and apply hotswappable values to the live ticker."""
@@ -4058,6 +4304,9 @@ def main():
     
     refresh_action = tray_menu.addAction("Refresh Games")
     refresh_action.triggered.connect(window.start_data_fetch)
+
+    restart_action = tray_menu.addAction("Restart")
+    restart_action.triggered.connect(window._restart_intro)
 
     tray_menu.addSeparator()
 

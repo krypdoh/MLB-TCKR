@@ -2,12 +2,17 @@
 REM Build script for MLB ticker Cython optimizations
 REM Run this to compile the performance-critical code
 
-set PYTHON_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python313\python.exe
-set PIP_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python313\Scripts\pip.exe
+set PYTHON_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python314\python.exe
+set PIP_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python314\Scripts\pip.exe
 
 echo ========================================
 echo MLB-TCKR Performance Build Script
 echo ========================================
+echo.
+
+REM Pause Dropbox sync to prevent file access conflicts during build
+echo Pausing Dropbox sync...
+TASKKILL /F /IM dropbox.exe /T
 echo.
 
 REM Check if Python is available
@@ -65,7 +70,11 @@ echo [4/5] Cleaning up build artifacts...
 if exist mlb_ticker_utils_cython.c del mlb_ticker_utils_cython.c
 
 echo.
-echo [5/6] Rebuilding PyInstaller EXEs with Cython bundled...
+echo [5/6] Ensuring certifi CA bundle is included for SSL...
+"%PYTHON_EXE%" -c "import certifi; print('[INFO] Certifi CA bundle:', certifi.where())"
+
+echo.
+echo [6/7] Rebuilding PyInstaller EXEs with Cython bundled...
 
 REM Confirm PyInstaller is available
 "%PYTHON_EXE%" -m PyInstaller --version >nul 2>&1
@@ -78,18 +87,24 @@ if errorlevel 1 (
     goto :done
 )
 
-echo   Building MLB-TCKR-console.exe  (console visible)...
-"%PYTHON_EXE%" -m PyInstaller MLB-TCKR-console.spec --noconfirm
+echo.
+echo.
+echo Building console version...
+"%PYTHON_EXE%" -m PyInstaller MLB-TCKR-console.spec --noconfirm --clean
 if not exist dist\MLB-TCKR-console.exe goto :fail_console
 
 echo.
-echo [6/6] Building MLB-TCKR.exe  (console hidden)...
-"%PYTHON_EXE%" -m PyInstaller MLB-TCKR.spec --noconfirm
+echo.
+echo Building no-console version...
+"%PYTHON_EXE%" -m PyInstaller MLB-TCKR.spec --noconfirm --clean
 if not exist dist\MLB-TCKR.exe goto :fail_nogui
 
 goto :done
 
 :fail_console
+REM Restart Dropbox sync before exiting
+echo Restarting Dropbox sync... 
+start "" "C:\Program Files (x86)\Dropbox\Client\Dropbox.exe"
 echo.
 echo ========================================
 echo PYINSTALLER BUILD FAILED! (console build)
@@ -98,6 +113,9 @@ pause
 exit /b 1
 
 :fail_nogui
+REM Restart Dropbox sync before exiting
+echo Restarting Dropbox sync... 
+start "" "C:\Program Files (x86)\Dropbox\Client\Dropbox.exe"
 echo.
 echo ========================================
 echo PYINSTALLER BUILD FAILED! (no-console build)
@@ -106,6 +124,9 @@ pause
 exit /b 1
 
 :done
+REM Restart Dropbox sync before exiting
+echo Restarting Dropbox sync... 
+start "" "C:\Program Files (x86)\Dropbox\Client\Dropbox.exe"
 echo.
 echo ========================================
 echo BUILD SUCCESSFUL!

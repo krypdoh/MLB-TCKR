@@ -1,3 +1,47 @@
+
+Version 2.5.8 (2026-03-28)
+--------------------------
+Performance and STANDINGS visual improvements
+
+IMPROVEMENTS:
++ Speed slider maximum increased from 10 to 16
+  - Allows faster ticker scrolling for users who prefer higher speeds
+  - Tooltip updated to reflect new range: "1 = slowest, 16 = fastest"
+
++ STANDINGS window font consistency improvements
+  - Division titles now display in uppercase (EAST, CENTRAL, WEST) for better visual hierarchy
+  - Column headers (Team, W-L, Pct., L10) now use Ozone font to match division titles and league headers
+  - All data fonts changed from PixelFont7-G02A to Gotham Black for consistency with player info font
+  - Simplified font loading logic by removing custom .ttf file dependency for standings
+
++ Font system optimization
+  - Removed ~25 lines of file-loading code from load_record_font_family()
+  - Now uses system font (Gotham Black) instead of bundled PixelFont7-G02A.ttf
+  - Reduces potential failure points in PyInstaller builds
+
+FIXES:
+* Restart functionality crash in PyInstaller .exe build
+  - Context menu "Restart" option now works correctly in compiled .exe
+  - Settings dialog automatic restart when changing ticker height or display monitor now works correctly
+  - Fixed sys.executable path handling for frozen applications (both manual and automatic restart)
+
+
+Version 2.5.7 (2026-03-27)
+--------------------------
+Font rendering, centering, scaling, and opacity slider improvements
+
+IMPROVEMENTS:
++ Pixel-perfect font rendering for dot-matrix/LED fonts using QFontMetrics.boundingRect for true visual centering; fonts are now vertically centered and no longer clipped or too high.
++ Unified font scaling logic: font size scaling is now consistent at startup and after settings changes (scaling factor unified to 0.40).
++ Opacity sliders in the settings dialog now use a 0–100% (percent) scale instead of 0–255, with updated labels and tooltips for clarity.
+  - Settings logic converts opacity values to/from 0–255 for storage and rendering, ensuring backward compatibility.
+  - UI is more intuitive and user-friendly for adjusting opacity.
+
+FIXES:
+* Font scaling bug at startup resolved; font size now matches settings immediately on launch.
+* Font centering and rendering issues fixed for all supported fonts.
+* Opacity slider UI and settings logic now match, preventing confusion and ensuring correct opacity application.
+
 MLB-TCKR Changelog
 ==================
 
