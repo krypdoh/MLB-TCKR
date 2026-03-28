@@ -75,42 +75,39 @@ TEAM_LOGO_CACHE = {}
 MLB_LOGO_CACHE  = {}  # keyed by (logo_size, dpr)
 _DIAMOND_CACHE  = {}  # keyed by (runners_key, outs, inning_text, size, dpr)
 
-#  MLB Team Colors — official primary / secondary / tertiary per team
-MLB_TEAM_COLORS_ALL = {
-    "Diamondbacks": ["#A71930", "#E3D4AD", "#000000"],
-    "Braves":       ["#13274F", "#CE1141", "#EAAA00"],
-    "Orioles":      ["#DF4601", "#000000", "#A2AAAD"],
-    "Red Sox":      ["#BD3039", "#192C55", "#FFFFFF"],
-    "Cubs":         ["#0E3386", "#CC3433", "#FFFFFF"],
-    "White Sox":    ["#000000", "#C4CED4", "#FFFFFF"],
-    "Reds":         ["#C6011F", "#000000", "#FFFFFF"],
-    "Guardians":    ["#0C2340", "#E31937", "#FFFFFF"],
-    "Rockies":      ["#333366", "#C4CED4", "#000000"],
-    "Tigers":       ["#0C2340", "#FA4616", "#FFFFFF"],
-    "Astros":       ["#002D62", "#EB6E1F", "#F4871E"],
-    "Royals":       ["#004687", "#BD9B60", "#FFFFFF"],
-    "Angels":       ["#BA0021", "#003263", "#862633"],
-    "Dodgers":      ["#005A9C", "#EF3E42", "#FFFFFF"],
-    "Marlins":      ["#00A3E0", "#EF3340", "#000000"],
-    "Brewers":      ["#12284B", "#FFC72C", "#FFFFFF"],
-    "Twins":        ["#002B5C", "#D31145", "#B9975B"],
-    "Mets":         ["#002D72", "#FF5910", "#FFFFFF"],
-    "Yankees":      ["#003087", "#E3E4E5", "#FFFFFF"],
-    "Athletics":    ["#003831", "#EFB21E", "#FFFFFF"],
-    "Phillies":     ["#E81828", "#002D72", "#FFFFFF"],
-    "Pirates":      ["#27251F", "#FDB827", "#FFFFFF"],
-    "Padres":       ["#2F241D", "#FFC425", "#FFFFFF"],
-    "Giants":       ["#FD5A1E", "#27251F", "#EFD19F"],
-    "Mariners":     ["#0C2340", "#005C5C", "#C4CED4"],
-    "Cardinals":    ["#C41E3A", "#002D62", "#FEDB00"],
-    "Rays":         ["#092C5C", "#8FBCE6", "#F5D131"],
-    "Rangers":      ["#003278", "#C0111F", "#FFFFFF"],
-    "Blue Jays":    ["#134A8E", "#1D2D5C", "#E8291C"],
-    "Nationals":    ["#AB0003", "#14225A", "#FFFFFF"],
+#  MLB Team Colors (Primary colors from official MLB color table)
+MLB_TEAM_COLORS_DEFAULT = {
+    'Diamondbacks': '#A71930',  # Sedona Red
+    'Braves': '#CE1141',  # Scarlet
+    'Orioles': '#df6501',  # Orange
+    'Red Sox': '#BD3039',  # Red
+    'Cubs': '#0E3386',  # Blue
+    'White Sox': '#ffffff',  # White
+    'Reds': '#C6011F',  # Red
+    'Guardians': '#e50000',  # Red
+    'Rockies': '#33006F',  # Purple
+    'Tigers': '#0C2340',  # Navy Blue
+    'Astros': '#ffaa00',  # Gold
+    'Royals': '#004687',  # Royal Blue
+    'Angels': '#ff0000',  # Red
+    'Dodgers': '#005A9C',  # Dodger Blue
+    'Marlins': '#00A3E0',  # Miami Blue
+    'Brewers': '#12284B',  # Navy Blue
+    'Twins': '#002B5C',  # Navy Blue
+    'Mets': '#ff8903',  # Orange
+    'Yankees': '#003087',  # Navy Blue
+    'Athletics': '#06cb3e',  # Green
+    'Phillies': '#E81828',  # Red
+    'Pirates': '#ffff00',  # Yellow
+    'Padres': '#fae608',  # Yellow
+    'Giants': '#FD5A1E',  # Orange
+    'Mariners': '#0C2C56',  # Navy Blue
+    'Cardinals': '#C41E3A',  # Red
+    'Rays': '#092C5C',  # Navy Blue
+    'Rangers': '#003278',  # Blue
+    'Blue Jays': '#134A8E',  # Blue
+    'Nationals': '#AB0003',  # Red
 }
-
-# Primary colors (slot 0) — backward-compatible alias
-MLB_TEAM_COLORS_DEFAULT = {team: colors[0] for team, colors in MLB_TEAM_COLORS_ALL.items()}
 
 # AppBar constants
 ABM_NEW              = 0x00000000
@@ -144,7 +141,7 @@ def get_settings():
         "update_interval": 10,
         "ticker_height": 64,
         "font": "Ozone",
-        "font_scale_percent": 175,
+        "font_scale_percent": 150,
         "show_team_records": True,
         "show_team_cities": False,
         "include_final_games": True,
@@ -152,17 +149,14 @@ def get_settings():
         "led_background": True,
         "glass_overlay": True,
         "background_opacity": 255,
-        "content_opacity": 255,
         "show_fps_overlay": False,
         "monitor_index": 0,
         "use_proxy": False,
         "proxy": "",
         "use_cert": False,
         "cert_file": "",
-        "team_colors": {},          # Per-team custom color overrides (empty = use slot default)
-        "team_name_color_slot": 0,    # 0=primary  1=secondary  2=tertiary  3=custom
-        "team_name_custom_color": "#FFFFFF",  # Used when slot=3
-        "load_at_startup": False,  # Register in Windows Run key on launch
+        "team_colors": {}  # Custom team colors (empty = use defaults)
+        ,
         "docked": True  # When True, ticker is docked (not moveable) and registered as AppBar
     }
 
@@ -171,50 +165,6 @@ def save_settings(settings):
     os.makedirs(APPDATA_DIR, exist_ok=True)
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=4)
-
-
-_STARTUP_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_STARTUP_REG_KEY  = "MLB-TCKR"
-
-
-def get_startup_registry() -> bool:
-    """Return True if MLB-TCKR is registered to launch at Windows startup.
-    Only functional on Windows; always returns False on other platforms."""
-    if sys.platform != "win32":
-        return False
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_REG_PATH,
-                            0, winreg.KEY_READ) as key:
-            winreg.QueryValueEx(key, _STARTUP_REG_KEY)
-            return True
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
-
-
-def set_startup_registry(enable: bool) -> None:
-    """Add or remove MLB-TCKR from the Windows HKCU Run key.
-    Only operates when running as a compiled .exe (sys.frozen is True)."""
-    if sys.platform != "win32" or not getattr(sys, 'frozen', False):
-        return
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_REG_PATH,
-                            0, winreg.KEY_SET_VALUE) as key:
-            if enable:
-                exe_path = f'"{sys.executable}"'
-                winreg.SetValueEx(key, _STARTUP_REG_KEY, 0, winreg.REG_SZ, exe_path)
-                print(f"[STARTUP] Registered in Run key: {exe_path}")
-            else:
-                try:
-                    winreg.DeleteValue(key, _STARTUP_REG_KEY)
-                    print("[STARTUP] Removed from Run key")
-                except FileNotFoundError:
-                    pass  # Already absent – nothing to do
-    except Exception as e:
-        print(f"[STARTUP] Registry error: {e}")
 
 
 def normalize_proxy_url(proxy_value):
@@ -389,41 +339,19 @@ def get_team_nickname(team_name):
 
 
 def get_team_color(team_name):
-    """Return the display color for a team name.
-
-    Priority:
-      1. Per-team override from the Team Colors tab
-      2. Global color slot: 0=primary, 1=secondary, 2=tertiary, 3=custom
-    """
+    """Get primary color for an MLB team (custom or default)"""
     settings = get_settings()
     custom_colors = settings.get('team_colors', {})
-
+    
+    # Extract nickname from full team name
     nickname = get_team_nickname(team_name)
-
-    # Per-team override takes top priority. Support two kinds of stored values:
-    # - Hex string like '#ff0000' (custom color)
-    # - Integer 0/1/2 indicating which palette slot (primary/secondary/tertiary)
+    
+    # Check for custom color first
     if nickname in custom_colors:
-        val = custom_colors[nickname]
-        # If user stored an int index, resolve it against the team's palette
-        if isinstance(val, int):
-            team_palette = MLB_TEAM_COLORS_ALL.get(nickname)
-            if team_palette and 0 <= val < len(team_palette):
-                return team_palette[val]
-        # If stored as string and looks like a hex color, use it directly
-        if isinstance(val, str) and val.startswith('#'):
-            return val
-
-    # Global slot
-    slot = int(settings.get('team_name_color_slot', 0))
-    if slot == 3:
-        return settings.get('team_name_custom_color', '#FFFFFF')
-
-    team_palette = MLB_TEAM_COLORS_ALL.get(nickname)
-    if team_palette and 0 <= slot < len(team_palette):
-        return team_palette[slot]
-
-    return '#FFFFFF'
+        return custom_colors[nickname]
+    
+    # Fall back to default
+    return MLB_TEAM_COLORS_DEFAULT.get(nickname, '#FFFFFF')
 
 
 def get_team_logo(team_name, size=40):
@@ -486,12 +414,7 @@ def get_team_logo(team_name, size=40):
         painter = QtGui.QPainter(pixmap)
         painter.setPen(QtGui.QColor('white'))
         font_family = load_custom_font()
-        font = QtGui.QFont(font_family, int(size * 0.25))
-        font.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-        )
-        font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        font = QtGui.QFont(font_family, int(size * 0.25), QtGui.QFont.Bold)
         painter.setFont(font)
         painter.drawText(pixmap.rect(), QtCore.Qt.AlignCenter, nickname[:3].upper())
         painter.end()
@@ -511,12 +434,7 @@ def get_team_logo(team_name, size=40):
         painter = QtGui.QPainter(pixmap)
         painter.setPen(QtGui.QColor('white'))
         font_family = load_custom_font()
-        font = QtGui.QFont(font_family, int(size * 0.25))
-        font.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-        )
-        font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        font = QtGui.QFont(font_family, int(size * 0.25), QtGui.QFont.Bold)
         painter.setFont(font)
         painter.drawText(pixmap.rect(), QtCore.Qt.AlignCenter, nickname[:3].upper())
         painter.end()
@@ -846,113 +764,114 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0, b
     if _dc_key in _DIAMOND_CACHE:
         return _DIAMOND_CACHE[_dc_key]
 
-    # All internal measurements scale proportionally with size.
-    # Reference baseline is size=50 (ticker_height ≈ 71 px).
-    scale = size / 50.0
-
-    gutter = int(30 * scale)           # right gutter for inning indicator
-    total_width = size + max(20, gutter)
+    total_width = size + 30  # Right gutter for inning indicator (enough for 3-char labels like "B15")
     pixmap = QtGui.QPixmap(int(total_width * dpr), int(size * dpr))
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(QtCore.Qt.transparent)
-
+    
     painter = QtGui.QPainter(pixmap)
     painter.setRenderHint(QtGui.QPainter.Antialiasing)
-
-    center_x = size / 2 - 4 * scale   # shift field left for inning text gutter
-    center_y = size / 2 - 4 * scale   # shift slightly upward
-
-    diamond_size = max(6, int(10 * scale))
-    pen_w       = max(1, round(2 * scale))
-
-    # Base positions — proportional triangle formation
+    
+    center_x = size / 2 - 4  # Shift field left to leave clean space for inning text
+    center_y = size / 2 - 4  # Move bases up by 1 additional pixel
+    
+    # Draw 3 bases as diamonds in triangle formation
+    diamond_size = 10
+    
+    # Base positions (triangle formation - tighter)
+    # 2nd base at top
     second_x = center_x
-    second_y = center_y - 6 * scale
-
-    first_x  = center_x + 8 * scale
-    first_y  = center_y + 5 * scale
-
-    third_x  = center_x - 8 * scale
-    third_y  = center_y + 5 * scale
-
+    second_y = center_y - 6
+    
+    # 1st base at right
+    first_x = center_x + 8
+    first_y = center_y + 5
+    
+    # 3rd base at left
+    third_x = center_x - 8
+    third_y = center_y + 5
+    
     bases = [
         ('second', second_x, second_y),
-        ('first',  first_x,  first_y),
-        ('third',  third_x,  third_y),
+        ('first', first_x, first_y),
+        ('third', third_x, third_y)
     ]
-
+    
     for base_name, x, y in bases:
-        half = diamond_size / 2
+        # Create diamond polygon (rotated square)
         diamond = QtGui.QPolygon([
-            QtCore.QPoint(int(x),        int(y - half)),
-            QtCore.QPoint(int(x + half), int(y)),
-            QtCore.QPoint(int(x),        int(y + half)),
-            QtCore.QPoint(int(x - half), int(y)),
+            QtCore.QPoint(int(x), int(y - diamond_size/2)),      # top
+            QtCore.QPoint(int(x + diamond_size/2), int(y)),      # right
+            QtCore.QPoint(int(x), int(y + diamond_size/2)),      # bottom
+            QtCore.QPoint(int(x - diamond_size/2), int(y))       # left
         ])
+        
         if runners.get(base_name):
+            # Runner on base - bright green
             painter.setBrush(QtGui.QBrush(QtGui.QColor('#00FF00')))
-            painter.setPen(QtGui.QPen(QtGui.QColor('#00FF00'), pen_w))
+            painter.setPen(QtGui.QPen(QtGui.QColor('#00FF00'), 2))
         else:
+            # Empty base - gray outline
             painter.setBrush(QtGui.QBrush(QtCore.Qt.transparent))
-            painter.setPen(QtGui.QPen(QtGui.QColor('#666666'), pen_w))
+            painter.setPen(QtGui.QPen(QtGui.QColor('#666666'), 2))
+        
         painter.drawPolygon(diamond)
-
-    # Out indicators — 3 circles scaled with size
-    out_radius  = max(2, int(3 * scale))
-    out_spacing = max(8, int(14 * scale))
+    
+    # Draw outs (3 circles below the bases)
+    out_radius = 3
+    out_spacing = 14
     outs_start_x = center_x - out_spacing
-    outs_y = size - max(5, int(9 * scale))
-
+    outs_y = size - 9
+    
     for i in range(3):
         x = outs_start_x + (i * out_spacing)
+        
         if i < outs:
+            # Lit out - bright red
             painter.setBrush(QtGui.QBrush(QtGui.QColor('#FF0000')))
-            painter.setPen(QtGui.QPen(QtGui.QColor('#FF0000'), max(1, pen_w - 1)))
+            painter.setPen(QtGui.QPen(QtGui.QColor('#FF0000'), 1))
         else:
+            # Unlit out - gray outline only
             painter.setBrush(QtGui.QBrush(QtCore.Qt.transparent))
-            painter.setPen(QtGui.QPen(QtGui.QColor('#666666'), pen_w))
+            painter.setPen(QtGui.QPen(QtGui.QColor('#666666'), 2))
+        
         painter.drawEllipse(QtCore.QPointF(x, outs_y), out_radius, out_radius)
+    
+    # Draw inning indicator (T5 or B5 format, or F for final)
+    inning_x = size - 0 # Closer to the diamond field
 
-    # Inning indicator — font scales with size
-    inning_x = size  # just right of the diamond field
-
+    # Handle final games (inning_num will be "F")
     if isinstance(inning_num, str) and inning_num == 'F':
         inning_text = 'F'
     else:
         inning_letter = 'T' if is_top else 'B'
         inning_text = f"{inning_letter}{inning_num}"
 
-    font_family  = load_custom_font()
-    font_pt      = max(7, round(10 * scale))   # point size — matches original at scale 1.0
-    font = QtGui.QFont(font_family, font_pt)
-    font.setStyleStrategy(
-        QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-        QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-    )
-    font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+    # Use custom font if available, otherwise Arial
+    font_family = load_custom_font()
+    font = QtGui.QFont(font_family, 10, QtGui.QFont.Bold)  # ~1.5pt smaller than before
     painter.setFont(font)
 
     field_top = second_y - diamond_size / 2
+    field_bottom = first_y + diamond_size / 2
     fm = QtGui.QFontMetrics(font)
-    inning_y = field_top + fm.ascent() - max(2, int(4 * scale))
 
-    painter.setPen(QtGui.QPen(QtGui.QColor('#FFD700')))
+    # Move inning indicator toward the top of the field area (raised from center)
+    inning_y = field_top + fm.ascent() - 4  # down 1px from previous
+
+    painter.setPen(QtGui.QPen(QtGui.QColor('#FFD700')))  # Gold color
     painter.drawText(int(inning_x) + 1, int(inning_y), inning_text)
 
-    # Ball–strike count below inning indicator
+    # Draw count (balls-strikes) below the inning indicator for live games
+    count_text = ""
     count_text_right = inning_x + fm.horizontalAdvance(inning_text)
     if balls is not None and strikes is not None:
-        count_text  = f"{balls}-{strikes}"
-        count_pt    = max(6, round(8 * scale))
-        count_font  = QtGui.QFont(font_family, count_pt)
-        count_font.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-        )
-        count_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        count_text = f"{balls}-{strikes}"
+        count_font = QtGui.QFont(font_family, 8, QtGui.QFont.Bold)
         painter.setFont(count_font)
-        cfm    = QtGui.QFontMetrics(count_font)
-        count_y = inning_y + fm.descent() + 1 + cfm.ascent()
+        cfm = QtGui.QFontMetrics(count_font)
+        count_y = inning_y + fm.descent() + 1 + cfm.ascent()  # up 1px from previous
+        # Clamp so count doesn't overlap the outs circles
         count_y = min(count_y, outs_y - out_radius - 3 + cfm.ascent())
         painter.setPen(QtGui.QPen(QtGui.QColor('#FFFFFF')))
         painter.drawText(int(inning_x), int(count_y), count_text)
@@ -1077,17 +996,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
             font_to_use = self.font_family
         else:
             font_to_use = preferred_font
-
+        
         print(f"[FONT] Active ticker font: '{font_to_use}'")
         font_scale = self.settings.get('font_scale_percent', 120) / 100.0
         record_font_family = load_record_font_family() or font_to_use
-        self._qfont = QtGui.QFont(font_to_use)
-        self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
-        self._qfont.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-        )
-        self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        self.font = QtGui.QFont(font_to_use)
+        self.font.setPixelSize(max(12, int(self.ticker_height * 0.45 * font_scale)))
+        self.font.setBold(True)
         self.small_font = QtGui.QFont(record_font_family)
         self.small_font.setPixelSize(max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3)
         self.time_font = QtGui.QFont(font_to_use)
@@ -1130,13 +1045,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.setup_appbar()
 
         # Build intro animation geometry now (window is shown, size is final).
-        # Start immediately — data loads in the background while the intro plays.
+        # The timer is NOT started yet — it fires after the first ticker draw + 2 s.
         self.build_intro_animation()
-        self.intro_timer_started = True
-        QtCore.QTimer.singleShot(0, self._start_intro)
     
     def _start_intro(self):
-        """Launch the intro pixel-reveal timer."""
+        """Launch the intro pixel-reveal timer (called after 2-s delay)."""
         if self.intro_active:
             self.intro_timer.start(33)  # ~30 fps
             print("[INTRO] Starting pixel-reveal animation")
@@ -1306,6 +1219,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
             # Slow down retries while offline (no point hammering every 10 s)
             self._reschedule_update_timer()
+            # Kick off the intro animation on the first no-cache error
+            if self.intro_active and not self.intro_timer_started:
+                self.intro_timer_started = True
+                QtCore.QTimer.singleShot(2000, self._start_intro)
+                print("[INTRO] Ticker ready (no-data path) — intro will start in 2 s")
             self.update()
             return
         print("[MLB] Fetch error — showing cached data with Data Delayed indicator")
@@ -1419,6 +1337,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 # _scroll_max_width is set inside build_ticker_pixmap
             self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
 
+        # First time the ticker is ready: schedule intro to start after 2 s
+        if self.intro_active and not self.intro_timer_started:
+            self.intro_timer_started = True
+            QtCore.QTimer.singleShot(2000, self._start_intro)
+            print("[INTRO] Ticker ready — intro will start in 2 s")
+
         self.update()
     
     def on_fetch_complete(self):
@@ -1479,6 +1403,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         ozone_family = load_ozone_font() or self.font_family
         intro_font = QtGui.QFont(ozone_family)
         intro_font.setPixelSize(max(12, int(h_phys * 0.35 * 2.25)))  # size in physical px (+20%)
+        intro_font.setBold(True)
 
         text = "MLB-TCKR"
         metrics = QtGui.QFontMetrics(intro_font)
@@ -1505,7 +1430,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Full intro pixmap at physical resolution — NO DPR set (raw pixel surface)
         self.intro_pixmap = QtGui.QPixmap(w_phys, h_phys)
-        self.intro_pixmap.fill(QtCore.Qt.transparent)
+        self.intro_pixmap.fill(QtCore.Qt.black)
 
         p = QtGui.QPainter(self.intro_pixmap)
         p.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
@@ -1518,10 +1443,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         p.drawText(text_x + part1_ink_right, text_y, part2)
         p.end()
 
-        # Display pixmap starts fully transparent — NO DPR set.
-        # cached_background shows through until blocks are revealed.
+        # Display pixmap starts fully black — NO DPR set
         self.intro_display = QtGui.QPixmap(w_phys, h_phys)
-        self.intro_display.fill(QtCore.Qt.transparent)
+        self.intro_display.fill(QtCore.Qt.black)
 
         # Build shuffled block list in physical pixel grid
         cols = max(1, w_phys // bs_phys)
@@ -1605,12 +1529,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         elif self.intro_phase == 'out':
             end = max(self.intro_revealed_count - bpf, 0)
             p = QtGui.QPainter(self.intro_display)
-            # Erase blocks back to transparent so cached_background shows through
-            p.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
             for i in range(end, self.intro_revealed_count):
                 r, c = blocks[i]
-                p.fillRect(QtCore.QRect(c * bs, r * bs, bs, bs), QtCore.Qt.transparent)
-            p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+                p.fillRect(QtCore.QRect(c * bs, r * bs, bs, bs), QtGui.QColor(0, 0, 0))
             p.end()
             self.intro_revealed_count = end
             if self.intro_revealed_count <= 0:
@@ -1658,7 +1579,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             else:
                 text = "No MLB games scheduled today"
 
-            metrics = QtGui.QFontMetrics(self._qfont)
+            metrics = QtGui.QFontMetrics(self.font)
             text_w = metrics.horizontalAdvance(text)
             margin_l = 40
             margin_r = 120  # gap after the text before the next loop copy
@@ -1673,12 +1594,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.ticker_pixmap = QtGui.QPixmap(int(full_w * self.dpr), int(self.ticker_height * self.dpr))
             self.ticker_pixmap.setDevicePixelRatio(self.dpr)
             self.ticker_pixmap.fill(QtCore.Qt.black)
-            # Use actual visual bounding rect so pixel/LED fonts center correctly
-            _br = metrics.boundingRect('ABCWMgy0123456789')
-            text_y = (self.ticker_height - _br.height()) // 2 - _br.top()
+            text_y = (self.ticker_height + metrics.ascent() - metrics.descent()) // 2
             painter = QtGui.QPainter(self.ticker_pixmap)
             painter.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(QtGui.QColor('#FFFFFF'))
             for i in range(num_copies):
                 painter.drawText(i * segment_w + margin_l, text_y, text)
@@ -1823,7 +1742,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         home_detail_text = home_subtext if home_subtext else home_record_text
         
         logo_size = int(self.ticker_height * 0.625)
-        metrics = QtGui.QFontMetrics(self._qfont)
+        metrics = QtGui.QFontMetrics(self.font)
         small_metrics = QtGui.QFontMetrics(self.small_font)
         tiny_metrics = QtGui.QFontMetrics(self.tiny_font)
         time_metrics = QtGui.QFontMetrics(self.time_font)
@@ -1906,15 +1825,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         x = 0
         logo_y = (self.ticker_height - logo_size) // 2
-        # Use actual visual bounding rect so pixel/LED fonts center correctly
-        _br = metrics.boundingRect('ABCWMgy0123456789')
-        text_y = (self.ticker_height - _br.height()) // 2 - _br.top()
+        text_y = (self.ticker_height + metrics.ascent() - metrics.descent()) // 2
         time_y = text_y
         record_y = None
         if show_records:
             line_gap = 0
-            text_y = -_br.top() + 4
-            record_y = text_y + _br.bottom() + line_gap + small_metrics.ascent()
+            text_y = 4 + metrics.ascent()
+            record_y = text_y + metrics.descent() + line_gap + small_metrics.ascent()
             max_record_y = self.ticker_height - 2 - small_metrics.descent()
             if record_y > max_record_y:
                 delta = record_y - max_record_y
@@ -1924,7 +1841,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         if status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']:
             # Away team name (colored)
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(away_color)
             away_name_x = x + (away_block_width - away_name_width) // 2
             painter.drawText(away_name_x, text_y, away_team)
@@ -1946,7 +1863,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             x += logo_size + 15  # More space between logo and score
             
             # Away score (on same line as team name)
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(QtGui.QColor('#FFFFFF'))
             score_width = metrics.horizontalAdvance(str(away_score))
             painter.drawText(x, text_y, str(away_score))
@@ -1958,7 +1875,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             x += effective_after_diamond
 
             # Home score (on same line as team name)
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(QtGui.QColor('#FFFFFF'))
             score_width = metrics.horizontalAdvance(str(home_score))
             painter.drawText(x, text_y, str(home_score))
@@ -1970,7 +1887,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             x += logo_size + 5  # Mirror: name→logo gap on away side
             
             # Home team name (colored)
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(home_color)
             home_name_x = x + (home_block_width - home_name_width) // 2
             painter.drawText(home_name_x, text_y, home_team)
@@ -1989,7 +1906,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             
         else:
             # Away team name (colored)
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(away_color)
             away_name_x = x + (away_block_width - away_name_width) // 2
             painter.drawText(away_name_x, text_y, away_team)
@@ -2019,7 +1936,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             x += logo_size + 10
             
             # Home team name (colored)
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(home_color)
             home_name_x = x + (home_block_width - home_name_width) // 2
             painter.drawText(home_name_x, text_y, home_team)
@@ -2035,7 +1952,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if not status_text and 'game_datetime' in game:
                 status_text = format_game_time_local(game.get('game_datetime'))
             
-            painter.setFont(self._qfont)
+            painter.setFont(self.font)
             painter.setPen(QtGui.QColor('#00B3FF'))
             painter.setFont(self.time_font)
             painter.drawText(x, time_y, status_text)
@@ -2081,24 +1998,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
             bg_painter = QtGui.QPainter(self.cached_background)
             if led_background:
-                # Deep blue-grey base — each "LED cell" will be 2×2 lit pixels
-                # separated by 1px dark gutters on both axes
+                # Blue-tinted near-black gradient matching the reference LED board look
                 gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
-                gradient.setColorAt(0.0,  QtGui.QColor(10, 20, 34, bg_opacity))
-                gradient.setColorAt(0.40, QtGui.QColor(7,  14, 26, bg_opacity))
-                gradient.setColorAt(0.70, QtGui.QColor(5,  11, 20, bg_opacity))
-                gradient.setColorAt(1.0,  QtGui.QColor(3,   8, 16, bg_opacity))
+                gradient.setColorAt(0.0, QtGui.QColor(15, 18, 22, bg_opacity))
+                gradient.setColorAt(0.35, QtGui.QColor(10, 12, 16, bg_opacity))
+                gradient.setColorAt(0.65, QtGui.QColor(10, 12, 16, bg_opacity))
+                gradient.setColorAt(1.0, QtGui.QColor(8, 10, 14, bg_opacity))
                 bg_painter.fillRect(self.cached_background.rect(), gradient)
 
-                # LED pixel grid — 1px dark gutter every 3px on both axes.
-                # Horizontal row gaps
-                h_gap = QtGui.QColor(0, 0, 0, 160)
-                for y in range(0, self.height(), 3):
-                    bg_painter.fillRect(0, y, self.width(), 1, h_gap)
-                # Vertical column gaps — creates the dot-matrix cell grid
-                v_gap = QtGui.QColor(0, 0, 0, 130)
-                for x in range(0, self.width(), 3):
-                    bg_painter.fillRect(x, 0, 1, self.height(), v_gap)
+                # Horizontal scanlines — every other row slightly darker,
+                # mimicking the gap between LED rows on a real board
+                scan_color = QtGui.QColor(0, 0, 0, 55)
+                for y in range(0, self.height(), 2):
+                    bg_painter.fillRect(0, y, self.width(), 1, scan_color)
             else:
                 bg_painter.fillRect(self.cached_background.rect(), QtGui.QColor(0, 0, 0, bg_opacity))
             bg_painter.end()
@@ -2113,23 +2025,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # renders correctly at any display scale factor (DPR).
         if self.intro_active and self.intro_display is not None:
             painter.drawPixmap(QtCore.QRect(0, 0, self.width(), self.height()), self.intro_display)
-            # Apply glass overlay over the intro the same way it applies to the normal ticker
-            if glass_overlay:
-                if self.cached_overlay is None or self.last_height != self.height():
-                    self.cached_overlay = QtGui.QPixmap(self.width(), self.height())
-                    self.cached_overlay.fill(QtCore.Qt.transparent)
-                    overlay_painter = QtGui.QPainter(self.cached_overlay)
-                    overlay_gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
-                    overlay_gradient.setColorAt(0.00, QtGui.QColor(255, 255, 255, 8))
-                    overlay_gradient.setColorAt(0.08, QtGui.QColor(255, 255, 255, 30))
-                    overlay_gradient.setColorAt(0.30, QtGui.QColor(255, 255, 255, 20))
-                    overlay_gradient.setColorAt(0.55, QtGui.QColor(255, 255, 255, 10))
-                    overlay_gradient.setColorAt(0.80, QtGui.QColor(255, 255, 255, 3))
-                    overlay_gradient.setColorAt(1.00, QtGui.QColor(255, 255, 255, 0))
-                    overlay_painter.fillRect(self.cached_overlay.rect(), overlay_gradient)
-                    overlay_painter.end()
-                    self.last_height = self.height()
-                painter.drawPixmap(0, 0, self.cached_overlay)
             painter.end()
             return
 
@@ -2155,10 +2050,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # pixel — no bilinear filtering, no per-frame sharpness variation, smooth
         # motion at DPR×1 resolution (0.5 logical-px steps at DPR 2, etc.).
         phys_x = round(self.scroll_offset * self.dpr) / self.dpr
-        _content_alpha = settings.get('content_opacity', 255) / 255.0
-        painter.setOpacity(_content_alpha)
         painter.drawPixmap(QtCore.QPointF(-phys_x, 0), self.ticker_pixmap)
-        painter.setOpacity(1.0)
 
         # Cache overlay if settings haven't changed
         if glass_overlay:
@@ -2167,16 +2059,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self.cached_overlay.fill(QtCore.Qt.transparent)
 
                 overlay_painter = QtGui.QPainter(self.cached_overlay)
-                # Glass reflection — soft bloom peaking near the top, fading
-                # gradually across most of the ticker height (no hard edge line)
+                # Glass glare — bright top sheen fading to transparent, matching reference
                 overlay_gradient = QtGui.QLinearGradient(0, 0, 0, self.height())
-                overlay_gradient.setColorAt(0.00, QtGui.QColor(255, 255, 255, 8))
-                overlay_gradient.setColorAt(0.08, QtGui.QColor(255, 255, 255, 30))
-                overlay_gradient.setColorAt(0.30, QtGui.QColor(255, 255, 255, 20))
-                overlay_gradient.setColorAt(0.55, QtGui.QColor(255, 255, 255, 10))
-                overlay_gradient.setColorAt(0.80, QtGui.QColor(255, 255, 255, 3))
+                overlay_gradient.setColorAt(0.00, QtGui.QColor(255, 255, 255, 48))
+                overlay_gradient.setColorAt(0.25, QtGui.QColor(255, 255, 255, 12))
+                overlay_gradient.setColorAt(0.65, QtGui.QColor(255, 255, 255, 4))
                 overlay_gradient.setColorAt(1.00, QtGui.QColor(255, 255, 255, 0))
                 overlay_painter.fillRect(self.cached_overlay.rect(), overlay_gradient)
+                # 1px top-edge highlight — simulates glass catching light at the bezel
+                overlay_painter.fillRect(0, 2, self.width(), 1, QtGui.QColor(255, 255, 255, 55))
                 overlay_painter.end()
 
                 self.last_height = self.height()
@@ -2244,13 +2135,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         preferred_font = self.settings.get('font', 'LED Board-7')
         font_to_use = self.font_family if preferred_font == 'LED Board-7' else preferred_font
         record_font_family = load_record_font_family() or font_to_use
-        self._qfont = QtGui.QFont(font_to_use)
-        self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
-        self._qfont.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-        )
-        self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        self.font = QtGui.QFont(font_to_use)
+        self.font.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
+        self.font.setBold(True)
         self.small_font = QtGui.QFont(record_font_family)
         self.small_font.setPixelSize(max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3)
         self.time_font = QtGui.QFont(font_to_use)
@@ -2289,7 +2176,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             QtWidgets.QApplication.instance().quit()
         elif key == 's':
             if not hasattr(self, '_standings_win') or not self._standings_win.isVisible():
-                self._standings_win = StandingsWindow(ticker_widget=self)
+                self._standings_win = StandingsWindow()
                 self._standings_win.show()
             else:
                 self._standings_win.raise_()
@@ -2371,7 +2258,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if not hasattr(self, '_standings_win') or \
                     self._standings_win is None or \
                     not self._standings_win.isVisible():
-                self._standings_win = StandingsWindow(ticker_widget=self)
+                self._standings_win = StandingsWindow()
                 self._standings_win.show()
             else:
                 self._standings_win.raise_()
@@ -2381,12 +2268,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
         menu.addSeparator()
 
         settings_action = menu.addAction("Settings...")
-        settings_action.triggered.connect(lambda: SettingsDialog(self).exec_())  # type: ignore[arg-type]
+        settings_action.triggered.connect(lambda: SettingsDialog(self).exec_())
 
         menu.addSeparator()
 
         about_action = menu.addAction("About MLB-TCKR...")
-        about_action.triggered.connect(lambda: AboutDialog(self).exec_())  # type: ignore[arg-type]
+        about_action.triggered.connect(lambda: AboutDialog(self).exec_())
 
         menu.addSeparator()
 
@@ -2536,13 +2423,7 @@ class StandingsWindow(QtWidgets.QWidget):
 
     def _compute_scale(self):
         """Return a scale factor ≤ 1.0 so the window fits available screen space."""
-        if self._ticker_widget is not None:
-            _scr = QtWidgets.QApplication.screenAt(self._ticker_widget.geometry().center())
-            if _scr is None:
-                _scr = QtWidgets.QApplication.primaryScreen()
-        else:
-            _scr = QtWidgets.QApplication.primaryScreen()
-        avail = _scr.availableGeometry()
+        avail = QtWidgets.QApplication.primaryScreen().availableGeometry()
         # Design dimensions match the layout at 100 % scale on a 1080p monitor.
         # ideal_w = 3 columns (524 each) + 2 dividers (34 each) + h-margins (56)
         ideal_w = 1696
@@ -2578,20 +2459,19 @@ class StandingsWindow(QtWidgets.QWidget):
         self._CLOSE_W   = max(90,  int(160 * s))
         self._CLOSE_H   = max(30,  int(52  * s))
 
-    def __init__(self, ticker_widget=None, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setWindowTitle("MLB Standings")
 
-        self._league         = 'AL'
-        self._data           = None
-        self._loading        = False
-        self._ticker_widget  = ticker_widget
+        self._league  = 'AL'
+        self._data    = None
+        self._loading = False
 
         self._scale = self._compute_scale()
         self._compute_sizes()
         self._build_ui()
-        self._position_below_ticker()
+        self._center_on_desktop()
         self._fetch()
 
     # ------------------------------------------------------------------
@@ -2737,7 +2617,7 @@ class StandingsWindow(QtWidgets.QWidget):
             QPushButton:hover { background: #3a3a3a; color: #ffffff; }
             QPushButton:pressed { background: #111; }
         """)
-        close_btn.clicked.connect(self.close)  # type: ignore[arg-type]
+        close_btn.clicked.connect(self.close)
         bottom.addWidget(close_btn)
         outer.addLayout(bottom)
 
@@ -2797,7 +2677,7 @@ class StandingsWindow(QtWidgets.QWidget):
         self._loading_lbl.hide()
         self._data = data
         self._populate()
-        self._position_below_ticker()
+        self._center_on_desktop()
 
     def _populate(self):
         """Fill all three division columns with the current league's data."""
@@ -2896,28 +2776,11 @@ class StandingsWindow(QtWidgets.QWidget):
             self._populate()
 
 
-    def _position_below_ticker(self):
-        """Place the window just below the ticker bar, horizontally centered on it.
-        Falls back to centering on the primary screen if no ticker reference is held."""
+    def _center_on_desktop(self):
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         self.adjustSize()
-        ticker = self._ticker_widget
-        if ticker is not None:
-            _scr = QtWidgets.QApplication.screenAt(ticker.geometry().center())
-            if _scr is None:
-                _scr = QtWidgets.QApplication.primaryScreen()
-        else:
-            _scr = QtWidgets.QApplication.primaryScreen()
-        screen = _scr.availableGeometry()
-        if ticker is not None:
-            tg = ticker.frameGeometry()
-            x = tg.left() + (tg.width() - self.width()) // 2
-            y = tg.bottom() + 8          # 8 px gap below the ticker
-        else:
-            x = screen.x() + (screen.width()  - self.width())  // 2
-            y = screen.y() + (screen.height() - self.height()) // 2
-        # Clamp so the window never escapes the available screen area
-        x = max(screen.left(), min(x, screen.right()  - self.width()))
-        y = max(screen.top(),  min(y, screen.bottom() - self.height()))
+        x = screen.x() + (screen.width()  - self.width())  // 2
+        y = screen.y() + (screen.height() - self.height()) // 2
         self.move(x, y)
 
     # ------------------------------------------------------------------
@@ -2986,8 +2849,7 @@ class AboutDialog(QtWidgets.QDialog):
             return l
 
         # App name
-        self._title_lbl = _lbl("MLB-TCKR", 52, "#FFFFFF", bold=False, bot_pad=4)
-        outer.addWidget(self._title_lbl)
+        outer.addWidget(_lbl("MLB-TCKR", 52, "#FFFFFF", bold=True, bot_pad=4))
 
         # Version
         outer.addWidget(_lbl("Version 0.9.6 Beta", 22, "#AAAAAA", bot_pad=14))
@@ -2996,7 +2858,6 @@ class AboutDialog(QtWidgets.QDialog):
         rule = QtWidgets.QFrame()
         rule.setFrameShape(QtWidgets.QFrame.HLine)
         rule.setStyleSheet("background: #00FF44; max-height: 2px;")
-        self._rule = rule
         outer.addWidget(rule)
         outer.addSpacing(14)
 
@@ -3057,21 +2918,6 @@ class AboutDialog(QtWidgets.QDialog):
         btn_row.addWidget(close_btn)
         outer.addLayout(btn_row)
 
-        # Rainbow pulse timer — cycles hue across title and rule in unison
-        self._hue = 0.0
-        self._rainbow_timer = QtCore.QTimer(self)
-        self._rainbow_timer.timeout.connect(self._pulse_rainbow)
-        self._rainbow_timer.start(50)
-
-    def _pulse_rainbow(self):
-        self._hue = (self._hue + 0.005) % 1.0
-        c = QtGui.QColor.fromHsvF(self._hue, 1.0, 1.0)
-        hex_c = c.name()
-        self._title_lbl.setStyleSheet(
-            f"color: {hex_c}; padding-top: 0px; padding-bottom: 4px;"
-        )
-        self._rule.setStyleSheet(f"background: {hex_c}; max-height: 2px;")
-
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
@@ -3094,271 +2940,14 @@ class AboutDialog(QtWidgets.QDialog):
             self.move(event.globalPos() - self._drag_pos)
 
 
-# ── Settings dialog dark theme — matches the LED board palette ────────────────
-SETTINGS_DIALOG_QSS = """
-QDialog {
-    background-color: #0f1216;
-    color: #dce0ea;
-    font-family: 'Segoe UI', Arial, sans-serif;
-    font-size: 12px;
-}
-
-/* ── Tab bar ── */
-QTabWidget::pane {
-    background-color: #0f1216;
-    border: 1px solid #2a3a5e;
-    border-top: none;
-}
-QTabBar {
-    background-color: #0f1216;
-}
-QTabBar::tab {
-    background-color: #0a0d14;
-    color: #8ab4f8;
-    border: 1px solid #2a3a5e;
-    border-bottom: none;
-    padding: 6px 18px;
-    min-width: 90px;
-    margin-right: 2px;
-    font-weight: bold;
-    letter-spacing: 0.5px;
-}
-QTabBar::tab:selected {
-    background-color: #1a2035;
-    color: #00FF44;
-    border-bottom: 2px solid #00FF44;
-}
-QTabBar::tab:hover:!selected {
-    background-color: #151820;
-    color: #dce0ea;
-}
-
-/* ── Group boxes ── */
-QGroupBox {
-    background-color: #151820;
-    border: 1px solid #2a3a5e;
-    border-radius: 4px;
-    margin-top: 10px;
-    padding: 8px 6px 4px 6px;
-    color: #8ab4f8;
-    font-weight: bold;
-    font-size: 11px;
-    letter-spacing: 0.5px;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    padding: 0 6px;
-    color: #8ab4f8;
-    font-weight: bold;
-    text-transform: uppercase;
-    font-size: 10px;
-    letter-spacing: 1px;
-}
-
-/* ── Generic controls ── */
-QLabel {
-    color: #dce0ea;
-    background: transparent;
-}
-QLabel#restartNote {
-    color: #FFA500;
-    font-size: 10px;
-    font-style: italic;
-}
-
-QCheckBox {
-    color: #dce0ea;
-    spacing: 8px;
-    background: transparent;
-}
-QCheckBox::indicator {
-    width: 14px;
-    height: 14px;
-    border: 1px solid #4a5a7e;
-    border-radius: 2px;
-    background-color: #0a0d14;
-}
-QCheckBox::indicator:checked {
-    background-color: #00FF44;
-    border-color: #00FF44;
-    image: none;
-}
-QCheckBox::indicator:hover {
-    border-color: #8ab4f8;
-}
-
-QSpinBox, QLineEdit, QComboBox {
-    background-color: #0a0d14;
-    color: #dce0ea;
-    border: 1px solid #2a3a5e;
-    border-radius: 3px;
-    padding: 3px 6px;
-    selection-background-color: #1a2035;
-    selection-color: #00FF44;
-}
-QSpinBox:hover, QLineEdit:hover, QComboBox:hover {
-    border-color: #4a5a7e;
-}
-QSpinBox:focus, QLineEdit:focus, QComboBox:focus {
-    border-color: #8ab4f8;
-    outline: none;
-}
-QSpinBox::up-button, QSpinBox::down-button {
-    background-color: #1a2035;
-    border: none;
-    width: 16px;
-}
-QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-    background-color: #253050;
-}
-QSpinBox::up-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-bottom: 5px solid #8ab4f8;
-    width: 0; height: 0;
-}
-QSpinBox::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #8ab4f8;
-    width: 0; height: 0;
-}
-
-QComboBox::drop-down {
-    border: none;
-    background-color: #1a2035;
-    width: 20px;
-}
-QComboBox::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #8ab4f8;
-    width: 0; height: 0;
-}
-QComboBox QAbstractItemView {
-    background-color: #0a0d14;
-    color: #dce0ea;
-    border: 1px solid #2a3a5e;
-    selection-background-color: #1a2035;
-    selection-color: #00FF44;
-    outline: none;
-}
-
-/* ── Slider (Team Font Size) ── */
-QSlider::groove:horizontal {
-    background-color: #0a0d14;
-    border: 1px solid #2a3a5e;
-    height: 5px;
-    border-radius: 2px;
-}
-QSlider::sub-page:horizontal {
-    background-color: #00FF44;
-    border-radius: 2px;
-}
-QSlider::add-page:horizontal {
-    background-color: #1a2035;
-    border-radius: 2px;
-}
-QSlider::handle:horizontal {
-    background-color: #00FF44;
-    border: 2px solid #0a0d14;
-    width: 14px;
-    height: 14px;
-    margin: -5px 0;
-    border-radius: 7px;
-}
-QSlider::handle:horizontal:hover {
-    background-color: #44ffaa;
-}
-
-/* ── Buttons ── */
-QPushButton {
-    background-color: #1a2035;
-    color: #dce0ea;
-    border: 1px solid #2a3a5e;
-    border-radius: 4px;
-    padding: 5px 14px;
-    font-weight: bold;
-}
-QPushButton:hover {
-    background-color: #253050;
-    border-color: #4a5a7e;
-    color: #ffffff;
-}
-QPushButton:pressed {
-    background-color: #0f1626;
-}
-QPushButton:default {
-    border-color: #00FF44;
-}
-
-/* ── Dialog button box ── */
-QDialogButtonBox QPushButton {
-    min-width: 70px;
-}
-
-/* ── Scroll area ── */
-QScrollArea {
-    background-color: #0f1216;
-    border: none;
-}
-QScrollArea > QWidget > QWidget {
-    background-color: #0f1216;
-}
-
-/* ── Scroll bars ── */
-QScrollBar:vertical {
-    background-color: #0a0d14;
-    width: 10px;
-    margin: 0;
-    border: none;
-}
-QScrollBar::handle:vertical {
-    background-color: #2a3a5e;
-    border-radius: 4px;
-    min-height: 24px;
-}
-QScrollBar::handle:vertical:hover {
-    background-color: #4a5a7e;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-    height: 0; background: none;
-}
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-    background: none;
-}
-QScrollBar:horizontal {
-    background-color: #0a0d14;
-    height: 10px;
-    margin: 0;
-    border: none;
-}
-QScrollBar::handle:horizontal {
-    background-color: #2a3a5e;
-    border-radius: 4px;
-    min-width: 24px;
-}
-QScrollBar::handle:horizontal:hover {
-    background-color: #4a5a7e;
-}
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    width: 0; background: none;
-}
-"""
-
-
 class SettingsDialog(QtWidgets.QDialog):
     """Settings dialog with tabs for team colors and general settings"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("MLB-TCKR Settings")
-        self.setMinimumSize(700, 640)
-
+        self.setWindowTitle("MLB Ticker Settings")
+        self.setMinimumSize(600, 500)
+        
         # Load current settings
         self.settings = get_settings()
         
@@ -3388,59 +2977,111 @@ class SettingsDialog(QtWidgets.QDialog):
         
         # Layout
         layout = QtWidgets.QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
         layout.addWidget(tabs)
         layout.addWidget(button_box)
         self.setLayout(layout)
-
-        # Apply dark theme
-        self.setStyleSheet(SETTINGS_DIALOG_QSS)
-
-        # Auto-size to show all General-tab content without scrolling.
-        # ensurePolished() applies styles/fonts so sizeHint() is accurate.
-        self.ensurePolished()
-        _content_h = self._general_container.sizeHint().height()
-        # chrome = tab bar (~28) + tab frame (~8) + button box (~36)
-        #        + outer layout margins (16) + spacing (6) = ~94; use 110 to be safe
-        _chrome_h = 110
-        _screen = QtWidgets.QApplication.primaryScreen()
-        _avail_h = _screen.availableGeometry().height() - 80  # leave room for taskbar/title
-        _target_h = min(_content_h + _chrome_h, _avail_h)
-        self.resize(800, max(640, _target_h))
-
+    
     def create_general_tab(self):
-        """Create general settings tab — grouped into logical sections."""
-        # Outer scroll area so the tab is usable on small screens
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-
-        container = QtWidgets.QWidget()
-        outer_layout = QtWidgets.QVBoxLayout(container)
-        outer_layout.setContentsMargins(8, 8, 8, 8)
-        outer_layout.setSpacing(10)
-
-        def make_form(group_title):
-            """Create a QGroupBox with an inner QFormLayout and return (group, form)."""
-            group = QtWidgets.QGroupBox(group_title)
-            form = QtWidgets.QFormLayout(group)
-            form.setContentsMargins(10, 14, 10, 10)
-            form.setVerticalSpacing(7)
-            form.setHorizontalSpacing(16)
-            form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-            return group, form
-
-        # ── 1. Display ──────────────────────────────────────────────────────
-        # ── 1. Display ──────────────────────────────────────────────────────
-        grp_display, form_display = make_form("Display")
-
+        """Create general settings tab"""
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QFormLayout()
+        
+        # Speed
+        self.speed_spin = QtWidgets.QSpinBox()
+        self.speed_spin.setRange(1, 10)
+        self.speed_spin.setValue(self.settings.get('speed', 2))
+        layout.addRow("Ticker Speed:", self.speed_spin)
+        
+        # Update interval
+        self.update_spin = QtWidgets.QSpinBox()
+        self.update_spin.setRange(5, 300)
+        self.update_spin.setValue(self.settings.get('update_interval', 10))
+        self.update_spin.setSuffix(" seconds")
+        layout.addRow("Update Interval:", self.update_spin)
+        
+        # Ticker height
         self.height_spin = QtWidgets.QSpinBox()
         self.height_spin.setRange(40, 200)
-        self.height_spin.setValue(self.settings.get('ticker_height', 64))
-        self.height_spin.setSuffix(" px")
-        form_display.addRow("Ticker Height:", self.height_spin)
+        self.height_spin.setValue(self.settings.get('ticker_height', 60))
+        self.height_spin.setSuffix(" pixels")
+        layout.addRow("Ticker Height:", self.height_spin)
+        
+        # Font selection – populate from all installed fonts
+        self.font_combo = QtWidgets.QComboBox()
+        self.font_combo.setMaxVisibleItems(20)
+        db = QtGui.QFontDatabase()
+        all_fonts = sorted(db.families(), key=lambda f: f.lstrip('@').lower())
+        # Ensure the custom LED font (if loaded) appears even if not yet in families
+        led_font = 'LED Board-7'
+        if led_font not in all_fonts:
+            all_fonts.insert(0, led_font)
+        self.font_combo.addItems(all_fonts)
+        current_font = self.settings.get('font', led_font)
+        index = self.font_combo.findText(current_font)
+        if index >= 0:
+            self.font_combo.setCurrentIndex(index)
+        else:
+            self.font_combo.setCurrentIndex(0)
+        # Render each item in the dropdown in its own typeface
+        self.font_combo.setItemDelegate(FontPreviewDelegate(self.font_combo))
+        self.font_combo.setMinimumHeight(32)
+        self.font_combo.setFont(QtGui.QFont(current_font, 13))
+        self.font_combo.currentTextChanged.connect(
+            lambda f: self.font_combo.setFont(QtGui.QFont(f, 13))
+        )
+        layout.addRow("Font:", self.font_combo)
 
+        # Font size scale (percent)
+        self.font_scale_spin = QtWidgets.QSpinBox()
+        self.font_scale_spin.setRange(80, 200)
+        self.font_scale_spin.setValue(self.settings.get('font_scale_percent', 120))
+        self.font_scale_spin.setSuffix("%")
+        self.font_scale_spin.setToolTip("Scale ticker text size without changing logo size")
+        layout.addRow("Font Size Scale:", self.font_scale_spin)
+
+        # Show team records
+        self.records_check = QtWidgets.QCheckBox()
+        self.records_check.setChecked(self.settings.get('show_team_records', True))
+        layout.addRow("Show Team Records (W-L):", self.records_check)
+        
+        # Include final games
+        self.final_check = QtWidgets.QCheckBox()
+        self.final_check.setChecked(self.settings.get('include_final_games', True))
+        layout.addRow("Include Final Games:", self.final_check)
+        
+        # Include scheduled games
+        self.scheduled_check = QtWidgets.QCheckBox()
+        self.scheduled_check.setChecked(self.settings.get('include_scheduled_games', True))
+        layout.addRow("Include Scheduled Games:", self.scheduled_check)
+        
+        # Show team cities
+        self.cities_check = QtWidgets.QCheckBox()
+        self.cities_check.setChecked(self.settings.get('show_team_cities', True))
+        layout.addRow("Show Team Cities:", self.cities_check)
+        
+        # LED Background
+        self.led_bg_check = QtWidgets.QCheckBox()
+        self.led_bg_check.setChecked(self.settings.get('led_background', True))
+        layout.addRow("LED-Style Background:", self.led_bg_check)
+        
+        # Glass Overlay
+        self.glass_check = QtWidgets.QCheckBox()
+        self.glass_check.setChecked(self.settings.get('glass_overlay', True))
+        layout.addRow("Glass Overlay Effect:", self.glass_check)
+        
+        # Background Opacity
+        self.opacity_spin = QtWidgets.QSpinBox()
+        self.opacity_spin.setRange(0, 255)
+        self.opacity_spin.setValue(self.settings.get('background_opacity', 230))
+        self.opacity_spin.setToolTip("0 = Fully Transparent, 255 = Fully Opaque")
+        layout.addRow("Background Opacity:", self.opacity_spin)
+
+        # FPS Overlay
+        self.fps_check = QtWidgets.QCheckBox()
+        self.fps_check.setChecked(self.settings.get('show_fps_overlay', False))
+        layout.addRow("Show FPS Overlay:", self.fps_check)
+
+        # Display selection
         self.monitor_combo = QtWidgets.QComboBox()
         _all_screens = QtWidgets.QApplication.screens()
         for _i, _s in enumerate(_all_screens):
@@ -3449,346 +3090,117 @@ class SettingsDialog(QtWidgets.QDialog):
             self.monitor_combo.addItem(_label)
         _saved_mon = min(self.settings.get('monitor_index', 0), max(0, len(_all_screens) - 1))
         self.monitor_combo.setCurrentIndex(_saved_mon)
-        form_display.addRow("Monitor:", self.monitor_combo)
+        layout.addRow("Display:", self.monitor_combo)
 
-        restart_note = QtWidgets.QLabel("\u26a0  Ticker Height and Monitor changes require a program restart.")
-        restart_note.setObjectName("restartNote")
-        restart_note.setWordWrap(True)
-        form_display.addRow(restart_note)
-
-        outer_layout.addWidget(grp_display)
-
-        # ── 2. Performance ──────────────────────────────────────────────────
-        grp_perf, form_perf = make_form("Performance")
-
-        self.speed_spin = QtWidgets.QSpinBox()
-        self.speed_spin.setRange(1, 10)
-        self.speed_spin.setValue(self.settings.get('speed', 5))
-        self.speed_spin.setToolTip("Scroll speed of the ticker (1 = slowest, 10 = fastest)")
-        form_perf.addRow("Ticker Speed:", self.speed_spin)
-
-        self.update_spin = QtWidgets.QSpinBox()
-        self.update_spin.setRange(5, 300)
-        self.update_spin.setValue(self.settings.get('update_interval', 10))
-        self.update_spin.setSuffix(" seconds")
-        form_perf.addRow("Update Interval:", self.update_spin)
-
-        self.fps_check = QtWidgets.QCheckBox("Show overlay")
-        self.fps_check.setChecked(self.settings.get('show_fps_overlay', False))
-        form_perf.addRow("FPS Counter:", self.fps_check)
-
-        outer_layout.addWidget(grp_perf)
-
-        # ── 3. Appearance ───────────────────────────────────────────────────
-        grp_appearance, form_appearance = make_form("Appearance")
-
-        self.led_bg_check = QtWidgets.QCheckBox("Enabled")
-        self.led_bg_check.setChecked(self.settings.get('led_background', True))
-        form_appearance.addRow("LED-Style Background:", self.led_bg_check)
-
-        self.glass_check = QtWidgets.QCheckBox("Enabled")
-        self.glass_check.setChecked(self.settings.get('glass_overlay', True))
-        form_appearance.addRow("Glass Overlay Effect:", self.glass_check)
-
-        _opacity_row = QtWidgets.QHBoxLayout()
-        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.opacity_slider.setRange(0, 100)
-        bg_opacity_pct = int(round(self.settings.get('background_opacity', 255) * 100 / 255))
-        self.opacity_slider.setValue(bg_opacity_pct)
-        self.opacity_slider.setToolTip("0% = Fully Transparent  ·  100% = Fully Opaque")
-        self.opacity_slider.setMinimumWidth(160)
-        self._opacity_label = QtWidgets.QLabel(f"{self.opacity_slider.value()}%")
-        self._opacity_label.setFixedWidth(36)
-        self.opacity_slider.valueChanged.connect(
-            lambda v: self._opacity_label.setText(f"{v}%")
-        )
-        _opacity_row.addWidget(self.opacity_slider)
-        _opacity_row.addWidget(self._opacity_label)
-        form_appearance.addRow("Background Opacity:", _opacity_row)
-
-        _content_opacity_row = QtWidgets.QHBoxLayout()
-        self.content_opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.content_opacity_slider.setRange(0, 100)
-        content_opacity_pct = int(round(self.settings.get('content_opacity', 255) * 100 / 255))
-        self.content_opacity_slider.setValue(content_opacity_pct)
-        self.content_opacity_slider.setToolTip("0% = Fully Transparent  ·  100% = Fully Opaque")
-        self.content_opacity_slider.setMinimumWidth(160)
-        self._content_opacity_label = QtWidgets.QLabel(f"{self.content_opacity_slider.value()}%")
-        self._content_opacity_label.setFixedWidth(36)
-        self.content_opacity_slider.valueChanged.connect(
-            lambda v: self._content_opacity_label.setText(f"{v}%")
-        )
-        _content_opacity_row.addWidget(self.content_opacity_slider)
-        _content_opacity_row.addWidget(self._content_opacity_label)
-        form_appearance.addRow("Content Opacity:", _content_opacity_row)
-
-        outer_layout.addWidget(grp_appearance)
-
-        # ── 4. Font ─────────────────────────────────────────────────────────
-        grp_font, form_font = make_form("Font")
-
-        self.font_combo = QtWidgets.QComboBox()
-        self.font_combo.setMaxVisibleItems(20)
-        db = QtGui.QFontDatabase()
-        led_font = 'LED Board-7'
-        all_fonts = sorted(db.families(), key=lambda f: f.lstrip('@').lower())
-        if led_font not in all_fonts:
-            all_fonts.insert(0, led_font)
-        self.font_combo.addItems(all_fonts)
-        current_font = self.settings.get('font', led_font)
-        idx = self.font_combo.findText(current_font)
-        self.font_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.font_combo.setItemDelegate(FontPreviewDelegate(self.font_combo))
-        self.font_combo.setMinimumHeight(32)
-        self.font_combo.setFont(QtGui.QFont(current_font, 13))
-        self.font_combo.currentTextChanged.connect(
-            lambda f: self.font_combo.setFont(QtGui.QFont(f, 13))
-        )
-        form_font.addRow("Font Family:", self.font_combo)
-
-        # Team Font Size — slider + live % label
-        font_slider_row = QtWidgets.QHBoxLayout()
-        self.font_scale_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.font_scale_slider.setRange(80, 200)
-        self.font_scale_slider.setValue(self.settings.get('font_scale_percent', 175))
-        self.font_scale_slider.setTickInterval(10)
-        self.font_scale_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
-        self.font_scale_label = QtWidgets.QLabel(
-            f"{self.font_scale_slider.value()}%"
-        )
-        self.font_scale_label.setMinimumWidth(40)
-        self.font_scale_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.font_scale_label.setStyleSheet("color: #00FF44; font-weight: bold; font-size: 13px;")
-        self.font_scale_slider.valueChanged.connect(
-            lambda v: self.font_scale_label.setText(f"{v}%")
-        )
-        font_slider_row.addWidget(self.font_scale_slider)
-        font_slider_row.addWidget(self.font_scale_label)
-        form_font.addRow("Team Font Size:", font_slider_row)
-
-        outer_layout.addWidget(grp_font)
-
-        # ── 5. Content ──────────────────────────────────────────────────────
-        grp_content, form_content = make_form("Content")
-
-        self.records_check = QtWidgets.QCheckBox("Enabled")
-        self.records_check.setChecked(self.settings.get('show_team_records', True))
-        form_content.addRow("Show Player Names, Record:", self.records_check)
-
-        self.cities_check = QtWidgets.QCheckBox("Enabled")
-        self.cities_check.setChecked(not self.settings.get('show_team_cities', False))
-        form_content.addRow("Show Only Team Name:", self.cities_check)
-
-        self.final_check = QtWidgets.QCheckBox("Enabled")
-        self.final_check.setChecked(self.settings.get('include_final_games', True))
-        form_content.addRow("Include Final Games:", self.final_check)
-
-        self.scheduled_check = QtWidgets.QCheckBox("Enabled")
-        self.scheduled_check.setChecked(self.settings.get('include_scheduled_games', True))
-        form_content.addRow("Include Scheduled Games:", self.scheduled_check)
-
-        outer_layout.addWidget(grp_content)
-
-        # ── 6. Startup ───────────────────────────────────────────────────────
-        grp_startup, form_startup = make_form("Startup")
-
-        self.startup_check = QtWidgets.QCheckBox("Load at Windows Startup")
-        self.startup_check.setChecked(get_startup_registry())
-        form_startup.addRow(self.startup_check)
-
-        outer_layout.addWidget(grp_startup)
-
-        outer_layout.addStretch()
-        scroll.setWidget(container)
-        self._general_container = container  # measured in __init__ for auto-sizing
-        return scroll
+        widget.setLayout(layout)
+        return widget
 
     def create_team_colors_tab(self):
-        """Create team colors customization tab — AL on left, NL on right."""
+        """Create team colors customization tab"""
         widget = QtWidgets.QWidget()
-        outer = QtWidgets.QVBoxLayout()
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(8)
-
+        layout = QtWidgets.QVBoxLayout()
+        
         # Info label
         info = QtWidgets.QLabel(
-            "Choose Primary, Secondary, or Tertiary to use an official MLB palette color, "
-            "or pick Custom to enter any hex color. Changes apply per-team."
+            "Customize team colors for the ticker display. "
+            "Leave empty to use default MLB colors."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("padding: 5px; background: #151820; border: 1px solid #2a3a5e; color: #dce0ea;")
-        outer.addWidget(info)
-
+        info.setStyleSheet("padding: 5px; background: #f0f0f0; border: 1px solid #ccc;")
+        layout.addWidget(info)
+        
         # Reset button
         reset_btn = QtWidgets.QPushButton("Reset All to Defaults")
         reset_btn.clicked.connect(self.reset_team_colors)
-        outer.addWidget(reset_btn)
-
-        # Get current custom colors
-        custom_colors = self.settings.get('team_colors', {})
-        self.color_buttons = {}
-
-        # League / division structure
-        AL_DIVISIONS = [
-            ("AL East",    ["Orioles", "Red Sox", "Yankees", "Rays", "Blue Jays"]),
-            ("AL Central", ["White Sox", "Guardians", "Tigers", "Royals", "Twins"]),
-            ("AL West",    ["Astros", "Angels", "Athletics", "Mariners", "Rangers"]),
-        ]
-        NL_DIVISIONS = [
-            ("NL East",    ["Braves", "Marlins", "Mets", "Phillies", "Nationals"]),
-            ("NL Central", ["Cubs", "Reds", "Brewers", "Pirates", "Cardinals"]),
-            ("NL West",    ["Diamondbacks", "Rockies", "Dodgers", "Padres", "Giants"]),
-        ]
-
-        def make_color_row(team):
-            """Build slot-combo + swatch + hex row and register in self.color_buttons."""
-            palette = MLB_TEAM_COLORS_ALL.get(team, ['#FFFFFF', '#FFFFFF', '#FFFFFF'])
-            stored  = custom_colors.get(team)
-
-            # Resolve initial slot and custom hex from stored value
-            if isinstance(stored, int) and 0 <= stored <= 2:
-                init_slot = stored
-                init_hex  = palette[stored]
-            elif isinstance(stored, str) and stored.startswith('#'):
-                init_slot = 3            # Custom
-                init_hex  = stored
-            else:
-                init_slot = 0            # Primary (default)
-                init_hex  = palette[0]
-
-            # Slot combo: Primary / Secondary / Tertiary / Custom
-            slot_combo = QtWidgets.QComboBox()
-            slot_combo.setFixedWidth(106)
-            slot_combo.addItems(["Primary", "Secondary", "Tertiary", "Custom"])
-            slot_combo.setCurrentIndex(init_slot)
-
-            # Colour swatch — always shows the effective colour
-            swatch_color = palette[init_slot] if init_slot < 3 else init_hex
-            color_btn = QtWidgets.QPushButton()
-            color_btn.setFixedSize(28, 22)
-            color_btn.setStyleSheet(
-                f"background-color: {swatch_color}; border: 1px solid #4a5a7e;"
-            )
-            color_btn.setEnabled(init_slot == 3)
-            color_btn.clicked.connect(lambda checked, t=team: self.pick_team_color(t))
-
-            # Hex input — only editable / relevant in Custom mode
-            hex_input = QtWidgets.QLineEdit(init_hex)
-            hex_input.setMaxLength(7)
-            hex_input.setFixedWidth(68)
-            hex_input.setEnabled(init_slot == 3)
-            hex_input.textChanged.connect(
-                lambda text, t=team: self.update_team_color_preview(t, text)
-            )
-
-            self.color_buttons[team] = {
-                'slot_combo': slot_combo,
-                'button':     color_btn,
-                'input':      hex_input,
-                'color':      swatch_color,
-            }
-
-            slot_combo.currentIndexChanged.connect(
-                lambda i, t=team: self._on_team_slot_changed(t, i)
-            )
-
-            row = QtWidgets.QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(4)
-            row.addWidget(slot_combo)
-            row.addWidget(color_btn)
-            row.addWidget(hex_input)
-            row.addStretch()
-            return row
-
-        def make_league_column(divisions):
-            col = QtWidgets.QVBoxLayout()
-            col.setSpacing(6)
-            for div_name, teams in divisions:
-                grp = QtWidgets.QGroupBox(div_name)
-                form = QtWidgets.QFormLayout(grp)
-                form.setContentsMargins(8, 12, 8, 8)
-                form.setVerticalSpacing(5)
-                form.setHorizontalSpacing(8)
-                for team in teams:
-                    form.addRow(f"{team}:", make_color_row(team))
-                col.addWidget(grp)
-            col.addStretch()
-            return col
-
-        # Scroll area containing the two-column layout
+        layout.addWidget(reset_btn)
+        
+        # Scroll area for team colors
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll_widget = QtWidgets.QWidget()
-        cols_layout = QtWidgets.QHBoxLayout(scroll_widget)
-        cols_layout.setContentsMargins(4, 4, 4, 4)
-        cols_layout.setSpacing(10)
-        cols_layout.addLayout(make_league_column(AL_DIVISIONS))
-        cols_layout.addLayout(make_league_column(NL_DIVISIONS))
-        scroll.setWidget(scroll_widget)
-        outer.addWidget(scroll)
-
-        widget.setLayout(outer)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        
+        colors_widget = QtWidgets.QWidget()
+        colors_layout = QtWidgets.QFormLayout()
+        colors_layout.setSpacing(5)
+        
+        # Get current custom colors
+        custom_colors = self.settings.get('team_colors', {})
+        
+        # Create color picker for each team
+        self.color_buttons = {}
+        teams = sorted(MLB_TEAM_COLORS_DEFAULT.keys())
+        
+        for team in teams:
+            # Get current color (custom or default)
+            current_color = custom_colors.get(team, MLB_TEAM_COLORS_DEFAULT[team])
+            
+            # Color button
+            color_btn = QtWidgets.QPushButton()
+            color_btn.setFixedSize(60, 25)
+            color_btn.setStyleSheet(f"background-color: {current_color}; border: 1px solid #000;")
+            color_btn.clicked.connect(lambda checked, t=team: self.pick_team_color(t))
+            
+            # Hex input
+            hex_input = QtWidgets.QLineEdit(current_color)
+            hex_input.setMaxLength(7)
+            hex_input.setFixedWidth(80)
+            hex_input.textChanged.connect(lambda text, t=team: self.update_team_color_preview(t, text))
+            
+            # Default color label
+            default_label = QtWidgets.QLabel(f"(Default: {MLB_TEAM_COLORS_DEFAULT[team]})")
+            default_label.setStyleSheet("color: #666; font-size: 9px;")
+            
+            # Horizontal layout for color controls
+            h_layout = QtWidgets.QHBoxLayout()
+            h_layout.addWidget(color_btn)
+            h_layout.addWidget(hex_input)
+            h_layout.addWidget(default_label)
+            h_layout.addStretch()
+            
+            colors_layout.addRow(f"{team}:", h_layout)
+            
+            # Store references
+            self.color_buttons[team] = {
+                'button': color_btn,
+                'input': hex_input,
+                'color': current_color
+            }
+        
+        colors_widget.setLayout(colors_layout)
+        scroll.setWidget(colors_widget)
+        layout.addWidget(scroll)
+        
+        widget.setLayout(layout)
         return widget
     
     def pick_team_color(self, team):
-        """Open color picker — auto-switches the row to Custom slot."""
-        widgets = self.color_buttons.get(team)
-        if not widgets:
-            return
-        # Ensure Custom slot is active before opening the dialog
-        if widgets['slot_combo'].currentIndex() != 3:
-            widgets['slot_combo'].setCurrentIndex(3)   # fires _on_team_slot_changed
-        current_color = widgets['color']
+        """Open color picker for a team"""
+        current_color = self.color_buttons[team]['color']
         color = QtWidgets.QColorDialog.getColor(
-            QtGui.QColor(current_color), self, f"Choose color for {team}"
+            QtGui.QColor(current_color),
+            self,
+            f"Choose color for {team}"
         )
+        
         if color.isValid():
             hex_color = color.name()
-            widgets['color'] = hex_color
-            widgets['input'].setText(hex_color)
-            widgets['button'].setStyleSheet(
-                f"background-color: {hex_color}; border: 1px solid #4a5a7e;"
+            self.color_buttons[team]['color'] = hex_color
+            self.color_buttons[team]['input'].setText(hex_color)
+            self.color_buttons[team]['button'].setStyleSheet(
+                f"background-color: {hex_color}; border: 1px solid #000;"
             )
     
     def update_team_color_preview(self, team, hex_color):
-        """Update swatch preview when the Custom hex input changes."""
+        """Update color preview when hex input changes"""
         if hex_color.startswith('#') and len(hex_color) == 7:
             try:
-                QtGui.QColor(hex_color)   # Validate colour string
-                widgets = self.color_buttons.get(team)
-                if widgets:
-                    widgets['color'] = hex_color
-                    widgets['button'].setStyleSheet(
-                        f"background-color: {hex_color}; border: 1px solid #4a5a7e;"
-                    )
-            except Exception:
-                pass
-
-    def _on_team_slot_changed(self, team, index):
-        """React to slot-combo changes: update swatch and enable/disable custom controls."""
-        widgets = self.color_buttons.get(team)
-        if not widgets:
-            return
-        palette   = MLB_TEAM_COLORS_ALL.get(team, ['#FFFFFF', '#FFFFFF', '#FFFFFF'])
-        is_custom = (index == 3)
-        widgets['button'].setEnabled(is_custom)
-        widgets['input'].setEnabled(is_custom)
-        if not is_custom:
-            # Show the chosen palette colour in the swatch
-            color = palette[index] if index < len(palette) else palette[0]
-            widgets['color'] = color
-            widgets['button'].setStyleSheet(
-                f"background-color: {color}; border: 1px solid #4a5a7e;"
-            )
-        else:
-            # Restore swatch to whatever is in the hex input
-            cur = widgets['input'].text()
-            if cur.startswith('#') and len(cur) == 7:
-                widgets['color'] = cur
-                widgets['button'].setStyleSheet(
-                    f"background-color: {cur}; border: 1px solid #4a5a7e;"
+                QtGui.QColor(hex_color)  # Validate
+                self.color_buttons[team]['color'] = hex_color
+                self.color_buttons[team]['button'].setStyleSheet(
+                    f"background-color: {hex_color}; border: 1px solid #000;"
                 )
+            except:
+                pass
     
     def reset_team_colors(self):
         """Reset all team colors to defaults"""
@@ -3801,12 +3213,12 @@ class SettingsDialog(QtWidgets.QDialog):
         
         if reply == QtWidgets.QMessageBox.Yes:
             for team, widgets in self.color_buttons.items():
-                palette = MLB_TEAM_COLORS_ALL.get(team, ['#FFFFFF', '#FFFFFF', '#FFFFFF'])
-                primary = palette[0]
-                # setCurrentIndex(0) fires _on_team_slot_changed → updates swatch automatically
-                widgets['slot_combo'].setCurrentIndex(0)
-                widgets['color'] = primary
-                widgets['input'].setText(primary)
+                default_color = MLB_TEAM_COLORS_DEFAULT[team]
+                widgets['color'] = default_color
+                widgets['input'].setText(default_color)
+                widgets['button'].setStyleSheet(
+                    f"background-color: {default_color}; border: 1px solid #000;"
+                )
     
     def create_network_tab(self):
         """Create network/proxy settings tab"""
@@ -3884,23 +3296,16 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['update_interval'] = self.update_spin.value()
         self.settings['ticker_height'] = self.height_spin.value()
         self.settings['font'] = self.font_combo.currentText()
-        self.settings['font_scale_percent'] = self.font_scale_slider.value()
+        self.settings['font_scale_percent'] = self.font_scale_spin.value()
         self.settings['show_team_records'] = self.records_check.isChecked()
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
-        self.settings['show_team_cities'] = not self.cities_check.isChecked()
+        self.settings['show_team_cities'] = self.cities_check.isChecked()
         self.settings['led_background'] = self.led_bg_check.isChecked()
         self.settings['glass_overlay'] = self.glass_check.isChecked()
-        self.settings['background_opacity'] = int(round(self.opacity_slider.value() * 255 / 100))
-        self.settings['content_opacity'] = int(round(self.content_opacity_slider.value() * 255 / 100))
+        self.settings['background_opacity'] = self.opacity_spin.value()
         self.settings['show_fps_overlay'] = self.fps_check.isChecked()
         self.settings['monitor_index'] = self.monitor_combo.currentIndex()
-
-        # Startup — always save the setting; only touch the registry when frozen
-        enabled = self.startup_check.isChecked()
-        self.settings['load_at_startup'] = enabled
-        if getattr(sys, 'frozen', False):
-            set_startup_registry(enabled)
 
         # Network / proxy settings
         self.settings['use_proxy'] = self.use_proxy_check.isChecked()
@@ -3908,18 +3313,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['use_cert'] = self.use_cert_check.isChecked()
         self.settings['cert_file'] = self.cert_file_edit.text().strip()
 
-        # Team colors — store slot index (1/2) for Secondary/Tertiary, hex for Custom,
-        # nothing for Primary (slot 0, the default).
+        # Team colors
         team_colors = {}
         for team, widgets in self.color_buttons.items():
-            slot_index = widgets['slot_combo'].currentIndex()
-            if slot_index in (1, 2):
-                team_colors[team] = slot_index          # int: 1=secondary 2=tertiary
-            elif slot_index == 3:
-                hex_val = widgets['input'].text()
-                if hex_val.startswith('#') and len(hex_val) == 7:
-                    team_colors[team] = hex_val         # custom hex string
-            # slot 0 (Primary) = default → omit from saved dict
+            color = widgets['color']
+            if color != MLB_TEAM_COLORS_DEFAULT[team]:
+                team_colors[team] = color
         self.settings['team_colors'] = team_colors
 
         save_settings(self.settings)
@@ -3936,7 +3335,7 @@ class SettingsDialog(QtWidgets.QDialog):
     def _offer_restart(self):
         """Ask the user whether to restart now; if yes, relaunch the process."""
         reply = QtWidgets.QMessageBox.question(
-            self,
+            self.parent() or self,
             "Restart Required",
             "Ticker height and/or monitor changes require a restart to take effect.\n\nRestart now?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
@@ -4096,12 +3495,12 @@ def main():
     tray_menu.addSeparator()
 
     settings_action = tray_menu.addAction("Settings...")
-    settings_action.triggered.connect(lambda: SettingsDialog(window).exec_())  # type: ignore[arg-type]
+    settings_action.triggered.connect(lambda: SettingsDialog(window).exec_())
 
     tray_menu.addSeparator()
 
     about_action = tray_menu.addAction("About MLB-TCKR...")
-    about_action.triggered.connect(lambda: AboutDialog(window).exec_())  # type: ignore[arg-type]
+    about_action.triggered.connect(lambda: AboutDialog(window).exec_())
     
     tray_menu.addSeparator()
     
@@ -4117,5 +3516,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

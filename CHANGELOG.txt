@@ -1,6 +1,37 @@
 MLB-TCKR Changelog
 ==================
 
+Version 2.5.6 (2026-03-26)
+--------------------------
+Live settings apply, restart prompt for height/monitor changes, bug fixes
+
+FEATURES:
++ Settings dialog — Apply button now applies hotswappable settings immediately
+  without closing the dialog
+  - Shared _collect_settings() helper saves to disk and updates in-memory state
+  - apply_settings() (Apply button) and save_and_close() (OK button) both call
+    it, then invoke apply_live_settings() on the main window
+  - Previously the OK button required a manual restart for any setting to take
+    effect; now fonts, speed, colors, opacity, LED/glass mode, and record
+    display update instantly
+
++ Restart prompt for settings that require a full restart
+  - Changing ticker_height or monitor_index now shows a Yes/No dialog:
+      "Ticker height and/or monitor changes require a restart to take effect.
+       Restart now?"
+  - On Yes the app relaunches itself immediately via subprocess.Popen and then
+    quits cleanly via QApplication.quit(); works for both regular Python and
+    PyInstaller .exe (detects sys.frozen)
+  - On No the setting is saved and takes effect next time the app is opened
+
+FIXES:
+* apply_live_settings() / keyPressEvent() methods were accidentally merged —
+  keyPressEvent body was appended inside apply_live_settings() after
+  self.update() with no def line, causing NameError: name 'event' is not
+  defined whenever a hotkey was pressed
+  - Fixed by restoring the missing def keyPressEvent(self, event): line
+
+
 Version 2.5.5 (2026-03-25)
 --------------------------
 Scroll judder eliminated — glass-smooth motion at all speeds
