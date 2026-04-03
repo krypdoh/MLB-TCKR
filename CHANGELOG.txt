@@ -1,3 +1,22 @@
+Version 2.5.9 (2026-04-02)
+--------------------------
+Scrolling, odds, and postponed game fixes
+
+IMPROVEMENTS:
++ Scrolling animation is now perfectly smooth on all displays
+  - Scroll timer interval now matches your monitor's refresh rate (Hz)
+  - FPS overlay now shows true displayed frame rate, not timer callback rate
+  - Eliminates judder caused by timer/VSync mismatch
+
++ Postponed games are now always shown
+  - Status text displays "PPD" instead of a start time for postponed games
+  - Postponed games are classified as scheduled (not live or final)
+
+FIXES:
+* Moneyline odds are no longer shown for completed/final games
+  - Prevents stale odds from appearing on yesterday's finished games
+  - Odds only display for scheduled and live games
+
 
 Version 2.5.8 (2026-03-28)
 --------------------------

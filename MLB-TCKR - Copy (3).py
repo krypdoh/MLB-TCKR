@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0401.1830
+Date: 2026.0328.1744
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.0.0"
+VERSION = "0.9.9 beta"
 
 import warnings
 warnings.filterwarnings(
@@ -56,7 +56,6 @@ import math
 import time
 import datetime
 import random
-import requests
 import statsapi
 from PyQt5 import QtWidgets, QtCore, QtGui
 import ctypes
@@ -187,11 +186,7 @@ def get_settings():
         "team_name_color_slot": 0,    # 0=primary  1=secondary  2=tertiary  3=custom
         "team_name_custom_color": "#FFFFFF",  # Used when slot=3
         "load_at_startup": False,  # Register in Windows Run key on launch
-        "docked": True,  # When True, ticker is docked (not moveable) and registered as AppBar
-        "yesterday_cutoff_minutes": 30,  # Show yesterday's finals until N min before first pitch
-        "show_moneyline": False,   # Show H2H moneyline odds from The Odds API
-        "odds_api_key": "",        # API key for api.the-odds-api.com
-        "odds_refresh_minutes": 15, # How often to re-fetch moneyline odds (minutes)
+        "docked": True  # When True, ticker is docked (not moveable) and registered as AppBar
     }
 
 
@@ -559,8 +554,8 @@ def get_team_logo(team_name, size=40):
     return scaled_logo
 
 
-def fetch_todays_games(fetch_date=None):
-    """Fetch all MLB games for today, or for a specific date (YYYY-MM-DD)."""
+def fetch_todays_games():
+    """Fetch all MLB games for today"""
     def format_last_name(player_obj):
         full_name = str(player_obj.get('fullName', '')).strip()
         if not full_name:
@@ -628,8 +623,8 @@ def fetch_todays_games(fetch_date=None):
         return records_map
 
     try:
-        today = fetch_date or datetime.datetime.now().strftime('%Y-%m-%d')
-        season_year = int(today[:4])
+        today = datetime.datetime.now().strftime('%Y-%m-%d')
+        season_year = datetime.datetime.now().year
         print(f"[MLB] Fetching games for {today}")
         
         games = statsapi.schedule(date=today)
@@ -806,8 +801,8 @@ def fetch_todays_games(fetch_date=None):
             elif status in ['Final', 'Completed', 'Game Over']:
                 if settings.get('include_final_games', True):
                     filtered_games.append(game)
-            # Include scheduled/pre-game/postponed if setting allows
-            elif status in ['Pre-Game', 'Scheduled', 'Warmup', 'Postponed']:
+            # Include scheduled/pre-game if setting allows
+            elif status in ['Pre-Game', 'Scheduled', 'Warmup']:
                 if settings.get('include_scheduled_games', True):
                     filtered_games.append(game)
         
@@ -839,131 +834,19 @@ def format_game_time_local(game_datetime):
         return "TBD"
 
 
-# ---------------------------------------------------------------------------
-# Odds API helpers
-# ---------------------------------------------------------------------------
-
-def fetch_mlb_odds(api_key):
-    """Fetch MLB H2H moneyline odds from The Odds API (api.the-odds-api.com).
-
-    Returns a dict mapping normalised team-name pairs to (away_price, home_price)
-    integer tuples.  Prices are American-format (e.g. +150 or -110).
-    Returns {} on any error so callers can treat missing odds gracefully.
-    """
-    if not api_key:
-        return {}
-    try:
-        url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/"
-        params = {
-            "apiKey": api_key,
-            "regions": "us",
-            "markets": "h2h",
-            "oddsFormat": "american",
-        }
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 401:
-            print("[ODDS] Invalid API key — check your The Odds API key in Settings")
-            return {}
-        if resp.status_code == 422:
-            print("[ODDS] No MLB odds available right now (422 from The Odds API)")
-            return {}
-        resp.raise_for_status()
-        data = resp.json()
-        odds_map = {}
-        for game in data:
-            away_name = game.get('away_team', '')
-            home_name = game.get('home_team', '')
-            bookmakers = game.get('bookmakers', [])
-            if not bookmakers:
-                continue
-            # Use the first bookmaker's h2h market
-            for bookmaker in bookmakers:
-                for market in bookmaker.get('markets', []):
-                    if market.get('key') != 'h2h':
-                        continue
-                    outcomes = market.get('outcomes', [])
-                    away_price = None
-                    home_price = None
-                    for o in outcomes:
-                        p = o.get('price')
-                        if p is None:
-                            continue
-                        if o['name'] == away_name:
-                            away_price = int(p)
-                        elif o['name'] == home_name:
-                            home_price = int(p)
-                    if away_price is not None and home_price is not None:
-                        odds_map[(away_name.lower(), home_name.lower())] = (away_price, home_price)
-                    break  # only need first bookmaker's h2h
-                break
-        print(f"[ODDS] Fetched {len(odds_map)} game(s) from The Odds API")
-        return odds_map
-    except Exception as e:
-        print(f"[ODDS] Error fetching odds: {e}")
-        return {}
-
-
-def format_moneyline(price):
-    """Format an American-odds integer price as a string: +150 or -110."""
-    if price is None:
-        return ''
-    return f'+{price}' if price > 0 else str(price)
-
-
-def _match_team_odds(statsapi_name, odds_map_keys):
-    """Find the odds-map key (set of lowercased team names) that best matches
-    a statsapi team name like 'Minnesota Twins'.
-
-    Matching strategy (in order):
-      1. Exact lowercase match
-      2. statsapi name is a suffix of the odds name  (e.g. 'Twins' ⊆ 'Minnesota Twins')
-      3. Odds name is a suffix of the statsapi name
-    """
-    name_lower = statsapi_name.lower()
-    for key in odds_map_keys:
-        if name_lower == key:
-            return key
-    for key in odds_map_keys:
-        if name_lower in key or key in name_lower:
-            return key
-    # Last resort: last word of statsapi name appears in any odds key
-    last_word = name_lower.split()[-1]
-    for key in odds_map_keys:
-        if last_word in key:
-            return key
-    return None
-
-
 class GameDataWorker(QtCore.QThread):
     """Background thread for fetching game data without blocking UI"""
     data_fetched = QtCore.pyqtSignal(list)  # Signal to emit fetched game data
     fetch_error = QtCore.pyqtSignal()       # Emitted when a network/API error prevents fetch
-
-    def __init__(self, fetch_date=None):
-        super().__init__()
-        self.fetch_date = fetch_date  # None = today
     
     def run(self):
         """Fetch game data in background thread"""
         try:
-            games = fetch_todays_games(self.fetch_date)
+            games = fetch_todays_games()
             self.data_fetched.emit(games)
         except Exception as e:
             print(f"[MLB WORKER] Fetch failed — emitting fetch_error: {e}")
             self.fetch_error.emit()
-
-
-class OddsDataWorker(QtCore.QThread):
-    """Background thread for fetching moneyline odds from The Odds API."""
-    odds_fetched = QtCore.pyqtSignal(dict)  # {(away_lower, home_lower): (away_price, home_price)}
-
-    def __init__(self, api_key):
-        super().__init__()
-        self.api_key = api_key
-
-    def run(self):
-        odds = fetch_mlb_odds(self.api_key)
-        self.odds_fetched.emit(odds)
 
 
 def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0, balls=None, strikes=None):
@@ -1137,12 +1020,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._no_data_mode = False  # True when no internet; False when confirmed no games
         self._message_text = ''    # Last message built into the no-games pixmap (detects changes)
 
-        # Yesterday mode: show previous day's finals until today's games are imminent
-        self._yesterday_mode = False    # True while displaying previous day's results
-        self._pending_today_games = []  # Today's fetched schedule (not yet displayed)
-        self._pending_today_date = ''   # Date string for _pending_today_games
-        self._yesterday_worker = None   # Keeps the yesterday QThread alive until done
-
         # Per-game and ticker-level render caches
         self._game_pixmap_cache = {}  # game_id → (fingerprint_tuple, QPixmap)
         self._last_ticker_fp = None   # overall fingerprint; None forces first build
@@ -1259,19 +1136,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.tiny_font = QtGui.QFont(player_info_font)
         self.tiny_font.setPixelSize(max(5, small_px - 2))
         
-        # Odds API (moneyline)
-        self._odds_cache = {}       # {(away_lower, home_lower): (away_price, home_price)}
-        self._odds_worker = None
-
-        # Match scroll timer to the display refresh rate so one timer tick = one VBlank frame.
-        # Firing faster than the compositor rate causes frames to stack up between VBlanks,
-        # producing uneven per-VBlank pixel advance (judder) even with delta-time scrolling.
-        _screen = QtWidgets.QApplication.primaryScreen()
-        _hz = _screen.refreshRate() if _screen else 60.0
-        self._scroll_timer_interval_ms = max(8, round(1000.0 / _hz))
-        print(f"[TICKER] Display refresh: {_hz:.0f} Hz → scroll timer interval: {self._scroll_timer_interval_ms} ms")
-
-        # Animation timer — started after intro finishes
+        # Animation timer - 60 FPS for smooth scrolling (started after intro finishes)
         self.scroll_timer = QtCore.QTimer()
         self.scroll_timer.timeout.connect(self.update_scroll)
         self.scroll_timer.setTimerType(QtCore.Qt.PreciseTimer)  # More accurate timing
@@ -1285,12 +1150,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.update_timer = QtCore.QTimer()
         self.update_timer.timeout.connect(self.start_data_fetch)
         self.update_timer.start(self.settings.get('update_interval', 10) * 1000)
-
-        # Odds refresh timer — interval is user-configurable (default 15 min)
-        self.odds_timer = QtCore.QTimer()
-        self.odds_timer.timeout.connect(self.start_odds_fetch)
-        _odds_interval_ms = max(1, self.settings.get('odds_refresh_minutes', 15)) * 60 * 1000
-        self.odds_timer.setInterval(_odds_interval_ms)
         
         # Next day check timer (checks hourly after all games finish)
         self.next_day_timer = QtCore.QTimer()
@@ -1299,11 +1158,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         # Initial fetch
         self.start_data_fetch()
-
-        # Initial odds fetch (if enabled)
-        if self.settings.get('show_moneyline', False) and self.settings.get('odds_api_key', ''):
-            self.start_odds_fetch()
-            self.odds_timer.start()
 
         self.show()
 
@@ -1486,45 +1340,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.data_worker.fetch_error.connect(self.on_fetch_error)
         self.data_worker.finished.connect(self.on_fetch_complete)
         self.data_worker.start()
-
-    def start_odds_fetch(self):
-        """Start a background odds fetch from The Odds API (non-blocking).
-        Silently skipped if moneyline is disabled or no API key is configured."""
-        if not self.settings.get('show_moneyline', False):
-            return
-        api_key = self.settings.get('odds_api_key', '').strip()
-        if not api_key:
-            return
-        if self._odds_worker and self._odds_worker.isRunning():
-            return  # already in flight
-        self._odds_worker = OddsDataWorker(api_key)
-        self._odds_worker.odds_fetched.connect(self.on_odds_received)
-        self._odds_worker.start()
-
-    def on_odds_received(self, odds_map):
-        """Store the newly-fetched odds and force a ticker rebuild."""
-        self._odds_cache = odds_map
-        # Invalidate per-game pixmap cache so odds render on next build
-        self._game_pixmap_cache.clear()
-        self._last_ticker_fp = None
-        self.build_ticker_pixmap()
-        self.update()
-
-    def _get_game_odds(self, away_full, home_full):
-        """Look up moneyline odds for a game, matching by team name.
-        Returns (away_price, home_price) integers or (None, None) if not found."""
-        if not self._odds_cache:
-            return (None, None)
-        all_away_keys = {k[0] for k in self._odds_cache}
-        all_home_keys = {k[1] for k in self._odds_cache}
-        away_match = _match_team_odds(away_full, all_away_keys)
-        home_match = _match_team_odds(home_full, all_home_keys)
-        if away_match and home_match:
-            result = self._odds_cache.get((away_match, home_match))
-            if result:
-                return result
-        return (None, None)
-
+    
     def on_fetch_error(self):
         """Network/API error: keep cached games visible with a 'Data Delayed' badge.
         If there is no cache yet (first-ever launch with no internet), show the
@@ -1638,36 +1454,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self._data_delayed:
             self._data_delayed = False
             self._last_ticker_fp = None  # Force rebuild to remove the delay banner
+        self.games = games
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
         self.last_fetch_date = current_date
-
-        # If already in yesterday mode, update pending games and recheck cutoff
-        # rather than replacing the display with today's pre-game schedule.
-        if self._yesterday_mode:
-            self._pending_today_games = games
-            self._pending_today_date = current_date
-            self._check_yesterday_cutoff()
-            return
-
-        self.games = games
         self._reschedule_update_timer()
-
-        # On startup: if all games are pre-game AND first pitch is beyond the cutoff,
-        # fetch yesterday's finals to show while we wait.
-        if not self._pending_today_games:
-            _not_started = {'Scheduled', 'Pre-Game', 'Warmup'}
-            _all_pregame = bool(games) and all(g.get('status') in _not_started for g in games)
-            if _all_pregame:
-                cutoff = self.settings.get('yesterday_cutoff_minutes', 30)
-                delta = self._minutes_to_first_game(games)
-                if delta is not None and delta > cutoff:
-                    self._pending_today_games = games
-                    self._pending_today_date = current_date
-                    print(f"[MLB] All games pre-game ({delta:.0f} min to first pitch, cutoff {cutoff} min)"
-                          " — fetching yesterday's scores")
-                    # Defer the yesterday fetch until the current worker's 'finished'
-                    # signal has fired and is_fetching is cleared.
-                    QtCore.QTimer.singleShot(200, self._start_yesterday_fetch)
 
         # Only rebuild when displayed data has actually changed, avoiding the
         # brief main-thread stall on every refresh where nothing is different.
@@ -1705,177 +1495,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def check_for_next_day_games(self):
         """Check if it's a new day and fetch next day's games"""
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
-
-        # If already in yesterday mode with pending today's games, just recheck the cutoff
-        if self._yesterday_mode and self._pending_today_date == current_date:
-            self._check_yesterday_cutoff()
-            return
-
+        
         # Only fetch if date has changed
         if self.last_fetch_date and current_date != self.last_fetch_date:
-            print(f"[MLB] New day detected ({current_date}), peeking at today's schedule...")
-            self.start_preview_fetch()
+            print(f"[MLB] New day detected ({current_date}), checking for games...")
+            self.start_data_fetch()
         else:
             # If still same day, just log that we're waiting
             current_hour = datetime.datetime.now().hour
             if current_hour >= 6:  # Only log during reasonable hours
                 print(f"[MLB] Waiting for next day's games (current: {current_date})")
-
-    # ------------------------------------------------------------------
-    # Yesterday mode — show previous day's finals until today's games near
-    # ------------------------------------------------------------------
-
-    def start_preview_fetch(self):
-        """Fetch today's schedule without immediately replacing the display.
-        Results go to on_preview_data_received instead of on_data_received."""
-        if self.is_fetching:
-            return
-        self.is_fetching = True
-        self.data_worker = GameDataWorker()
-        self.data_worker.data_fetched.connect(self.on_preview_data_received)
-        self.data_worker.fetch_error.connect(self._on_preview_fetch_error)
-        self.data_worker.finished.connect(self.on_fetch_complete)
-        self.data_worker.start()
-
-    def _start_yesterday_fetch(self):
-        """Fetch the previous day's final scores."""
-        yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        print(f"[MLB] Starting yesterday fetch for {yesterday}")
-        # Store on self so the QThread isn't garbage-collected before it finishes.
-        self._yesterday_worker = GameDataWorker(fetch_date=yesterday)
-        self._yesterday_worker.data_fetched.connect(self.on_yesterday_data_received)
-        self._yesterday_worker.fetch_error.connect(self._on_yesterday_fetch_error)
-        self._yesterday_worker.finished.connect(self._on_yesterday_worker_done)
-        self._yesterday_worker.start()
-
-    def _on_yesterday_worker_done(self):
-        """Clean up the yesterday worker after it finishes."""
-        if self._yesterday_worker:
-            self._yesterday_worker.deleteLater()
-            self._yesterday_worker = None
-
-    def _on_yesterday_fetch_error(self):
-        """Yesterday fetch failed — clear pending state and stay on today's schedule."""
-        print("[MLB] Yesterday fetch failed — staying with today's pre-game schedule")
-        self._pending_today_games = []
-        self._pending_today_date = ''
-
-    def on_yesterday_data_received(self, games):
-        """Display yesterday's final scores while today's games are pre-game."""
-        final_statuses = {'Final', 'Completed', 'Game Over'}
-        yesterday_finals = [g for g in games if g.get('status') in final_statuses]
-
-        if not yesterday_finals:
-            print("[MLB] No final games from yesterday — staying with today's pre-game schedule")
-            self._pending_today_games = []
-            self._pending_today_date = ''
-            return
-
-        self._yesterday_mode = True
-        self.games = yesterday_finals
-        # Stop normal polling; use next_day_timer every 5 min to recheck the cutoff
-        self.waiting_for_next_day = True
-        self.update_timer.stop()
-        self.next_day_timer.stop()
-        self.next_day_timer.start(300_000)  # 5 min
-
-        self._last_ticker_fp = None
-        new_fp = self._games_fingerprint()
-        self._last_ticker_fp = new_fp
-        self.build_ticker_pixmap()
-        if self.ticker_pixmap:
-            raw_speed = self.settings.get('speed', 2)
-            self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-        self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-        self.update()
-        print(f"[MLB] Yesterday mode active — showing {len(yesterday_finals)} final games")
-
-    def _on_preview_fetch_error(self):
-        """Preview fetch failed — stay in yesterday mode and retry next cycle."""
-        print("[MLB] Preview fetch failed — staying in yesterday mode, will retry")
-
-    def on_preview_data_received(self, games):
-        """Handle today's schedule while still showing yesterday's finals."""
-        current_date = datetime.datetime.now().strftime('%Y-%m-%d')
-        self._pending_today_games = games
-        self._pending_today_date = current_date
-
-        # Enter yesterday mode on first successful preview fetch
-        if not self._yesterday_mode:
-            self._yesterday_mode = True
-            print("[MLB] Entering yesterday mode — continuing to show previous day's results")
-            # Repaint to show the YESTERDAY badge (badge is rendered in paintEvent)
-            self.update()
-            # Poll more frequently so we don't miss the cutoff window
-            self.next_day_timer.start(300_000)  # Every 5 min instead of hourly
-
-        self._check_yesterday_cutoff()
-
-    def _minutes_to_first_game(self, games):
-        """Return minutes until the earliest not-yet-started game.
-        Returns None if no scheduled games exist. Negative = already past start."""
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        earliest = None
-        not_started = {'Scheduled', 'Pre-Game', 'Warmup'}
-        for g in games:
-            if g.get('status') not in not_started:
-                continue
-            gdt = g.get('game_datetime')
-            if not gdt:
-                continue
-            try:
-                dt_str = str(gdt)
-                if dt_str.endswith('Z'):
-                    dt = datetime.datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-                else:
-                    dt = datetime.datetime.fromisoformat(dt_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=datetime.timezone.utc)
-                delta = (dt - now_utc).total_seconds() / 60.0
-                if earliest is None or delta < earliest:
-                    earliest = delta
-            except Exception:
-                pass
-        return earliest
-
-    def _check_yesterday_cutoff(self):
-        """Switch to today's games once the first pitch is within the cutoff window."""
-        if not self._pending_today_games:
-            return  # Nothing to switch to yet
-        cutoff = self.settings.get('yesterday_cutoff_minutes', 30)
-        delta = self._minutes_to_first_game(self._pending_today_games)
-        if delta is None:
-            # No scheduled games (off-day, or all games already in progress/final)
-            print("[MLB] No pending scheduled games — switching to today immediately")
-            self._exit_yesterday_mode()
-        elif delta <= cutoff:
-            print(f"[MLB] First game in {delta:.0f} min (≤ {cutoff} min cutoff) — switching to today")
-            self._exit_yesterday_mode()
-        else:
-            print(f"[MLB] Yesterday mode active — first game in {delta:.0f} min (cutoff: {cutoff} min)")
-
-    def _exit_yesterday_mode(self):
-        """Transition display from yesterday's finals to today's scheduled/live games."""
-        self._yesterday_mode = False
-        self.waiting_for_next_day = False
-        self.next_day_timer.stop()
-        # Promote pending today's data to live display
-        self.games = self._pending_today_games
-        self._cached_games = self._pending_today_games
-        self.last_fetch_date = self._pending_today_date
-        self._pending_today_games = []
-        self._pending_today_date = ''
-        # Rebuild ticker and resume normal polling
-        self._last_ticker_fp = None
-        new_fp = self._games_fingerprint()
-        self._last_ticker_fp = new_fp
-        self.build_ticker_pixmap()
-        if self.ticker_pixmap:
-            raw_speed = self.settings.get('speed', 2)
-            self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-        self._reschedule_update_timer()
-        self.update()
-        print("[MLB] Exited yesterday mode — showing today's games")
 
     # ------------------------------------------------------------------
     # Startup intro animation
@@ -2047,7 +1676,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 # Reset elapsed timer so first delta_ms is sane after the intro pause
                 self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
                 # Kick off normal scrolling now that intro is finished
-                self.scroll_timer.start(self._scroll_timer_interval_ms)
+                self.scroll_timer.start(8)
                 print("[INTRO] Complete — starting ticker scroll from off-screen right")
 
         self.update()
@@ -2274,25 +1903,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             home_record_width += pitch_count_extra
         away_block_width = max(away_name_width, away_record_width)
         home_block_width = max(home_name_width, home_record_width)
-
-        # Moneyline odds — look up from cache, format as +/- string
-        # Never show odds on completed/final games (stale cache carries over to next day)
-        _game_is_final = status in ['Final', 'Completed', 'Game Over']
-        show_moneyline = self.settings.get('show_moneyline', False) and not _game_is_final
-        odds_gap = 5  # px between odds text and team name
-        away_price, home_price = self._get_game_odds(away_team_full, home_team_full)
-        away_odds_text = format_moneyline(away_price) if (show_moneyline and away_price is not None) else ''
-        home_odds_text = format_moneyline(home_price) if (show_moneyline and home_price is not None) else ''
-        away_odds_w = small_metrics.horizontalAdvance(away_odds_text) if away_odds_text else 0
-        home_odds_w = small_metrics.horizontalAdvance(home_odds_text) if home_odds_text else 0
-        # Widen blocks to fit odds text (away: odds on left; home: odds on right)
-        if away_odds_text:
-            away_top_w = away_odds_w + odds_gap + away_name_width
-            away_block_width = max(away_top_w, away_record_width)
-        if home_odds_text:
-            home_top_w = home_name_width + odds_gap + home_odds_w
-            home_block_width = max(home_top_w, home_record_width)
-
+        
         # Calculate width based on game status
         if status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']:
             # Live or Final game: Team Logo Score | Diamond/F-label | Score Logo Team
@@ -2335,26 +1946,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
                           score_width + 8 + effective_after_diamond + 
                           score_width + 15 + logo_size + 5 + home_block_width)
         else:
-            # Scheduled games only: Team Logo vs Logo Team Time
+            # Scheduled games only: Team Logo @ Logo Team Time
             status_text = format_game_time_local(game.get('game_datetime'))
             
             status_width = time_metrics.horizontalAdvance(status_text) + 20
-            _vs_fm = QtGui.QFontMetrics(self.vs_font)
-            _vs_w = _vs_fm.horizontalAdvance("vs")
-            # Away block DOES include odds width: odds sit left of the name, so the
-            # logo would collide with them if we didn't widen the block.
-            sched_away_w = max(
-                (away_odds_w + odds_gap if away_odds_text else 0) + away_name_width,
-                away_record_width)
-            # Home block does NOT include odds width: the odds are a small top-aligned
-            # label that floats into the margin between the home name and the time.
-            # Excluding them here keeps the time in the same position as pre-odds.
-            sched_home_w = max(home_name_width, home_record_width)
-            # total_width uses the exact same gap constants as the drawing code:
-            #   away_name -> +5 -> away_logo -> +20 -> vs -> +15 -> home_logo -> +10 -> home_name -> +10 -> time
-            total_width = (sched_away_w + 5 + logo_size + 20 +
-                          _vs_w + 15 +
-                          logo_size + 10 + sched_home_w + 10 +
+            vs_metrics = QtGui.QFontMetrics(self.vs_font)
+            at_width = vs_metrics.horizontalAdvance("@") + 10
+            
+            total_width = (away_block_width + 5 + logo_size + 10 + 
+                          at_width + 10 + logo_size + 10 + home_block_width + 10 + 
                           status_width)
         
         # Create pixmap at physical resolution so text renders at native DPR
@@ -2387,36 +1987,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 text_y -= delta
                 record_y -= delta
         time_y = text_y
-        # odds_y: place the small-font baseline so its cap-letter top aligns with the
-        # cap-letter top of the main font. capHeight() is the purpose-built Qt metric
-        # for this; fall back to digit-only bounding rect for fonts that omit it.
-        _main_cap = metrics.capHeight()
-        if _main_cap <= 0:
-            _main_cap = -metrics.boundingRect('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ').top()
-        _small_cap = small_metrics.capHeight()
-        if _small_cap <= 0:
-            _small_cap = -small_metrics.boundingRect('0123456789').top()
-        odds_y = text_y - _main_cap + _small_cap
-
+        
         if status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']:
-            # Away team name (colored) — moneyline odds float to the left, top-aligned
+            # Away team name (colored)
             painter.setFont(self._qfont)
             painter.setPen(away_color)
-            if away_odds_text:
-                away_top_w = away_odds_w + odds_gap + away_name_width
-                unit_off = (away_block_width - away_top_w) // 2
-                away_odds_draw_x = x + unit_off
-                away_name_x = away_odds_draw_x + away_odds_w + odds_gap
-            else:
-                away_odds_draw_x = None
-                away_name_x = x + (away_block_width - away_name_width) // 2
-            if away_odds_draw_x is not None:
-                _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
-                painter.setFont(self.small_font)
-                painter.setPen(_ac)
-                painter.drawText(away_odds_draw_x, odds_y, away_odds_text)
-                painter.setFont(self._qfont)
-                painter.setPen(away_color)
+            away_name_x = x + (away_block_width - away_name_width) // 2
             painter.drawText(away_name_x, text_y, away_team)
             if show_records and record_y is not None:
                 painter.setFont(self.small_font)
@@ -2469,23 +2045,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawPixmap(x, logo_y, home_logo)
             x += logo_size + 5  # Mirror: name→logo gap on away side
             
-            # Home team name (colored) — moneyline odds float to the right, top-aligned
+            # Home team name (colored)
             painter.setFont(self._qfont)
             painter.setPen(home_color)
-            if home_odds_text:
-                home_top_w = home_name_width + odds_gap + home_odds_w
-                unit_off = (home_block_width - home_top_w) // 2
-                home_name_x = x + unit_off
-                home_odds_draw_x = home_name_x + home_name_width + odds_gap
-            else:
-                home_name_x = x + (home_block_width - home_name_width) // 2
-                home_odds_draw_x = None
+            home_name_x = x + (home_block_width - home_name_width) // 2
             painter.drawText(home_name_x, text_y, home_team)
-            if home_odds_draw_x is not None:
-                _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
-                painter.setFont(self.small_font)
-                painter.setPen(_hc)
-                painter.drawText(home_odds_draw_x, odds_y, home_odds_text)
             if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
@@ -2498,32 +2062,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     pc_x = home_record_x + detail_w + 6
                     painter.drawText(pc_x, record_y, pitch_count_text)
-
+            
         else:
-            # Away team name (colored) — moneyline odds float to the left, top-aligned
-            # For scheduled games use content-only layout (no centering within block)
+            # Away team name (colored)
             painter.setFont(self._qfont)
             painter.setPen(away_color)
-            if away_odds_text:
-                away_odds_draw_x = x
-                away_name_x = x + away_odds_w + odds_gap
-            else:
-                away_odds_draw_x = None
-                away_name_x = x
-            if away_odds_draw_x is not None:
-                _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
-                painter.setFont(self.small_font)
-                painter.setPen(_ac)
-                painter.drawText(away_odds_draw_x, odds_y, away_odds_text)
-                painter.setFont(self._qfont)
-                painter.setPen(away_color)
+            away_name_x = x + (away_block_width - away_name_width) // 2
             painter.drawText(away_name_x, text_y, away_team)
             if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
                 away_record_x = away_name_x + 3
                 painter.drawText(away_record_x, record_y, away_detail_text)
-            x += sched_away_w + 5
+            x += away_block_width + 5
             
             # Away team logo
             away_logo = get_team_logo(away_team_full, logo_size)
@@ -2543,37 +2094,22 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawPixmap(x, logo_y, home_logo)
             x += logo_size + 10
             
-            # Home team name (colored) — moneyline odds float to the right, top-aligned
-            # For scheduled games use content-only layout (no centering within block)
+            # Home team name (colored)
             painter.setFont(self._qfont)
             painter.setPen(home_color)
-            home_name_x = x
-            if home_odds_text:
-                home_odds_draw_x = home_name_x + home_name_width + odds_gap
-            else:
-                home_odds_draw_x = None
+            home_name_x = x + (home_block_width - home_name_width) // 2
             painter.drawText(home_name_x, text_y, home_team)
-            if home_odds_draw_x is not None:
-                _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
-                painter.setFont(self.small_font)
-                painter.setPen(_hc)
-                painter.drawText(home_odds_draw_x, odds_y, home_odds_text)
             if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
                 home_record_x = home_name_x + home_name_width - home_record_width - 3
                 painter.drawText(home_record_x, record_y, home_detail_text)
-            x += sched_home_w + 10
+            x += home_block_width + 10
             
-            # Time/Final/PPD
-            if status in ['Final', 'Completed', 'Game Over']:
-                status_text = "FINAL"
-            elif status == 'Postponed':
-                status_text = "PPD"
-            elif 'game_datetime' in game:
+            # Time/Final
+            status_text = "FINAL" if status in ['Final', 'Completed', 'Game Over'] else ""
+            if not status_text and 'game_datetime' in game:
                 status_text = format_game_time_local(game.get('game_datetime'))
-            else:
-                status_text = ""
             
             painter.setFont(self._qfont)
             painter.setPen(QtGui.QColor('#00B3FF'))
@@ -2588,6 +2124,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
         inside paintEvent to avoid timer-callback lag and missed-tick jumps."""
         if not self.ticker_pixmap or self._scroll_max_width == 0:
             return
+
+        # FPS counter: count timer firings (≈ render rate)
+        now_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        self._fps_frame_count += 1
+        elapsed_since = now_ms - self._fps_last_ms
+        if elapsed_since >= 1000:
+            self._fps_display = self._fps_frame_count * 1000.0 / elapsed_since
+            self._fps_frame_count = 0
+            self._fps_last_ms = now_ms
+
         self.update()
     
     def paintEvent(self, event):
@@ -2673,13 +2219,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # nsecsElapsed() gives float-ms precision; elapsed() only returns integer ms
         # which causes ~6% delta error at 16 ms frame intervals.
         render_now_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-        # FPS counter: count actual paintEvent calls = true displayed frame rate
-        self._fps_frame_count += 1
-        _fps_elapsed = render_now_ms - self._fps_last_ms
-        if _fps_elapsed >= 1000:
-            self._fps_display = self._fps_frame_count * 1000.0 / _fps_elapsed
-            self._fps_frame_count = 0
-            self._fps_last_ms = render_now_ms
         if not self.is_hovered and not self.scroll_paused and self._scroll_speed_px_per_ms > 0:
             delta_ms = min(render_now_ms - self._last_frame_ms, 100)
             self.scroll_offset += self._scroll_speed_px_per_ms * delta_ms
@@ -2734,20 +2273,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.setPen(QtGui.QColor('#FFA500'))
             painter.drawText(dx, dy, delay_text)
 
-        # "Yesterday" badge — gold text at top-right when showing previous day's finals
-        if self._yesterday_mode:
-            yday_text = "YESTERDAY"
-            painter.setFont(self.small_font)
-            fm_y = QtGui.QFontMetrics(self.small_font)
-            yw = fm_y.horizontalAdvance(yday_text)
-            yh = fm_y.height()
-            margin = 6
-            yx = self.width() - yw - margin
-            yy = yh + margin - 2
-            painter.fillRect(yx - 3, margin - 2, yw + 6, yh + 2, QtGui.QColor(0, 0, 0, 160))
-            painter.setPen(QtGui.QColor('#FFD700'))
-            painter.drawText(yx, yy, yday_text)
-
         # FPS overlay — bottom-right corner, bright green, small_font
         if settings.get('show_fps_overlay', False) and self._fps_display > 0:
             fps_text = f"{self._fps_display:.1f} FPS"
@@ -2776,7 +2301,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.is_hovered = False
         if not self.intro_active and not self.scroll_paused:
             self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0  # reset baseline to avoid jump
-            self.scroll_timer.start(self._scroll_timer_interval_ms)
+            self.scroll_timer.start(8)  # ≥120 Hz tick ensures vsync always has a fresh frame
         super().leaveEvent(event)
 
     def apply_live_settings(self):
@@ -2829,22 +2354,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._last_ticker_fp = None
         self.build_ticker_pixmap()
 
-        # Odds timer — start or stop based on current settings
-        show_ml = self.settings.get('show_moneyline', False)
-        api_key = self.settings.get('odds_api_key', '').strip()
-        # Always update interval in case the user changed it
-        _odds_interval_ms = max(1, self.settings.get('odds_refresh_minutes', 15)) * 60 * 1000
-        self.odds_timer.setInterval(_odds_interval_ms)
-        if show_ml and api_key:
-            if not self.odds_timer.isActive():
-                self.odds_timer.start()
-            self.start_odds_fetch()   # immediate refresh when settings change
-        else:
-            self.odds_timer.stop()
-            if not show_ml:
-                # Clear cached odds so disabled moneyline doesn't render stale data
-                self._odds_cache = {}
-
         # Background cache must be invalidated so opacity/LED/glass changes redraw
         self.cached_background = None
         self.cached_overlay = None
@@ -2884,7 +2393,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             else:
                 if not self.intro_active and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-                    self.scroll_timer.start(self._scroll_timer_interval_ms)
+                    self.scroll_timer.start(8)
                 print("[KB] Scroll unpaused")
         else:
             super().keyPressEvent(event)
@@ -2896,15 +2405,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.update_timer.stop()
         self.next_day_timer.stop()
         self.intro_timer.stop()
-        self.odds_timer.stop()
         
-        # Clean up worker threads if running
+        # Clean up worker thread if running
         if self.data_worker and self.data_worker.isRunning():
             self.data_worker.quit()
             self.data_worker.wait()
-        if self._odds_worker and self._odds_worker.isRunning():
-            self._odds_worker.quit()
-            self._odds_worker.wait()
         
         # Unregister AppBar (guarded against double-call)
         self.remove_appbar()
@@ -2945,7 +2450,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             else:
                 if not self.intro_active and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-                    self.scroll_timer.start(self._scroll_timer_interval_ms)
+                    self.scroll_timer.start(8)
         pause_action.triggered.connect(_toggle_pause)
 
         menu.addSeparator()
@@ -4294,40 +3799,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.scheduled_check.setChecked(self.settings.get('include_scheduled_games', True))
         form_content.addRow("Include Scheduled Games:", self.scheduled_check)
 
-        # Show Game Moneyline (The Odds API)
-        ml_row = QtWidgets.QHBoxLayout()
-        self.moneyline_check = QtWidgets.QCheckBox("Enabled")
-        self.moneyline_check.setChecked(self.settings.get('show_moneyline', False))
-        ml_row.addWidget(self.moneyline_check)
-        ml_row.addSpacing(12)
-        ml_row.addWidget(QtWidgets.QLabel("API Key:  "))
-        self.odds_api_key_edit = QtWidgets.QLineEdit()
-        self.odds_api_key_edit.setPlaceholderText("the-odds-api key...")
-        self.odds_api_key_edit.setText(self.settings.get('odds_api_key', ''))
-        self.odds_api_key_edit.setMinimumWidth(180)
-        self.odds_api_key_edit.setToolTip("the-odds-api.com API key for fetching moneyline odds")
-        ml_row.addWidget(self.odds_api_key_edit)
-        ml_row.addSpacing(12)
-        ml_row.addWidget(QtWidgets.QLabel("Refresh:  "))
-        self.odds_refresh_spin = QtWidgets.QSpinBox()
-        self.odds_refresh_spin.setRange(1, 120)
-        self.odds_refresh_spin.setValue(self.settings.get('odds_refresh_minutes', 15))
-        self.odds_refresh_spin.setSuffix(" min")
-        self.odds_refresh_spin.setToolTip("How often to fetch updated moneyline odds (1–120 min)")
-        ml_row.addWidget(self.odds_refresh_spin)
-        ml_row.addStretch()
-        form_content.addRow("Show Game Moneyline:", ml_row)
-
-        self.yesterday_cutoff_spin = QtWidgets.QSpinBox()
-        self.yesterday_cutoff_spin.setRange(0, 240)
-        self.yesterday_cutoff_spin.setValue(self.settings.get('yesterday_cutoff_minutes', 30))
-        self.yesterday_cutoff_spin.setSuffix(" min before first pitch")
-        self.yesterday_cutoff_spin.setToolTip(
-            "After all games finish, keep showing yesterday's final scores until this many\n"
-            "minutes before today's first pitch. Set to 0 to switch at midnight."
-        )
-        form_content.addRow("Switch to Today's Games:", self.yesterday_cutoff_spin)
-
         outer_layout.addWidget(grp_content)
 
         # ── 6. Startup ───────────────────────────────────────────────────────
@@ -4630,10 +4101,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['show_team_records'] = self.records_check.isChecked()
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
-        self.settings['show_moneyline'] = self.moneyline_check.isChecked()
-        self.settings['odds_api_key'] = self.odds_api_key_edit.text().strip()
-        self.settings['odds_refresh_minutes'] = self.odds_refresh_spin.value()
-        self.settings['yesterday_cutoff_minutes'] = self.yesterday_cutoff_spin.value()
         self.settings['show_team_cities'] = not self.cities_check.isChecked()
         self.settings['led_background'] = self.led_bg_check.isChecked()
         self.settings['glass_overlay'] = self.glass_check.isChecked()
@@ -4851,7 +4318,7 @@ def main():
         else:
             if not window.intro_active and not window.is_hovered:
                 window._last_frame_ms = window._elapsed_timer.nsecsElapsed() / 1_000_000.0
-                window.scroll_timer.start(window._scroll_timer_interval_ms)
+                window.scroll_timer.start(8)
     pause_action.triggered.connect(_tray_toggle_pause)
 
     def _update_tray_pause_label():
