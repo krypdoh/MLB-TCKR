@@ -2942,8 +2942,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
         T          = show Tomorrow's games (session-only, does not save)
         F          = toggle FPS overlay (session-only, does not save)
         1-4        = move ticker to that monitor number (session-only, does not save)
-        Ctrl++/=   = increase scroll speed by 1 (session-only, does not save)
-        Ctrl+-     = decrease scroll speed by 1 (session-only, does not save)
+        +/=        = increase scroll speed by 1 (session-only, does not save)
+        -          = decrease scroll speed by 1 (session-only, does not save)
         """
         key  = event.text().lower()
         raw  = event.text()
@@ -2952,8 +2952,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         ctrl = bool(mods & QtCore.Qt.ControlModifier)
 
-        # ── Ctrl+Plus / Ctrl+Minus: adjust speed (session-only, not saved) ──────
-        if ctrl and k in (QtCore.Qt.Key_Plus, QtCore.Qt.Key_Equal):
+        # ── Plus / Minus: adjust speed (session-only, not saved) ──────────────
+        if k in (QtCore.Qt.Key_Plus, QtCore.Qt.Key_Equal):
             # session speed starts from stored setting if not yet overridden
             if not hasattr(self, '_session_speed'):
                 self._session_speed = self.settings.get('speed', 2)
@@ -2961,7 +2961,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self._scroll_speed_px_per_ms = (self._session_speed * 0.5) / 16.667
             print(f"[KB] Speed → {self._session_speed}")
             return
-        if ctrl and k == QtCore.Qt.Key_Minus:
+        if k == QtCore.Qt.Key_Minus:
             if not hasattr(self, '_session_speed'):
                 self._session_speed = self.settings.get('speed', 2)
             self._session_speed = max(1, self._session_speed - 1)
