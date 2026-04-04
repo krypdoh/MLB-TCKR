@@ -1,3 +1,39 @@
+Version 2.6.0 (2026-04-04)
+--------------------------
+Show Yesterday / Today / Tomorrow games on demand + keyboard shortcuts
+
+NEW FEATURES:
++ Keyboard shortcuts (active when ticker has focus) — session-only, nothing is saved to settings
+  - Ctrl +  : Increase scroll speed by 1 (max 16)
+  - Ctrl -  : Decrease scroll speed by 1 (min 1)
+  - Y       : Show Yesterday's games
+  - D       : Show toDay's games (return to auto mode)
+  - T       : Show Tomorrow's games
+  - R       : Restart ticker (replay intro animation)
+  - G       : Refresh / fetch latest game data
+  - F       : Toggle FPS counter overlay on/off
+  - 1–4     : Move ticker to that monitor number; out-of-range numbers are silently ignored
+  - P       : Pause / unpause scrolling (existing)
+  - S       : Open Standings window (existing)
+  - Q       : Quit (existing)
+  - .       : Open Settings dialog (existing)
+
+NEW FEATURES:
++ "Show Games For..." submenu in both the right-click context menu and the system tray icon menu
+  - Three checkable options: Yesterday's Games, Today's Games, Tomorrow's Games
+  - Selecting an option immediately re-fetches and displays games for that date
+  - Clicking the already-active option unchecks it and returns to automatic (today) mode
+  - Session-only: the selected date is not saved to settings and resets on restart
+
++ Date badge overlay on the ticker bar
+  - A gold "YESTERDAY" or "TOMORROW" badge is displayed in the top-right corner of the ticker
+  - Badge is hidden when displaying today's games (normal mode)
+
++ Seamless interaction with automatic yesterday mode
+  - Switching to a manual date override automatically exits the auto-yesterday mode
+  - Clears pending schedule and stops the next-day transition timer
+
+
 Version 2.5.9 (2026-04-02)
 --------------------------
 Scrolling, odds, and postponed game fixes

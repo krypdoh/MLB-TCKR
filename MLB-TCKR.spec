@@ -89,6 +89,9 @@ _datas = [
     # System-tray / taskbar icon
     ('mlb.ico',          '.'),
     ('mlb-reverse.png',  '.'),
+    # League logos (SVG) used in the Standings window
+    ('american.svg',     '.'),
+    ('national.svg',     '.'),
     # Certifi CA bundle for requests/SSL
     (certifi.where(), 'certifi'),
 ]
@@ -171,6 +174,8 @@ a = Analysis(
         'traceback',
         'ctypes',
         'ctypes.wintypes',
+        # SVG rendering
+        'PyQt5.QtSvg',
     ] + _pyqt5_hidden,
     hookspath=['.'],          # picks up pyi_rth_requests_charset.py as a hook
     hooksconfig={},

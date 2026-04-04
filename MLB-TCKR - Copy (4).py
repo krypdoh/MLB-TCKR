@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0404.1046
+Date: 2026.0401.1830
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.1.0"
+VERSION = "1.0.0"
 
 import warnings
 warnings.filterwarnings(
@@ -59,7 +59,6 @@ import random
 import requests
 import statsapi
 from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5 import QtSvg
 import ctypes
 from ctypes import wintypes
 
@@ -1132,9 +1131,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.waiting_for_next_day = False
         self.last_fetch_date = None
 
-        # Session-only date override: None = auto (today), "yesterday", "today", "tomorrow"
-        self._date_view_override = None
-
         # Network resilience: keep last-known-good games for display during outages
         self._cached_games = []    # Last successful fetch result
         self._data_delayed = False  # True while showing stale data due to network error
@@ -1478,18 +1474,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         except Exception as e:
             print(f"[AppBar] Warning: ABM_REMOVE failed: {e}")
 
-    def _effective_fetch_date(self):
-        """Return the date string to fetch, based on any session-only override.
-        Returns None when the normal auto-today behaviour should apply."""
-        if self._date_view_override is None or self._date_view_override == "today":
-            return None  # GameDataWorker will default to today
-        today = datetime.datetime.now().date()
-        if self._date_view_override == "yesterday":
-            return (today - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        if self._date_view_override == "tomorrow":
-            return (today + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        return None
-
     def start_data_fetch(self):
         """Start background data fetch (non-blocking)"""
         # Don't start a new fetch if one is already running
@@ -1497,7 +1481,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             return
         
         self.is_fetching = True
-        self.data_worker = GameDataWorker(fetch_date=self._effective_fetch_date())
+        self.data_worker = GameDataWorker()
         self.data_worker.data_fetched.connect(self.on_data_received)
         self.data_worker.fetch_error.connect(self.on_fetch_error)
         self.data_worker.finished.connect(self.on_fetch_complete)
@@ -1654,23 +1638,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self._data_delayed:
             self._data_delayed = False
             self._last_ticker_fp = None  # Force rebuild to remove the delay banner
-
-        # When a manual date override is active, skip yesterday-mode logic entirely
-        # and just display the fetched games for that date.
-        if self._date_view_override is not None:
-            self.games = games
-            self._reschedule_update_timer()
-            new_fp = self._games_fingerprint()
-            if new_fp != self._last_ticker_fp:
-                self._last_ticker_fp = new_fp
-                self.build_ticker_pixmap()
-                if self.ticker_pixmap:
-                    raw_speed = self.settings.get('speed', 2)
-                    self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-                self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-            self.update()
-            return
-
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
         self.last_fetch_date = current_date
 
@@ -1737,10 +1704,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
     
     def check_for_next_day_games(self):
         """Check if it's a new day and fetch next day's games"""
-        # Don't interfere with a manual date override
-        if self._date_view_override is not None:
-            return
-
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
 
         # If already in yesterday mode with pending today's games, just recheck the cutoff
@@ -2771,23 +2734,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.setPen(QtGui.QColor('#FFA500'))
             painter.drawText(dx, dy, delay_text)
 
-        # Date badge — shown when displaying a different day's games
-        _badge_text = None
-        if self._yesterday_mode or self._date_view_override == "yesterday":
-            _badge_text = "YESTERDAY"
-        elif self._date_view_override == "tomorrow":
-            _badge_text = "TOMORROW"
-        if _badge_text:
+        # "Yesterday" badge — gold text at top-right when showing previous day's finals
+        if self._yesterday_mode:
+            yday_text = "YESTERDAY"
             painter.setFont(self.small_font)
             fm_y = QtGui.QFontMetrics(self.small_font)
-            yw = fm_y.horizontalAdvance(_badge_text)
+            yw = fm_y.horizontalAdvance(yday_text)
             yh = fm_y.height()
             margin = 6
             yx = self.width() - yw - margin
             yy = yh + margin - 2
             painter.fillRect(yx - 3, margin - 2, yw + 6, yh + 2, QtGui.QColor(0, 0, 0, 160))
             painter.setPen(QtGui.QColor('#FFD700'))
-            painter.drawText(yx, yy, _badge_text)
+            painter.drawText(yx, yy, yday_text)
 
         # FPS overlay — bottom-right corner, bright green, small_font
         if settings.get('show_fps_overlay', False) and self._fps_display > 0:
@@ -2893,87 +2852,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         self.update()
 
-    def _kb_set_date_override(self, override):
-        """Helper: set session date override and re-fetch (does not save settings)."""
-        self._date_view_override = override
-        if self._yesterday_mode:
-            self._yesterday_mode = False
-            self.waiting_for_next_day = False
-            self.next_day_timer.stop()
-            self._pending_today_games = []
-            self._pending_today_date = ''
-        self.start_data_fetch()
-        label = override if override else "auto (today)"
-        print(f"[KB] Date view → {label}")
-
-    def _kb_move_to_monitor(self, idx_1based):
-        """Helper: move ticker to numbered monitor (1-based) without saving settings."""
-        screens = QtWidgets.QApplication.screens()
-        idx = idx_1based - 1  # convert to 0-based
-        if idx < 0 or idx >= len(screens):
-            print(f"[KB] Monitor {idx_1based} not available ({len(screens)} screen(s) detected) — ignored")
-            return
-        new_screen = screens[idx]
-        if new_screen is self._target_screen:
-            return  # already there
-        self.remove_appbar()
-        self._target_screen = new_screen
-        self.dpr = new_screen.devicePixelRatio()
-        geo = new_screen.geometry()
-        self.setGeometry(geo.x(), geo.y(), geo.width(), self.ticker_height)
-        self.setup_appbar()
-        # Rebuild pixmap at new DPR
-        self._game_pixmap_cache.clear()
-        self._last_ticker_fp = None
-        self.build_ticker_pixmap()
-        self.update()
-        print(f"[KB] Moved to monitor {idx_1based} ({new_screen.name()})")
-
     def keyPressEvent(self, event):
         """Keyboard shortcuts (active when ticker window has focus).
-        Q          = quit app entirely
-        S          = standings window
-        .          = settings dialog
-        P          = pause/unpause scroll
-        G          = refresh games (does not save)
-        R          = restart ticker (intro animation)
-        Y          = show Yesterday's games (session-only, does not save)
-        D          = show toDay's games / return to auto (session-only, does not save)
-        T          = show Tomorrow's games (session-only, does not save)
-        F          = toggle FPS overlay (session-only, does not save)
-        1-4        = move ticker to that monitor number (session-only, does not save)
-        Ctrl++/=   = increase scroll speed by 1 (session-only, does not save)
-        Ctrl+-     = decrease scroll speed by 1 (session-only, does not save)
+        Q   = quit app entirely
+        S   = standings window
+        .   = settings dialog
+        R   = refresh data
+        P   = pause/unpause scroll
         """
-        key  = event.text().lower()
-        raw  = event.text()
-        mods = event.modifiers()
-        k    = event.key()
-
-        ctrl = bool(mods & QtCore.Qt.ControlModifier)
-
-        # ── Ctrl+Plus / Ctrl+Minus: adjust speed (session-only, not saved) ──────
-        if ctrl and k in (QtCore.Qt.Key_Plus, QtCore.Qt.Key_Equal):
-            # session speed starts from stored setting if not yet overridden
-            if not hasattr(self, '_session_speed'):
-                self._session_speed = self.settings.get('speed', 2)
-            self._session_speed = min(16, self._session_speed + 1)
-            self._scroll_speed_px_per_ms = (self._session_speed * 0.5) / 16.667
-            print(f"[KB] Speed → {self._session_speed}")
-            return
-        if ctrl and k == QtCore.Qt.Key_Minus:
-            if not hasattr(self, '_session_speed'):
-                self._session_speed = self.settings.get('speed', 2)
-            self._session_speed = max(1, self._session_speed - 1)
-            self._scroll_speed_px_per_ms = (self._session_speed * 0.5) / 16.667
-            print(f"[KB] Speed → {self._session_speed}")
-            return
-
-        # ── All remaining shortcuts ignore Ctrl ──────────────────────────────────
-        if ctrl:
-            super().keyPressEvent(event)
-            return
-
+        key = event.text().lower()
+        raw = event.text()
         if key == 'q':
             QtWidgets.QApplication.instance().quit()
         elif key == 's':
@@ -2985,6 +2873,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self._standings_win.activateWindow()
         elif raw == '.':
             SettingsDialog(self).exec_()
+        elif key == 'r':
+            self.start_data_fetch()
+            print("[KB] Manual data refresh triggered")
         elif key == 'p':
             self.scroll_paused = not self.scroll_paused
             if self.scroll_paused:
@@ -2995,25 +2886,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
                     self.scroll_timer.start(self._scroll_timer_interval_ms)
                 print("[KB] Scroll unpaused")
-        elif key == 'g':
-            self.start_data_fetch()
-            print("[KB] Manual data refresh triggered")
-        elif key == 'r':
-            self._restart_intro()
-            print("[KB] Restart triggered")
-        elif key == 'y':
-            self._kb_set_date_override("yesterday")
-        elif key == 'd':
-            self._kb_set_date_override(None)
-        elif key == 't':
-            self._kb_set_date_override("tomorrow")
-        elif key == 'f':
-            # Toggle FPS overlay — session-only, not written to disk
-            self.settings['show_fps_overlay'] = not self.settings.get('show_fps_overlay', False)
-            self.update()
-            print(f"[KB] FPS overlay → {self.settings['show_fps_overlay']}")
-        elif key in ('1', '2', '3', '4'):
-            self._kb_move_to_monitor(int(key))
         else:
             super().keyPressEvent(event)
     
@@ -3061,34 +2933,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         restart_action = menu.addAction("Restart")
         restart_action.triggered.connect(self._restart_intro)
-
-        menu.addSeparator()
-
-        # Date submenu — session-only, not saved to settings
-        date_menu = menu.addMenu("Show Games For...")
-        _date_options = [
-            ("Yesterday's Games", "yesterday"),
-            ("Today's Games",     "today"),
-            ("Tomorrow's Games",  "tomorrow"),
-        ]
-        for label, key in _date_options:
-            act = date_menu.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(self._date_view_override == key)
-            def _make_date_handler(k=key):
-                def _handler(checked):
-                    # Clicking the already-active item unchecks it → return to auto mode
-                    self._date_view_override = k if checked else None
-                    # Exit automatic yesterday mode when switching to a manual date
-                    if self._yesterday_mode:
-                        self._yesterday_mode = False
-                        self.waiting_for_next_day = False
-                        self.next_day_timer.stop()
-                        self._pending_today_games = []
-                        self._pending_today_date = ''
-                    self.start_data_fetch()
-                return _handler
-            act.triggered.connect(_make_date_handler())
 
         menu.addSeparator()
 
@@ -3338,41 +3182,6 @@ class StandingsWindow(QtWidgets.QWidget):
     # UI construction
     # ------------------------------------------------------------------
 
-    def _league_logo_lbl(self, filename):
-        """Return a QLabel showing the league SVG logo, or None if the file isn't found."""
-        search_dirs = [APPDATA_DIR]
-        script_dir  = os.path.dirname(os.path.abspath(__file__))
-        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-            search_dirs.append(sys._MEIPASS)
-        search_dirs.append(script_dir)
-        path = None
-        for d in search_dirs:
-            candidate = os.path.join(d, filename)
-            if os.path.isfile(candidate):
-                path = candidate
-                break
-        if not path:
-            return None
-        renderer = QtSvg.QSvgRenderer(path)
-        if not renderer.isValid():
-            return None
-        size = self._FS_LEAGUE + 4   # match the league text height
-        default_size = renderer.defaultSize()
-        if default_size.height() > 0:
-            w = int(size * default_size.width() / default_size.height())
-        else:
-            w = size
-        px = QtGui.QPixmap(w, size)
-        px.fill(QtCore.Qt.transparent)
-        painter = QtGui.QPainter(px)
-        renderer.render(painter)
-        painter.end()
-        lbl = QtWidgets.QLabel()
-        lbl.setPixmap(px)
-        lbl.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignCenter)
-        lbl.setFixedSize(w, size)
-        return lbl
-
     def _build_ui(self):
         self._ozone_family  = load_ozone_font() or load_custom_font()
         self._record_family = load_record_font_family() or self._ozone_family
@@ -3417,17 +3226,9 @@ class StandingsWindow(QtWidgets.QWidget):
         league_row = QtWidgets.QHBoxLayout()
         league_row.setSpacing(0)
         league_row.addStretch()
-        _al_logo = self._league_logo_lbl("american.svg")
-        if _al_logo:
-            league_row.addWidget(_al_logo)
-            league_row.addSpacing(6)
         league_row.addWidget(self._al_lbl)
         league_row.addWidget(sep_lbl)
         league_row.addWidget(self._nl_lbl)
-        _nl_logo = self._league_logo_lbl("national.svg")
-        if _nl_logo:
-            league_row.addSpacing(6)
-            league_row.addWidget(_nl_logo)
         league_row.addStretch()
         outer.addLayout(league_row)
 
@@ -5056,36 +4857,6 @@ def main():
     def _update_tray_pause_label():
         pause_action.setText("Unpause Ticker" if window.scroll_paused else "Pause Ticker")
     tray_menu.aboutToShow.connect(_update_tray_pause_label)
-
-    tray_menu.addSeparator()
-
-    # Date submenu — session-only, not saved to settings
-    date_menu = tray_menu.addMenu("Show Games For...")
-    _tray_date_actions = {}
-    for _label, _key in [("Yesterday's Games", "yesterday"),
-                          ("Today's Games",     "today"),
-                          ("Tomorrow's Games",  "tomorrow")]:
-        _act = date_menu.addAction(_label)
-        _act.setCheckable(True)
-        _tray_date_actions[_key] = _act
-        def _make_tray_date_handler(k=_key):
-            def _handler(checked):
-                # Clicking the already-active item unchecks it → return to auto mode
-                window._date_view_override = k if checked else None
-                if window._yesterday_mode:
-                    window._yesterday_mode = False
-                    window.waiting_for_next_day = False
-                    window.next_day_timer.stop()
-                    window._pending_today_games = []
-                    window._pending_today_date = ''
-                window.start_data_fetch()
-            return _handler
-        _act.triggered.connect(_make_tray_date_handler())
-
-    def _update_tray_date_checks():
-        for k, act in _tray_date_actions.items():
-            act.setChecked(window._date_view_override == k)
-    tray_menu.aboutToShow.connect(_update_tray_date_checks)
 
     tray_menu.addSeparator()
 
