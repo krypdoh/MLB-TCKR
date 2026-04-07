@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0404.1046
+Date: 2026.0407.1132
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.1.0"
+VERSION = "1.0.1"
 
 import warnings
 warnings.filterwarnings(
@@ -2938,7 +2938,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         G          = refresh games (does not save)
         R          = restart ticker (intro animation)
         Y          = show Yesterday's games (session-only, does not save)
-        D          = show toDay's games / return to auto (session-only, does not save)
+        D          = pin to toDay's games; press again to return to auto (session-only, does not save)
         T          = show Tomorrow's games (session-only, does not save)
         F          = toggle FPS overlay (session-only, does not save)
         1-4        = move ticker to that monitor number (session-only, does not save)
@@ -3004,7 +3004,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
         elif key == 'y':
             self._kb_set_date_override("yesterday")
         elif key == 'd':
-            self._kb_set_date_override(None)
+            # Toggle: if already pinned to today, return to auto; otherwise pin to today.
+            if self._date_view_override == "today":
+                self._kb_set_date_override(None)
+            else:
+                self._kb_set_date_override("today")
         elif key == 't':
             self._kb_set_date_override("tomorrow")
         elif key == 'f':
@@ -3340,10 +3344,18 @@ class StandingsWindow(QtWidgets.QWidget):
 
     def _league_logo_lbl(self, filename):
         """Return a QLabel showing the league SVG logo, or None if the file isn't found."""
-        search_dirs = [APPDATA_DIR]
-        script_dir  = os.path.dirname(os.path.abspath(__file__))
+        # Primary locations: MLB-TCKR.images subfolder (AppData, then bundle, then project)
+        # Fallback: bare directory roots for backward compatibility
+        _images_subdir = 'MLB-TCKR.images'
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        search_dirs = [
+            os.path.join(APPDATA_DIR, _images_subdir),
+            APPDATA_DIR,
+        ]
         if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            search_dirs.append(os.path.join(sys._MEIPASS, _images_subdir))
             search_dirs.append(sys._MEIPASS)
+        search_dirs.append(os.path.join(script_dir, _images_subdir))
         search_dirs.append(script_dir)
         path = None
         for d in search_dirs:
@@ -3805,7 +3817,8 @@ class AboutDialog(QtWidgets.QDialog):
         outer.addWidget(url_lbl)
 
         # Donate button (bottom left)
-        donate_btn = QtWidgets.QPushButton("Donate")
+        self._donate_btn = QtWidgets.QPushButton("Donate")
+        donate_btn = self._donate_btn
         donate_btn.setCursor(QtCore.Qt.PointingHandCursor)
         donate_btn.setFont(QtGui.QFont(load_custom_font(), 16))
         donate_btn.setStyleSheet("background:#00AAFF; color:#fff; font-size:16px; padding:6px 18px; border-radius:6px;")
@@ -3866,6 +3879,10 @@ class AboutDialog(QtWidgets.QDialog):
             f"color: {hex_c}; padding-top: 0px; padding-bottom: 4px;"
         )
         self._rule.setStyleSheet(f"background: {hex_c}; max-height: 2px;")
+        self._donate_btn.setStyleSheet(
+            f"background: {hex_c}; color: #fff;"
+            " font-size:16px; padding:6px 18px; border-radius:6px;"
+        )
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -4178,6 +4195,10 @@ class SettingsDialog(QtWidgets.QDialog):
         # Network / proxy tab
         network_tab = self.create_network_tab()
         self.tabs.addTab(network_tab, "Network")
+
+        # Hotkeys reference tab
+        hotkeys_tab = self.create_hotkeys_tab()
+        self.tabs.addTab(hotkeys_tab, "Hotkeys")
         
         # Secret trigger label at top (click 7 times to reveal admin tab)
         self.secret_label = QtWidgets.QLabel(f"Version: {VERSION}")
@@ -4805,6 +4826,68 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(cert_group)
 
         widget.setLayout(layout)
+        return widget
+
+    def create_hotkeys_tab(self):
+        """Create read-only keyboard shortcuts reference tab."""
+        SHORTCUTS = [
+            ("+  /  =" , "Increase scroll speed by 1  (max 16)"),
+            ("-"       , "Decrease scroll speed by 1  (min 1)"),
+            ("Y"       , "Show Yesterday's games"),
+            ("D"       , "Show Today's games  (return to auto mode)"),
+            ("T"       , "Show Tomorrow's games"),
+            ("R"       , "Restart ticker  (replay intro animation)"),
+            ("G"       , "Refresh / fetch latest game data"),
+            ("F"       , "Toggle FPS counter overlay on/off"),
+            ("P"       , "Pause / unpause scrolling"),
+            ("S"       , "Open Standings window"),
+            ("."       , "Open Settings dialog"),
+            ("1 – 4"   , "Move ticker to that monitor number"),
+            ("Q"       , "Quit"),
+        ]
+
+        KEY_QSS   = (
+            "background:#1e2530; color:#e0e8ff; border:1px solid #3a4a6a;"
+            "border-radius:4px; padding:2px 8px; font-family:Consolas,monospace;"
+            "font-size:12px; font-weight:bold;"
+        )
+        DESC_QSS  = "color:#c8d8f0; font-size:12px;"
+        NOTE_QSS  = "color:#667788; font-size:10px; font-style:italic;"
+
+        widget = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout()
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
+
+        grp = QtWidgets.QGroupBox("Keyboard Shortcuts  (ticker must have focus)")
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(12, 16, 12, 12)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+
+        for row, (key, desc) in enumerate(SHORTCUTS):
+            key_lbl  = QtWidgets.QLabel(key)
+            key_lbl.setStyleSheet(KEY_QSS)
+            key_lbl.setAlignment(QtCore.Qt.AlignCenter)
+            key_lbl.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+
+            desc_lbl = QtWidgets.QLabel(desc)
+            desc_lbl.setStyleSheet(DESC_QSS)
+
+            grid.addWidget(key_lbl,  row, 0)
+            grid.addWidget(desc_lbl, row, 1)
+
+        grp.setLayout(grid)
+        outer.addWidget(grp)
+
+        note = QtWidgets.QLabel("All shortcuts are session-only and do not modify saved settings.")
+        note.setStyleSheet(NOTE_QSS)
+        note.setWordWrap(True)
+        outer.addWidget(note)
+        outer.addStretch()
+
+        widget.setLayout(outer)
         return widget
 
     def browse_cert_file(self):

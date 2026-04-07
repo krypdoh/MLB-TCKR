@@ -1,11 +1,34 @@
+Version 2.6.1 (2026-04-07)
+--------------------------
+"Today's Games" pin fix + league SVG images moved to MLB-TCKR.images
+
+FIXES:
+* Pressing D to show Today's Games no longer reverts to automatic mode on the next
+  periodic fetch.  The override is now stored as "today" instead of None so that
+  on_data_received bypasses the yesterday-mode / auto logic and keeps today's games
+  pinned until the user explicitly deselects the option or restarts the program.
+* Pressing D a second time (while already pinned to today) now correctly returns to
+  automatic (auto-yesterday) mode — acts as a proper toggle.
+
+IMPROVEMENTS:
++ american.svg and national.svg (league logos used in the Standings window) are now
+  stored in and searched for in the MLB-TCKR.images folder inside %APPDATA%\MLB-TCKR,
+  alongside all other team logo images — they are no longer placed in the root
+  directory of the bundle or project folder.
++ Both .spec files updated accordingly; the SVG files are bundled into
+  MLB-TCKR.images\ rather than the executable root.
++ Search order for league logos: MLB-TCKR.images (AppData) → AppData root →
+  MLB-TCKR.images (_MEIPASS) → _MEIPASS root → project folder (backward-compatible).
+
+
 Version 2.6.0 (2026-04-04)
 --------------------------
 Show Yesterday / Today / Tomorrow games on demand + keyboard shortcuts
 
 NEW FEATURES:
 + Keyboard shortcuts (active when ticker has focus) — session-only, nothing is saved to settings
-  - Ctrl +  : Increase scroll speed by 1 (max 16)
-  - Ctrl -  : Decrease scroll speed by 1 (min 1)
+  - +       : Increase scroll speed by 1 (max 16)
+  - -       : Decrease scroll speed by 1 (min 1)
   - Y       : Show Yesterday's games
   - D       : Show toDay's games (return to auto mode)
   - T       : Show Tomorrow's games

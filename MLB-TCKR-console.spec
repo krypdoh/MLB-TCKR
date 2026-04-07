@@ -89,9 +89,6 @@ _datas = [
     # System-tray / taskbar icon
     ('mlb.ico',          '.'),
     ('mlb-reverse.png',  '.'),
-    # League logos (SVG) used in the Standings window
-    ('american.svg',     '.'),
-    ('national.svg',     '.'),
     # Certifi CA bundle for requests/SSL
     (certifi.where(), 'certifi'),
 ]
