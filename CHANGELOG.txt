@@ -1,3 +1,64 @@
+Version 2.7.0 (2026-04-13)
+--------------------------
+Scheduled game layout redesign + probable pitchers + startup improvements
+
+NEW FEATURES:
++ Probable starting pitchers now displayed for scheduled games
+  - Shows pitcher name, ERA, and Win-Loss record (e.g., "P: Kershaw, 2.45 8-2")
+  - Fetches stats from MLB Stats API using person endpoint with hydrate parameter
+  - Displays below team names in small font
+  - Falls back to "P: Name, -.-- -" format if stats are unavailable (consistent formatting)
+
+IMPROVEMENTS:
++ Player information layout improvements
+  - Away team player info (probable pitchers, live stats, yesterday's stats) is now right-justified
+    within the away team block, ending close to the away team logo without touching
+  - Home team player info is now left-justified within the home team block, starting close
+    to the home team logo without touching
+  - Applies to all game states: scheduled (probable pitchers), live (current pitcher/batter),
+    and final/yesterday (WP/LP or final stats)
+  - Creates visual balance and keeps player names close to their team logos for clarity
+
++ Scheduled game layout completely redesigned for improved information density
+  - Game start times now positioned ABOVE the "vs" text (previously below)
+  - W-L records now vertically stacked with moneyline odds in left/right columns
+  - Away team: odds and W-L in left column, team name to the right
+  - Home team: team name on left, odds and W-L stacked in right column
+  - Reduced gap between game time and "vs" text from 3px to 1px for tighter layout
+
++ Live and final games now show W-L records when odds are displayed
+  - W-L records appear below moneyline odds (vertically stacked)
+  - Maintains existing player info display (current pitcher/batter for live, WP/LP for final)
+
++ Startup behavior improvements
+  - Ticker now determines whether to show today or yesterday BEFORE displaying games
+  - Eliminates brief flash of today's games before switching to yesterday
+  - "LOADING" indicator (blue badge, top-right) now shown during all data fetches
+  - Loading indicator appears when switching dates via keyboard shortcuts (Y/D/T)
+  - Loading badge automatically clears when data arrives or on error
+
+OPTIMIZATIONS:
++ Probable pitcher fetching optimized and parallelized
+  - Reduced from 2-3 API calls per scheduled game to 1 call per game
+  - Uses game feed API to get probable pitcher IDs, then person API for stats
+  - Eliminated attempt to parse schedule API (which doesn't include detailed pitcher data)
+  - All game feed API calls now executed in parallel using ThreadPoolExecutor
+  - All pitcher stats API calls now executed in parallel using ThreadPoolExecutor
+  - Results in 3-5x faster data loading for games with probable pitchers
+  - Grouped log messages confirm parallel execution (all "Away probable" / "Home probable" messages appear together)
+
+FIXES:
+* Fixed probable pitchers not rendering despite being fetched
+  - Subtext now enabled for both live/final games AND scheduled games
+  - Layout positioning (record_y) now calculated when probable pitchers are present
+  - Scheduled games with probable pitchers properly allocate vertical space
+
+* Fixed startup data display logic
+  - No longer displays today's pre-game schedule before fetching yesterday's finals
+  - Yesterday fetch triggered immediately if detected on startup
+  - Prevents unnecessary ticker rebuild and eliminates visual flash
+
+
 Version 2.6.1 (2026-04-07)
 --------------------------
 "Today's Games" pin fix + league SVG images moved to MLB-TCKR.images

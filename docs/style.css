@@ -45,7 +45,7 @@ html {
 
 body {
   font-family: 'SubwayTicker', 'Segoe UI', Tahoma, sans-serif;
-  background: radial-gradient(1300px 900px at 50% -20%, #16361f 0%, #060c08 60%);
+  background: #060c08;
   color: var(--text);
   overflow-x: hidden;
   line-height: 1.6;
@@ -68,7 +68,7 @@ a {
   position: absolute;
   border-radius: 50%;
   filter: blur(130px);
-  opacity: 0.42;
+  opacity: 0.15;
 }
 
 .blob-1 {

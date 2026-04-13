@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0413.1214
+Date: 2026.0407.1132
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.1.0"
+VERSION = "1.0.1"
 
 import warnings
 warnings.filterwarnings(
@@ -61,7 +61,6 @@ import datetime
 import random
 import requests
 import statsapi
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5 import QtSvg
 import ctypes
@@ -564,132 +563,6 @@ def get_team_logo(team_name, size=40):
     return scaled_logo
 
 
-def _fetch_probable_pitchers_parallel(scheduled_games):
-    """Fetch probable pitchers for scheduled games in parallel.
-    
-    Args:
-        scheduled_games: List of game_info dicts for scheduled games
-        
-    Returns:
-        Dict mapping game_id -> {'away': {'id': int, 'name': str}, 'home': {...}}
-    """
-    def format_last_name(player_obj):
-        full_name = str(player_obj.get('fullName', '')).strip()
-        if not full_name:
-            return "Unknown"
-        parts = full_name.split()
-        # Return last two words for names like "Michael Harris II" → "Harris II"
-        return ' '.join(parts[-2:]) if len(parts) > 2 else parts[-1]
-    
-    def fetch_single_game_probables(game_id):
-        """Fetch probable pitchers for a single game."""
-        try:
-            game_feed = statsapi.get('game', {'gamePk': game_id})
-            game_data_obj = game_feed.get('gameData', {})
-            probables = game_data_obj.get('probablePitchers', {})
-            
-            result = {}
-            away_probable = probables.get('away', {})
-            home_probable = probables.get('home', {})
-            
-            if away_probable and away_probable.get('fullName'):
-                result['away'] = {
-                    'id': away_probable.get('id'),
-                    'name': format_last_name(away_probable)
-                }
-            
-            if home_probable and home_probable.get('fullName'):
-                result['home'] = {
-                    'id': home_probable.get('id'),
-                    'name': format_last_name(home_probable)
-                }
-            
-            return game_id, result
-        except Exception as e:
-            print(f"[MLB] Could not get probable pitchers for game {game_id}: {e}")
-            return game_id, {}
-    
-    # Fetch all game feeds in parallel
-    probables_map = {}
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_id = {executor.submit(fetch_single_game_probables, g['game_id']): g['game_id'] 
-                       for g in scheduled_games}
-        for future in as_completed(future_to_id):
-            try:
-                game_id, result = future.result()
-                if result:
-                    probables_map[game_id] = result
-            except Exception as e:
-                print(f"[MLB] Exception fetching game probables: {e}")
-    
-    return probables_map
-
-
-def _fetch_pitcher_stats_parallel(game_data):
-    """Fetch all pitcher stats in parallel for better performance.
-    
-    Returns a dict mapping pitcher_id -> {'era': str, 'wins': int, 'losses': int}
-    """
-    def format_era(era_val):
-        """Format ERA value."""
-        if era_val is None:
-            return '-.--'
-        try:
-            return f"{float(era_val):.2f}"
-        except (ValueError, TypeError):
-            return '-.--'
-    
-    def fetch_single_pitcher(pitcher_id):
-        """Fetch stats for a single pitcher."""
-        try:
-            person_data = statsapi.get('person', {
-                'personId': pitcher_id, 
-                'hydrate': 'stats(group=pitching,type=season)'
-            })
-            people = person_data.get('people', [])
-            if people and len(people) > 0:
-                pitcher_info = people[0]
-                stats_list = pitcher_info.get('stats', [])
-                for stat_group in stats_list:
-                    splits = stat_group.get('splits', [])
-                    if splits and 'stat' in splits[0]:
-                        pitching = splits[0]['stat']
-                        return {
-                            'era': format_era(pitching.get('era', '-.--')),
-                            'wins': pitching.get('wins', 0),
-                            'losses': pitching.get('losses', 0)
-                        }
-        except Exception as e:
-            print(f"[MLB] Could not fetch stats for pitcher {pitcher_id}: {e}")
-        return None
-    
-    # Collect all unique pitcher IDs
-    pitcher_ids = set()
-    for game in game_data:
-        if 'away_pitcher_id' in game:
-            pitcher_ids.add(game['away_pitcher_id'])
-        if 'home_pitcher_id' in game:
-            pitcher_ids.add(game['home_pitcher_id'])
-    
-    if not pitcher_ids:
-        return {}
-    
-    # Fetch all pitcher stats in parallel
-    stats_map = {}
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_id = {executor.submit(fetch_single_pitcher, pid): pid for pid in pitcher_ids}
-        for future in as_completed(future_to_id):
-            pitcher_id = future_to_id[future]
-            try:
-                result = future.result()
-                if result:
-                    stats_map[pitcher_id] = result
-            except Exception as e:
-                print(f"[MLB] Exception fetching pitcher {pitcher_id}: {e}")
-    
-    return stats_map
-
-
 def fetch_todays_games(fetch_date=None):
     """Fetch all MLB games for today, or for a specific date (YYYY-MM-DD)."""
     def format_last_name(player_obj):
@@ -918,63 +791,10 @@ def fetch_todays_games(fetch_date=None):
                 except Exception as e:
                     print(f"[MLB] Could not get final game decisions: {e}")
             else:
-                # Scheduled games — store for batch fetching
                 game_info['outs'] = 0
                 game_info['runners'] = {'first': False, 'second': False, 'third': False}
             
             game_data.append(game_info)
-        
-        # Batch fetch probable pitchers for scheduled games in parallel
-        scheduled_games = [g for g in game_data if g.get('status') in {'Scheduled', 'Pre-Game', 'Warmup'}]
-        probables_map = _fetch_probable_pitchers_parallel(scheduled_games)
-        
-        # Apply probable pitcher data to games
-        for game_info in game_data:
-            game_id = game_info.get('game_id')
-            if game_id in probables_map:
-                probables = probables_map[game_id]
-                if 'away' in probables:
-                    game_info['away_pitcher_id'] = probables['away']['id']
-                    game_info['away_pitcher_name'] = probables['away']['name']
-                if 'home' in probables:
-                    game_info['home_pitcher_id'] = probables['home']['id']
-                    game_info['home_pitcher_name'] = probables['home']['name']
-                
-                if 'away' not in probables and 'home' not in probables:
-                    print(f"[MLB] No probable pitchers for {game_info['away_name']} @ {game_info['home_name']}")
-        
-        # Batch fetch all pitcher stats in parallel for better performance
-        pitcher_stats = _fetch_pitcher_stats_parallel(game_data)
-        
-        # Apply pitcher stats to games
-        for game_info in game_data:
-            if 'away_pitcher_id' in game_info:
-                pitcher_id = game_info['away_pitcher_id']
-                pitcher_name = game_info['away_pitcher_name']
-                stats = pitcher_stats.get(pitcher_id)
-                if stats:
-                    game_info['away_subtext'] = f"P: {pitcher_name}, {stats['era']} {stats['wins']}-{stats['losses']}"
-                    print(f"[MLB] Away probable: {game_info['away_subtext']}")
-                else:
-                    game_info['away_subtext'] = f"P: {pitcher_name}, -.-- -"
-                    print(f"[MLB] Away probable (no stats): {game_info['away_subtext']}")
-                # Clean up temporary fields
-                del game_info['away_pitcher_id']
-                del game_info['away_pitcher_name']
-            
-            if 'home_pitcher_id' in game_info:
-                pitcher_id = game_info['home_pitcher_id']
-                pitcher_name = game_info['home_pitcher_name']
-                stats = pitcher_stats.get(pitcher_id)
-                if stats:
-                    game_info['home_subtext'] = f"P: {pitcher_name}, {stats['era']} {stats['wins']}-{stats['losses']}"
-                    print(f"[MLB] Home probable: {game_info['home_subtext']}")
-                else:
-                    game_info['home_subtext'] = f"P: {pitcher_name}, -.-- -"
-                    print(f"[MLB] Home probable (no stats): {game_info['home_subtext']}")
-                # Clean up temporary fields
-                del game_info['home_pitcher_id']
-                del game_info['home_pitcher_name']
         
         # Filter games based on settings
         settings = get_settings()
@@ -1329,7 +1149,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._pending_today_games = []  # Today's fetched schedule (not yet displayed)
         self._pending_today_date = ''   # Date string for _pending_today_games
         self._yesterday_worker = None   # Keeps the yesterday QThread alive until done
-        self._loading_mode = False      # True while fetching new day's data (shows LOADING badge)
 
         # Per-game and ticker-level render caches
         self._game_pixmap_cache = {}  # game_id → (fingerprint_tuple, QPixmap)
@@ -1678,13 +1497,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Start background data fetch (non-blocking)"""
         # Don't start a new fetch if one is already running
         if self.is_fetching:
-            print("[MLB] Fetch already in progress, skipping")
             return
         
-        print(f"[MLB] Starting fetch for date: {self._effective_fetch_date()}")
         self.is_fetching = True
-        self._loading_mode = True  # Show LOADING badge
-        self.repaint()  # Force immediate repaint to show LOADING before worker starts
         self.data_worker = GameDataWorker(fetch_date=self._effective_fetch_date())
         self.data_worker.data_fetched.connect(self.on_data_received)
         self.data_worker.fetch_error.connect(self.on_fetch_error)
@@ -1733,7 +1548,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Network/API error: keep cached games visible with a 'Data Delayed' badge.
         If there is no cache yet (first-ever launch with no internet), show the
         no-games message so the ticker bar is never completely blank."""
-        self._loading_mode = False  # Clear loading indicator
         if not self._cached_games:
             print("[MLB] Fetch error with no cache — showing no-data message")
             self._no_data_mode = True
@@ -1847,8 +1661,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # When a manual date override is active, skip yesterday-mode logic entirely
         # and just display the fetched games for that date.
         if self._date_view_override is not None:
-            print(f"[MLB] Received {len(games)} games for date override: {self._date_view_override}")
-            self._loading_mode = False  # Clear loading indicator
             self.games = games
             self._reschedule_update_timer()
             new_fp = self._games_fingerprint()
@@ -1870,12 +1682,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self._yesterday_mode:
             self._pending_today_games = games
             self._pending_today_date = current_date
-            self._loading_mode = False
             self._check_yesterday_cutoff()
             return
 
-        # Check BEFORE setting self.games: if all games are pre-game AND first pitch is
-        # beyond the cutoff, fetch yesterday's finals instead of displaying today's schedule.
+        self.games = games
+        self._reschedule_update_timer()
+
+        # On startup: if all games are pre-game AND first pitch is beyond the cutoff,
+        # fetch yesterday's finals to show while we wait.
         if not self._pending_today_games:
             _not_started = {'Scheduled', 'Pre-Game', 'Warmup'}
             _all_pregame = bool(games) and all(g.get('status') in _not_started for g in games)
@@ -1887,14 +1701,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     self._pending_today_date = current_date
                     print(f"[MLB] All games pre-game ({delta:.0f} min to first pitch, cutoff {cutoff} min)"
                           " — fetching yesterday's scores")
-                    # Fetch yesterday immediately (don't display today's games)
+                    # Defer the yesterday fetch until the current worker's 'finished'
+                    # signal has fired and is_fetching is cleared.
                     QtCore.QTimer.singleShot(200, self._start_yesterday_fetch)
-                    return  # Don't set self.games or build ticker yet
-
-        # Normal path: display today's games
-        self.games = games
-        self._loading_mode = False
-        self._reschedule_update_timer()
 
         # Only rebuild when displayed data has actually changed, avoiding the
         # brief main-thread stall on every refresh where nothing is different.
@@ -2000,11 +1809,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             print("[MLB] No final games from yesterday — staying with today's pre-game schedule")
             self._pending_today_games = []
             self._pending_today_date = ''
-            self._loading_mode = False
             return
 
         self._yesterday_mode = True
-        self._loading_mode = False
         self.games = yesterday_finals
         # Stop normal polling; use next_day_timer every 5 min to recheck the cutoff
         self.waiting_for_next_day = True
@@ -2468,11 +2275,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         home_record = game.get('home_record', '0-0')
         show_records = self.settings.get('show_team_records', True)
         live_subtext_enabled = status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']
-        scheduled_subtext_enabled = status in ['Scheduled', 'Preview', 'Pre-Game']
 
-        # Get subtext for both live/final games (pitcher/batter or WP/LP) and scheduled games (probable pitchers)
-        away_subtext = game.get('away_subtext') if (live_subtext_enabled or scheduled_subtext_enabled) else None
-        home_subtext = game.get('home_subtext') if (live_subtext_enabled or scheduled_subtext_enabled) else None
+        away_subtext = game.get('away_subtext') if live_subtext_enabled else None
+        home_subtext = game.get('home_subtext') if live_subtext_enabled else None
 
         away_record_text = str(away_record).strip('()')
         home_record_text = str(home_record).strip('()')
@@ -2570,39 +2375,27 @@ class MLBTickerWindow(QtWidgets.QWidget):
                           score_width + 8 + effective_after_diamond + 
                           score_width + 15 + logo_size + 5 + home_block_width)
         else:
-            # Scheduled games: Team Logo Time/vs Logo Team
-            # W-L records sit below moneylines (vertically stacked)
+            # Scheduled games only: Team Logo vs Logo Team Time
             status_text = format_game_time_local(game.get('game_datetime'))
             
-            status_width = time_metrics.horizontalAdvance(status_text) + 10
+            status_width = time_metrics.horizontalAdvance(status_text) + 20
             _vs_fm = QtGui.QFontMetrics(self.vs_font)
             _vs_w = _vs_fm.horizontalAdvance("vs")
-            
-            # Calculate block widths with W-L below moneylines
-            # Away block: odds and W-L vertically stacked to left of team name
-            away_left_column_w = max(
-                away_odds_w if away_odds_text else 0,
-                small_metrics.horizontalAdvance(away_record_text) if show_records else 0
-            )
+            # Away block DOES include odds width: odds sit left of the name, so the
+            # logo would collide with them if we didn't widen the block.
             sched_away_w = max(
-                (away_left_column_w + odds_gap if away_left_column_w > 0 else 0) + away_name_width,
-                away_record_width if away_subtext else 0)  # Room for probable pitcher below
-            
-            # Home block: odds and W-L vertically stacked to right of team name
-            home_right_column_w = max(
-                home_odds_w if home_odds_text else 0,
-                small_metrics.horizontalAdvance(home_record_text) if show_records else 0
-            )
-            sched_home_w = max(
-                home_name_width + (odds_gap + home_right_column_w if home_right_column_w > 0 else 0),
-                home_record_width if home_subtext else 0)  # Room for probable pitcher below
-            
-            # Layout: away_block -> logo -> time/vs -> logo -> home_block
-            # Center the time/vs element between the two logos
-            center_element_w = max(status_width, _vs_w)
-            total_width = (sched_away_w + 5 + logo_size + 15 +
-                          center_element_w + 15 +
-                          logo_size + 5 + sched_home_w)
+                (away_odds_w + odds_gap if away_odds_text else 0) + away_name_width,
+                away_record_width)
+            # Home block does NOT include odds width: the odds are a small top-aligned
+            # label that floats into the margin between the home name and the time.
+            # Excluding them here keeps the time in the same position as pre-odds.
+            sched_home_w = max(home_name_width, home_record_width)
+            # total_width uses the exact same gap constants as the drawing code:
+            #   away_name -> +5 -> away_logo -> +20 -> vs -> +15 -> home_logo -> +10 -> home_name -> +10 -> time
+            total_width = (sched_away_w + 5 + logo_size + 20 +
+                          _vs_w + 15 +
+                          logo_size + 10 + sched_home_w + 10 +
+                          status_width)
         
         # Create pixmap at physical resolution so text renders at native DPR
         pixmap = QtGui.QPixmap(int(total_width * self.dpr), int(self.ticker_height * self.dpr))
@@ -2623,10 +2416,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         text_y = (self.ticker_height - _br.height()) // 2 - _br.top()
         time_y = text_y
         record_y = None
-        # Calculate record_y for player info if:
-        # 1. show_records is on (W-L records + player info), or
-        # 2. We have probable pitchers for scheduled games
-        if show_records or (scheduled_subtext_enabled and (away_subtext or home_subtext)):
+        if show_records:
             line_gap = 2  # Minimum spacing between team names and player info
             text_y = -_br.top() + 4
             record_y = text_y + _br.bottom() + line_gap + small_metrics.ascent()
@@ -2665,26 +2455,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.setFont(self.small_font)
                 painter.setPen(_ac)
                 painter.drawText(away_odds_draw_x, odds_y, away_odds_text)
-                # Draw W-L below moneyline for live/final games
-                if show_records:
-                    painter.setPen(QtGui.QColor('#BDBDBD'))
-                    wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(away_odds_draw_x, wl_below_odds_y, away_record_text)
                 painter.setFont(self._qfont)
                 painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
             if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                # Right-justify player info within away_block (ends near logo)
-                detail_w = small_metrics.horizontalAdvance(away_detail_text)
-                pc_total_w = (tiny_metrics.horizontalAdvance(pitch_count_text) + 6) if (pitch_count_text and pitcher_side == 'away') else 0
-                away_record_x = away_block_width - detail_w - pc_total_w
+                away_record_x = away_name_x
                 painter.drawText(away_record_x, record_y, away_detail_text)
                 if pitch_count_text and pitcher_side == 'away':
                     painter.setFont(self.tiny_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
-                    pc_x = away_record_x + detail_w + 6
+                    pc_x = away_record_x + small_metrics.horizontalAdvance(away_detail_text) + 6
                     painter.drawText(pc_x, record_y, pitch_count_text)
             x += away_block_width + 5
             
@@ -2744,77 +2526,86 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.setFont(self.small_font)
                 painter.setPen(_hc)
                 painter.drawText(home_odds_draw_x, odds_y, home_odds_text)
-                # Draw W-L below moneyline for live/final games
-                if show_records:
-                    painter.setPen(QtGui.QColor('#BDBDBD'))
-                    wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(home_odds_draw_x, wl_below_odds_y, home_record_text)
             if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                # Left-justify player info at start of home_block (near logo)
-                home_record_x = x
+                detail_w = small_metrics.horizontalAdvance(home_detail_text)
+                pc_total_w = (tiny_metrics.horizontalAdvance(pitch_count_text) + 6) if (pitch_count_text and pitcher_side == 'home') else 0
+                home_record_x = home_name_x + home_name_width - detail_w - pc_total_w
                 painter.drawText(home_record_x, record_y, home_detail_text)
                 if pitch_count_text and pitcher_side == 'home':
                     painter.setFont(self.tiny_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
-                    detail_w = small_metrics.horizontalAdvance(home_detail_text)
                     pc_x = home_record_x + detail_w + 6
                     painter.drawText(pc_x, record_y, pitch_count_text)
 
         else:
-            # Scheduled games: new layout with time above vs, W-L next to team names
-            # Calculate W-L baseline position (flush with bottom of team name)
-            _name_br = metrics.boundingRect(away_team)
-            wl_y = text_y + _name_br.bottom() + 2  # 2px below team name baseline
-            
-            # Away team: moneyline and W-L stacked to left of team name
-            # Calculate left column width and position
-            away_left_col_w = max(
-                away_odds_w if away_odds_text else 0,
-                small_metrics.horizontalAdvance(away_record_text) if show_records else 0
-            )
-            if away_left_col_w > 0:
-                away_name_x = x + away_left_col_w + odds_gap
-            else:
-                away_name_x = x
-            
-            # Draw moneyline (top of left column)
+            # Away team name (colored) — moneyline odds float to the left, top-aligned
+            # For scheduled games use content-only layout (no centering within block)
+            painter.setFont(self._qfont)
+            painter.setPen(away_color)
             if away_odds_text:
+                away_odds_draw_x = x
+                away_name_x = x + away_odds_w + odds_gap
+            else:
+                away_odds_draw_x = None
+                away_name_x = x
+            if away_odds_draw_x is not None:
                 _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
                 painter.setFont(self.small_font)
                 painter.setPen(_ac)
-                painter.drawText(x, odds_y, away_odds_text)
-            
-            # Draw W-L (below moneyline in left column)
-            if show_records:
-                painter.setFont(self.small_font)
-                painter.setPen(QtGui.QColor('#BDBDBD'))
-                # Position W-L below odds
-                wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                painter.drawText(x, wl_below_odds_y, away_record_text)
-            
-            # Draw team name
-            painter.setFont(self._qfont)
-            painter.setPen(away_color)
+                painter.drawText(away_odds_draw_x, odds_y, away_odds_text)
+                painter.setFont(self._qfont)
+                painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
-            
-            # Probable pitcher below team name (right-justified within away block)
-            if away_subtext and record_y is not None:
+            if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                subtext_w = small_metrics.horizontalAdvance(away_subtext)
-                away_subtext_x = sched_away_w - subtext_w
-                painter.drawText(away_subtext_x, record_y, away_subtext)
-            
+                away_record_x = away_name_x + 3
+                painter.drawText(away_record_x, record_y, away_detail_text)
             x += sched_away_w + 5
             
             # Away team logo
             away_logo = get_team_logo(away_team_full, logo_size)
             painter.drawPixmap(x, logo_y, away_logo)
-            x += logo_size + 15
+            x += logo_size + 20  # 20px before @ for symmetric centering
             
-            # Time above vs (centered in the gap between logos)
+            # vs.
+            vs_metrics_paint = QtGui.QFontMetrics(self.vs_font)
+            vs_y = text_y
+            painter.setFont(self.vs_font)
+            painter.setPen(QtGui.QColor("#FFFFFF"))
+            painter.drawText(x, vs_y, "vs")
+            x += vs_metrics_paint.horizontalAdvance("vs") + 15  # 15px after "vs" (symmetric)
+            
+            # Home logo
+            home_logo = get_team_logo(home_team_full, logo_size)
+            painter.drawPixmap(x, logo_y, home_logo)
+            x += logo_size + 10
+            
+            # Home team name (colored) — moneyline odds float to the right, top-aligned
+            # For scheduled games use content-only layout (no centering within block)
+            painter.setFont(self._qfont)
+            painter.setPen(home_color)
+            home_name_x = x
+            if home_odds_text:
+                home_odds_draw_x = home_name_x + home_name_width + odds_gap
+            else:
+                home_odds_draw_x = None
+            painter.drawText(home_name_x, text_y, home_team)
+            if home_odds_draw_x is not None:
+                _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
+                painter.setFont(self.small_font)
+                painter.setPen(_hc)
+                painter.drawText(home_odds_draw_x, odds_y, home_odds_text)
+            if show_records and record_y is not None:
+                painter.setFont(self.small_font)
+                painter.setPen(QtGui.QColor('#BDBDBD'))
+                home_record_x = home_name_x + home_name_width - home_record_width - 3
+                painter.drawText(home_record_x, record_y, home_detail_text)
+            x += sched_home_w + 10
+            
+            # Time/Final/PPD
             if status in ['Final', 'Completed', 'Game Over']:
                 status_text = "FINAL"
             elif status == 'Postponed':
@@ -2824,59 +2615,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
             else:
                 status_text = ""
             
-            painter.setFont(self.time_font)
-            painter.setPen(QtGui.QColor('#00B3FF'))
-            time_w = time_metrics.horizontalAdvance(status_text)
-            center_element_w = max(time_w, _vs_fm.horizontalAdvance("vs"))
-            time_x = x + (center_element_w - time_w) // 2
-            # Position time above vs — calculate based on font metrics
-            time_br = time_metrics.boundingRect(status_text)
-            time_above_y = (self.ticker_height - time_br.height() - _vs_fm.boundingRect("vs").height() - 3) // 2 - time_br.top()
-            painter.drawText(time_x, time_above_y, status_text)
-            
-            # vs below time
-            painter.setFont(self.vs_font)
-            painter.setPen(QtGui.QColor("#FFFFFF"))
-            vs_x = x + (center_element_w - _vs_fm.horizontalAdvance("vs")) // 2
-            vs_br = _vs_fm.boundingRect("vs")
-            vs_below_y = time_above_y + time_br.bottom() + 1 + _vs_fm.ascent()
-            painter.drawText(vs_x, vs_below_y, "vs")
-            x += center_element_w + 15
-            
-            # Home logo
-            home_logo = get_team_logo(home_team_full, logo_size)
-            painter.drawPixmap(x, logo_y, home_logo)
-            x += logo_size + 5
-            
-            # Home team: team name with moneyline and W-L stacked to right
             painter.setFont(self._qfont)
-            painter.setPen(home_color)
-            home_name_x = x
-            painter.drawText(home_name_x, text_y, home_team)
-            
-            # Calculate right column position
-            home_right_col_x = home_name_x + home_name_width + odds_gap
-            
-            # Draw moneyline (top of right column)
-            if home_odds_text:
-                _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
-                painter.setFont(self.small_font)
-                painter.setPen(_hc)
-                painter.drawText(home_right_col_x, odds_y, home_odds_text)
-            
-            # Draw W-L (below moneyline in right column)
-            if show_records:
-                painter.setFont(self.small_font)
-                painter.setPen(QtGui.QColor('#BDBDBD'))
-                # Position W-L below odds
-                wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                painter.drawText(home_right_col_x, wl_below_odds_y, home_record_text)
-            
-            # Probable pitcher below team name
-            if home_subtext and record_y is not None:
-                painter.setFont(self.small_font)
-                painter.setPen(QtGui.QColor('#BDBDBD'))
-                painter.drawText(home_name_x, record_y, home_subtext)
+            painter.setPen(QtGui.QColor('#00B3FF'))
+            painter.setFont(self.time_font)
+            painter.drawText(x, time_y, status_text)
         
         painter.end()
         return pixmap
@@ -3032,13 +2774,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.setPen(QtGui.QColor('#FFA500'))
             painter.drawText(dx, dy, delay_text)
 
-        # Date badge — shown when displaying a different day's games or loading
+        # Date badge — shown when displaying a different day's games
         _badge_text = None
-        _badge_color = QtGui.QColor('#FFD700')  # Gold for date labels
-        if self._loading_mode:
-            _badge_text = "LOADING"
-            _badge_color = QtGui.QColor('#00B3FF')  # Blue for loading
-        elif self._yesterday_mode or self._date_view_override == "yesterday":
+        if self._yesterday_mode or self._date_view_override == "yesterday":
             _badge_text = "YESTERDAY"
         elif self._date_view_override == "tomorrow":
             _badge_text = "TOMORROW"
@@ -3051,7 +2789,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             yx = self.width() - yw - margin
             yy = yh + margin - 2
             painter.fillRect(yx - 3, margin - 2, yw + 6, yh + 2, QtGui.QColor(0, 0, 0, 160))
-            painter.setPen(_badge_color)
+            painter.setPen(QtGui.QColor('#FFD700'))
             painter.drawText(yx, yy, _badge_text)
 
         # FPS overlay — bottom-right corner, bright green, small_font
