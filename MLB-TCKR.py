@@ -1415,6 +1415,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # physical resolution so the compositor doesn't have to upscale them
         # (upscaling is what makes the font look blurry/compressed vs the preview).
         self.dpr = self._target_screen.devicePixelRatio()
+        # Font/painter AA strategy: suppress antialiasing only on HiDPI (≥ 2× DPR) where
+        # physical resolution is high enough for pixel/LED fonts to look crisp without it.
+        # On standard-DPI displays (DPR < 2) keep AA on so rounded glyph shapes stay smooth —
+        # this is why the same font looks fine in other apps on a 1× display.
+        self._font_style_strategy = (
+            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+            QtGui.QFont.ForceIntegerMetrics
+            if self.dpr >= 2.0 else
+            QtGui.QFont.PreferAntialias | QtGui.QFont.ForceIntegerMetrics
+        )
+        self._text_aa_hint = self.dpr < 2.0  # True = enable text AA on standard-DPI displays
 
         # Load custom LED board font
         self.font_family = load_custom_font()
@@ -1442,10 +1453,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # All fonts are TrueType (.ttf), even LED-styled ones like Ozone
         # PreferBitmap ONLY works with true bitmap fonts, NOT TrueType fonts
         # Using PreferBitmap with .ttf causes rendering to fail after first character
-        self._qfont.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.ForceIntegerMetrics
-        )
+        self._qfont.setStyleStrategy(self._font_style_strategy)
         print(f"[FONT] Main ticker font '{qfont_info.family()}' using TrueType rendering (no PreferBitmap)")
         self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
@@ -1460,40 +1468,28 @@ class MLBTickerWindow(QtWidgets.QWidget):
         is_custom_font = (player_info_font == font_info.family())
         print(f"[FONT] Player info font requested: '{player_info_font}' -> using: '{font_info.family()}'")
         # All fonts are TrueType (.ttf), don't use PreferBitmap
-        self.small_font.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.ForceIntegerMetrics
-        )
+        self.small_font.setStyleStrategy(self._font_style_strategy)
         print(f"[FONT] Player info font '{font_info.family()}' using TrueType rendering")
         self.small_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
         # All fonts are TrueType (.ttf), don't use PreferBitmap
-        self.time_font.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.ForceIntegerMetrics
-        )
+        self.time_font.setStyleStrategy(self._font_style_strategy)
         self.time_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         self.vs_font = QtGui.QFont(font_to_use)
         self.vs_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.5)))
         self.vs_font.setBold(True)
         # All fonts are TrueType (.ttf), don't use PreferBitmap
-        self.vs_font.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.ForceIntegerMetrics
-        )
+        self.vs_font.setStyleStrategy(self._font_style_strategy)
         self.vs_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         small_px = self.small_font.pixelSize()
         self.tiny_font = QtGui.QFont(player_info_font)
         self.tiny_font.setPixelSize(max(5, small_px - 2))
         # All fonts are TrueType (.ttf), don't use PreferBitmap
-        self.tiny_font.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.ForceIntegerMetrics
-        )
+        self.tiny_font.setStyleStrategy(self._font_style_strategy)
         self.tiny_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         # Odds API (moneyline)
@@ -2239,7 +2235,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.intro_pixmap.fill(QtCore.Qt.transparent)
 
         p = QtGui.QPainter(self.intro_pixmap)
-        p.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
+        p.setRenderHint(QtGui.QPainter.TextAntialiasing, self._text_aa_hint)
         if logo_pm:
             p.drawPixmap(start_x, logo_y, logo_pm)
         p.setFont(intro_font)
@@ -2408,7 +2404,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             _br = metrics.boundingRect('ABCWMgy0123456789')
             text_y = (self.ticker_height - _br.height()) // 2 - _br.top()
             painter = QtGui.QPainter(self.ticker_pixmap)
-            painter.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
+            painter.setRenderHint(QtGui.QPainter.TextAntialiasing, self._text_aa_hint)
             painter.setFont(self._qfont)
             painter.setPen(QtGui.QColor('#FFFFFF'))
             for i in range(num_copies):
@@ -2685,7 +2681,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         painter = QtGui.QPainter(pixmap)
         # Disable anti-aliasing for LED fonts - PreferBitmap removed, so let Qt render TrueType normally
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
-        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, self._text_aa_hint)
         
         x = 0
         logo_y = (self.ticker_height - logo_size) // 2
@@ -3198,18 +3194,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Check if the font was resolved correctly (not falling back to system font)
         qfont_info = QtGui.QFontInfo(self._qfont)
         is_main_font_custom = (font_to_use == qfont_info.family())
-        if is_main_font_custom and font_to_use in ['Ozone', 'OZONE']:
-            # Custom LED/pixel font: use bitmap strategies
-            self._qfont.setStyleStrategy(
-                QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-                QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-            )
-        else:
-            # System font fallback: don't use PreferBitmap
-            self._qfont.setStyleStrategy(
-                QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-                QtGui.QFont.ForceIntegerMetrics
-            )
+        self._qfont.setStyleStrategy(self._font_style_strategy)
         self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         # Apply player font scale to small_font and tiny_font
@@ -3217,16 +3202,24 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.small_font = QtGui.QFont(player_info_font)
         base_small_px = max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3
         self.small_font.setPixelSize(int(base_small_px * player_font_scale))
+        self.small_font.setStyleStrategy(self._font_style_strategy)
+        self.small_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
+        self.time_font.setStyleStrategy(self._font_style_strategy)
+        self.time_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         self.vs_font = QtGui.QFont(font_to_use)
         self.vs_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.5)))
         self.vs_font.setBold(True)
+        self.vs_font.setStyleStrategy(self._font_style_strategy)
+        self.vs_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         small_px = self.small_font.pixelSize()
         self.tiny_font = QtGui.QFont(player_info_font)
         self.tiny_font.setPixelSize(max(5, small_px - 2))
+        self.tiny_font.setStyleStrategy(self._font_style_strategy)
+        self.tiny_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
 
         # Force ticker pixmap rebuild to pick up new fonts / show_records / colors
         self._game_pixmap_cache.clear()
@@ -3283,6 +3276,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.remove_appbar()
         self._target_screen = new_screen
         self.dpr = new_screen.devicePixelRatio()
+        # Recalculate AA strategy for the new screen's DPR
+        self._font_style_strategy = (
+            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+            QtGui.QFont.ForceIntegerMetrics
+            if self.dpr >= 2.0 else
+            QtGui.QFont.PreferAntialias | QtGui.QFont.ForceIntegerMetrics
+        )
+        self._text_aa_hint = self.dpr < 2.0
+        for _f in (self._qfont, self.small_font, self.time_font, self.vs_font, self.tiny_font):
+            _f.setStyleStrategy(self._font_style_strategy)
         geo = new_screen.geometry()
         self.setGeometry(geo.x(), geo.y(), geo.width(), self.ticker_height)
         self.setup_appbar()

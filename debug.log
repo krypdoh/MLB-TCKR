@@ -8,3 +8,6 @@
 [0414/135432.042:INFO:crashpad_lib_loader.cc(112)] AddSimpleAnnotation buildno:Dropbox-win-248.3.3539
 [0414/135432.042:INFO:crashpad_lib_loader.cc(112)] AddSimpleAnnotation platform:win
 [0414/135432.042:INFO:crashpad_lib_loader.cc(112)] AddSimpleAnnotation platform_version:11 26200
+[0414/173558.549:INFO:electron\dropbox\shell\common\crashpad_lib_loader.cc:78] Crashpad lib path is empty
+[0414/173558.549:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:109] Cannot load add_simple_annotations function
+[0414/173558.549:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:169] No crashpad annotations provided

@@ -1,3 +1,23 @@
+Version 2.7.3 (2026-04-14)
+--------------------------
+DPR-adaptive font antialiasing
+
+FIXES:
+* Fixed Ozone font rendering as "jagged/blocky" on standard-DPI (1× DPR) displays
+  - Root cause: NoAntialias | NoSubpixelAntialias was hardcoded for all fonts
+    regardless of display DPI. On a 4K/HiDPI display (DPR 2×) this is correct —
+    enough physical pixels exist to render the LED circles crisply without AA.
+    On a standard 1× DPR display, AA is needed or the circles can only be
+    approximated with a handful of aliased pixels and look jagged.
+  - Fix: font style strategy and painter TextAntialiasing hint are now selected
+    at startup based on self.dpr:
+      DPR ≥ 2.0 → NoAntialias | NoSubpixelAntialias | ForceIntegerMetrics (unchanged)
+      DPR < 2.0 → PreferAntialias | ForceIntegerMetrics (AA enabled)
+  - Stored as self._font_style_strategy and self._text_aa_hint; applied to all
+    fonts (_qfont, small_font, time_font, vs_font, tiny_font) and all painters
+  - Also updated when settings are changed or ticker is moved to another monitor
+    via keyboard shortcut (1–4)
+
 Version 2.7.2 (2026-04-14)
 --------------------------
 Display logic, W-L/moneyline layout overhaul, startup flash fix
