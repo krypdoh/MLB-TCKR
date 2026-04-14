@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0413.1214
+Date: 2026.0414.1016
 License: GNU AGPLv3
 
 Description:
@@ -976,6 +976,15 @@ def fetch_todays_games(fetch_date=None):
                 del game_info['home_pitcher_id']
                 del game_info['home_pitcher_name']
         
+        # For scheduled games with no probable pitcher listed, show "P: -" as a placeholder
+        scheduled_statuses = {'Scheduled', 'Pre-Game', 'Warmup', 'Preview'}
+        for game_info in game_data:
+            if game_info.get('status') in scheduled_statuses:
+                if not game_info.get('away_subtext'):
+                    game_info['away_subtext'] = 'P: -'
+                if not game_info.get('home_subtext'):
+                    game_info['home_subtext'] = 'P: -'
+
         # Filter games based on settings
         settings = get_settings()
         filtered_games = []
@@ -1301,6 +1310,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.games = []
         self.scroll_offset = 0.0  # Use float for sub-pixel scrolling
         self.ticker_pixmap = None
+        self._ticker_tiles = []  # list of (logical_x, pixmap) for one period
         
         # Performance optimizations
         self.cached_background = None
@@ -1425,10 +1435,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
             player_info_font = load_record_font_family() or font_to_use
         self._qfont = QtGui.QFont(font_to_use)
         self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
+        # Check if the font was resolved correctly (not falling back to system font)
+        qfont_info = QtGui.QFontInfo(self._qfont)
+        is_main_font_custom = (font_to_use == qfont_info.family())
+        print(f"[FONT] Main ticker font requested: '{font_to_use}' -> using: '{qfont_info.family()}'")
+        # All fonts are TrueType (.ttf), even LED-styled ones like Ozone
+        # PreferBitmap ONLY works with true bitmap fonts, NOT TrueType fonts
+        # Using PreferBitmap with .ttf causes rendering to fail after first character
         self._qfont.setStyleStrategy(
             QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
+            QtGui.QFont.ForceIntegerMetrics
         )
+        print(f"[FONT] Main ticker font '{qfont_info.family()}' using TrueType rendering (no PreferBitmap)")
         self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         # Apply player font scale to small_font and tiny_font
@@ -1436,27 +1454,61 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.small_font = QtGui.QFont(player_info_font)
         base_small_px = max(6, int(self.ticker_height * 0.22 * font_scale * 0.5)) + 3
         self.small_font.setPixelSize(int(base_small_px * player_font_scale))
+        # Apply rendering strategies - but check if this is a custom LED/pixel font
+        # System fonts need different strategies to avoid rendering failures
+        font_info = QtGui.QFontInfo(self.small_font)
+        is_custom_font = (player_info_font == font_info.family())
+        print(f"[FONT] Player info font requested: '{player_info_font}' -> using: '{font_info.family()}'")
+        # All fonts are TrueType (.ttf), don't use PreferBitmap
+        self.small_font.setStyleStrategy(
+            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+            QtGui.QFont.ForceIntegerMetrics
+        )
+        print(f"[FONT] Player info font '{font_info.family()}' using TrueType rendering")
+        self.small_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
+        # All fonts are TrueType (.ttf), don't use PreferBitmap
+        self.time_font.setStyleStrategy(
+            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+            QtGui.QFont.ForceIntegerMetrics
+        )
+        self.time_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        
         self.vs_font = QtGui.QFont(font_to_use)
         self.vs_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.5)))
         self.vs_font.setBold(True)
+        # All fonts are TrueType (.ttf), don't use PreferBitmap
+        self.vs_font.setStyleStrategy(
+            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+            QtGui.QFont.ForceIntegerMetrics
+        )
+        self.vs_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         small_px = self.small_font.pixelSize()
         self.tiny_font = QtGui.QFont(player_info_font)
         self.tiny_font.setPixelSize(max(5, small_px - 2))
+        # All fonts are TrueType (.ttf), don't use PreferBitmap
+        self.tiny_font.setStyleStrategy(
+            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+            QtGui.QFont.ForceIntegerMetrics
+        )
+        self.tiny_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         # Odds API (moneyline)
         self._odds_cache = {}       # {(away_lower, home_lower): (away_price, home_price)}
         self._odds_worker = None
 
-        # Match scroll timer to the display refresh rate so one timer tick = one VBlank frame.
-        # Firing faster than the compositor rate causes frames to stack up between VBlanks,
-        # producing uneven per-VBlank pixel advance (judder) even with delta-time scrolling.
+        # Fire the scroll timer faster than the display refresh rate so at least two
+        # callbacks land per VBlank interval.  Qt coalesces the resulting update() calls
+        # into one paintEvent per VBlank, and delta-time keeps scroll speed correct.
+        # Using round(1000/hz) exactly (e.g. 17 ms at 60 Hz vs 16.67 ms VBlank) creates
+        # a ~1 Hz beat that skips a VBlank once per second — the visible judder.
+        # Capping at 8 ms eliminates that beat for all display rates up to 120 Hz.
         _screen = QtWidgets.QApplication.primaryScreen()
         _hz = _screen.refreshRate() if _screen else 60.0
-        self._scroll_timer_interval_ms = max(8, round(1000.0 / _hz))
+        self._scroll_timer_interval_ms = min(8, max(4, round(1000.0 / _hz)))
         print(f"[TICKER] Display refresh: {_hz:.0f} Hz → scroll timer interval: {self._scroll_timer_interval_ms} ms")
 
         # Animation timer — started after intro finishes
@@ -1684,7 +1736,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         print(f"[MLB] Starting fetch for date: {self._effective_fetch_date()}")
         self.is_fetching = True
         self._loading_mode = True  # Show LOADING badge
-        self.repaint()  # Force immediate repaint to show LOADING before worker starts
+        self.update()  # Schedule repaint to show LOADING badge (non-blocking)
         self.data_worker = GameDataWorker(fetch_date=self._effective_fetch_date())
         self.data_worker.data_fetched.connect(self.on_data_received)
         self.data_worker.fetch_error.connect(self.on_fetch_error)
@@ -1865,7 +1917,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
         self.last_fetch_date = current_date
 
-        # If already in yesterday mode, update pending games and recheck cutoff
+        # If already showing yesterday's finals, update pending games and recheck cutoff
         # rather than replacing the display with today's pre-game schedule.
         if self._yesterday_mode:
             self._pending_today_games = games
@@ -1874,22 +1926,32 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self._check_yesterday_cutoff()
             return
 
-        # Check BEFORE setting self.games: if all games are pre-game AND first pitch is
-        # beyond the cutoff, fetch yesterday's finals instead of displaying today's schedule.
-        if not self._pending_today_games:
-            _not_started = {'Scheduled', 'Pre-Game', 'Warmup'}
-            _all_pregame = bool(games) and all(g.get('status') in _not_started for g in games)
-            if _all_pregame:
-                cutoff = self.settings.get('yesterday_cutoff_minutes', 30)
-                delta = self._minutes_to_first_game(games)
-                if delta is not None and delta > cutoff:
-                    self._pending_today_games = games
-                    self._pending_today_date = current_date
-                    print(f"[MLB] All games pre-game ({delta:.0f} min to first pitch, cutoff {cutoff} min)"
-                          " — fetching yesterday's scores")
-                    # Fetch yesterday immediately (don't display today's games)
-                    QtCore.QTimer.singleShot(200, self._start_yesterday_fetch)
-                    return  # Don't set self.games or build ticker yet
+        # If we already decided to fetch yesterday (pending set but worker hasn't returned
+        # yet), just refresh the stored today schedule and stay hidden.  Without this guard,
+        # a repeating update_timer firing between the two async fetches would fall through
+        # to the normal path and flash today's pre-game schedule before yesterday arrives.
+        if self._pending_today_games:
+            self._pending_today_games = games
+            self._pending_today_date = current_date
+            return
+
+        # Determine whether all of today's games are pre-game and first pitch is far enough
+        # away to warrant showing yesterday's finals first.
+        _not_started = {'Scheduled', 'Pre-Game', 'Warmup', 'Preview'}
+        _all_pregame = bool(games) and all(g.get('status') in _not_started for g in games)
+        if _all_pregame:
+            cutoff = self.settings.get('yesterday_cutoff_minutes', 30)
+            delta = self._minutes_to_first_game(games)
+            if delta is not None and delta > cutoff:
+                self._pending_today_games = games
+                self._pending_today_date = current_date
+                # Stop the polling timer now — on_yesterday_data_received will re-arm
+                # next_day_timer once yesterday's finals are displayed.
+                self.update_timer.stop()
+                print(f"[MLB] All games pre-game ({delta:.0f} min to first pitch, cutoff {cutoff} min)"
+                      " — fetching yesterday's scores")
+                QtCore.QTimer.singleShot(200, self._start_yesterday_fetch)
+                return  # Don't display today's games yet
 
         # Normal path: display today's games
         self.games = games
@@ -1986,10 +2048,23 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self._yesterday_worker = None
 
     def _on_yesterday_fetch_error(self):
-        """Yesterday fetch failed — clear pending state and stay on today's schedule."""
-        print("[MLB] Yesterday fetch failed — staying with today's pre-game schedule")
+        """Yesterday fetch failed — fall back to today's pre-game schedule."""
+        print("[MLB] Yesterday fetch failed — falling back to today's pre-game schedule")
+        saved = self._pending_today_games
         self._pending_today_games = []
         self._pending_today_date = ''
+        self._loading_mode = False
+        if saved:
+            self.games = saved
+            new_fp = self._games_fingerprint()
+            if new_fp != self._last_ticker_fp:
+                self._last_ticker_fp = new_fp
+                self.build_ticker_pixmap()
+                if self.ticker_pixmap:
+                    raw_speed = self.settings.get('speed', 2)
+                    self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
+            self._reschedule_update_timer()
+            self.update()
 
     def on_yesterday_data_received(self, games):
         """Display yesterday's final scores while today's games are pre-game."""
@@ -2340,6 +2415,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.drawText(i * segment_w + margin_l, text_y, text)
             painter.end()
             self._scroll_max_width = float(segment_w)
+            self._ticker_tiles = []  # clear tiles so paintEvent uses the message pixmap
             # Only reset the scroll position when the message itself has changed
             # (avoids jarring off-screen snap on every periodic re-fetch failure).
             if text != self._message_text:
@@ -2386,34 +2462,27 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # pixmap.width() is physical pixels; divide by dpr to get logical width
             total_width += int(pixmap.width() / self.dpr) + spacing
 
-        # Tile enough copies so the window is always fully covered at any scroll offset.
-        # num_copies >= 2 ensures the seamless loop works even when content > window.
-        win_w = max(self.width(), 1)
-        num_copies = max(2, (win_w // total_width) + 2)
-        self.ticker_pixmap = QtGui.QPixmap(int(total_width * num_copies * self.dpr), int(self.ticker_height * self.dpr))
-        self.ticker_pixmap.setDevicePixelRatio(self.dpr)
-        self.ticker_pixmap.fill(QtCore.Qt.transparent)
+        # Build the tile list for one period instead of pre-baking everything
+        # into a single giant pixmap (which exceeds GPU texture limits at high DPR
+        # with many games — e.g. 80 000+ physical pixels).
+        tiles = []
+        x_offset = 0
 
-        painter = QtGui.QPainter(self.ticker_pixmap)
+        # MLB logo tile at the head of the period
+        if mlb_pm:
+            logo_y = (self.ticker_height - int(mlb_pm.height() / self.dpr)) // 2
+            tiles.append((x_offset + logo_padding, logo_y, mlb_pm))
+            x_offset += logo_segment_w
 
-        # Draw all copies for seamless tiled loop
-        for repeat in range(num_copies):
-            x_offset = repeat * total_width
+        for pixmap in game_pixmaps:
+            tiles.append((x_offset, 0, pixmap))
+            x_offset += int(pixmap.width() / self.dpr) + spacing
 
-            # MLB logo at the head of each repetition
-            if mlb_pm:
-                logo_y = (self.ticker_height - int(mlb_pm.height() / self.dpr)) // 2
-                painter.drawPixmap(x_offset + logo_padding, logo_y, mlb_pm)
-                x_offset += logo_segment_w
-
-            for pixmap in game_pixmaps:
-                logical_width = int(pixmap.width() / self.dpr)
-                painter.drawPixmap(x_offset, 0, pixmap)
-                x_offset += logical_width + spacing
-
-        painter.end()
-        # One content-width is the loop period regardless of how many copies were tiled.
+        self._ticker_tiles = tiles
         self._scroll_max_width = float(total_width)
+        # Set a truthy sentinel so existing `if self.ticker_pixmap:` checks work.
+        # paintEvent uses _ticker_tiles for actual drawing.
+        self.ticker_pixmap = True
 
     def _load_mlb_logo(self, logo_size):
         """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware (cached)."""
@@ -2470,9 +2539,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         live_subtext_enabled = status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']
         scheduled_subtext_enabled = status in ['Scheduled', 'Preview', 'Pre-Game']
 
-        # Get subtext for both live/final games (pitcher/batter or WP/LP) and scheduled games (probable pitchers)
-        away_subtext = game.get('away_subtext') if (live_subtext_enabled or scheduled_subtext_enabled) else None
-        home_subtext = game.get('home_subtext') if (live_subtext_enabled or scheduled_subtext_enabled) else None
+        # Get subtext (player info) only when show_records is on.
+        # When disabled, neither W-L records nor player/pitcher names are shown.
+        away_subtext = game.get('away_subtext') if show_records and (live_subtext_enabled or scheduled_subtext_enabled) else None
+        home_subtext = game.get('home_subtext') if show_records and (live_subtext_enabled or scheduled_subtext_enabled) else None
 
         away_record_text = str(away_record).strip('()')
         home_record_text = str(home_record).strip('()')
@@ -2520,12 +2590,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
         home_odds_text = format_moneyline(home_price) if (show_moneyline and home_price is not None) else ''
         away_odds_w = small_metrics.horizontalAdvance(away_odds_text) if away_odds_text else 0
         home_odds_w = small_metrics.horizontalAdvance(home_odds_text) if home_odds_text else 0
-        # Widen blocks to fit odds text (away: odds on left; home: odds on right)
-        if away_odds_text:
-            away_top_w = away_odds_w + odds_gap + away_name_width
+        # W-L record width for the side column (used even when no odds are shown)
+        away_record_col_w = small_metrics.horizontalAdvance(away_record_text) if show_records else 0
+        home_record_col_w = small_metrics.horizontalAdvance(home_record_text) if show_records else 0
+        # Side column width = widest of W-L and odds (whichever is present)
+        away_col_w = max(away_record_col_w, away_odds_w)
+        home_col_w = max(home_record_col_w, home_odds_w)
+        # Widen blocks to fit the side column (away: column on left; home: column on right)
+        if away_col_w > 0:
+            away_top_w = away_col_w + odds_gap + away_name_width
             away_block_width = max(away_top_w, away_record_width)
-        if home_odds_text:
-            home_top_w = home_name_width + odds_gap + home_odds_w
+        if home_col_w > 0:
+            home_top_w = home_name_width + odds_gap + home_col_w
             home_block_width = max(home_top_w, home_record_width)
 
         # Calculate width based on game status
@@ -2571,48 +2647,43 @@ class MLBTickerWindow(QtWidgets.QWidget):
                           score_width + 15 + logo_size + 5 + home_block_width)
         else:
             # Scheduled games: Team Logo Time/vs Logo Team
-            # W-L records sit below moneylines (vertically stacked)
+            # W-L record sits above moneyline (vertically stacked) in side columns
             status_text = format_game_time_local(game.get('game_datetime'))
             
             status_width = time_metrics.horizontalAdvance(status_text) + 10
             _vs_fm = QtGui.QFontMetrics(self.vs_font)
             _vs_w = _vs_fm.horizontalAdvance("vs")
             
-            # Calculate block widths with W-L below moneylines
-            # Away block: odds and W-L vertically stacked to left of team name
-            away_left_column_w = max(
-                away_odds_w if away_odds_text else 0,
-                small_metrics.horizontalAdvance(away_record_text) if show_records else 0
-            )
+            # Reuse away_col_w / home_col_w (max of W-L and odds widths) already computed
+            # Calculate subtext width (probable pitcher info)
+            away_subtext_w = small_metrics.horizontalAdvance(away_subtext) if away_subtext else 0
             sched_away_w = max(
-                (away_left_column_w + odds_gap if away_left_column_w > 0 else 0) + away_name_width,
-                away_record_width if away_subtext else 0)  # Room for probable pitcher below
-            
-            # Home block: odds and W-L vertically stacked to right of team name
-            home_right_column_w = max(
-                home_odds_w if home_odds_text else 0,
-                small_metrics.horizontalAdvance(home_record_text) if show_records else 0
-            )
+                (away_col_w + odds_gap if away_col_w > 0 else 0) + away_name_width,
+                away_subtext_w)
+
+            home_subtext_w = small_metrics.horizontalAdvance(home_subtext) if home_subtext else 0
             sched_home_w = max(
-                home_name_width + (odds_gap + home_right_column_w if home_right_column_w > 0 else 0),
-                home_record_width if home_subtext else 0)  # Room for probable pitcher below
-            
+                home_name_width + (odds_gap + home_col_w if home_col_w > 0 else 0),
+                home_subtext_w)
+
             # Layout: away_block -> logo -> time/vs -> logo -> home_block
-            # Center the time/vs element between the two logos
             center_element_w = max(status_width, _vs_w)
             total_width = (sched_away_w + 5 + logo_size + 15 +
                           center_element_w + 15 +
                           logo_size + 5 + sched_home_w)
-        
+
         # Create pixmap at physical resolution so text renders at native DPR
         pixmap = QtGui.QPixmap(int(total_width * self.dpr), int(self.ticker_height * self.dpr))
         pixmap.setDevicePixelRatio(self.dpr)
         pixmap.fill(QtCore.Qt.transparent)
         
+        # Verify pixmap creation succeeded
+        if pixmap.isNull():
+            print(f"[ERROR] Failed to create pixmap: width={total_width} height={self.ticker_height} dpr={self.dpr}")
+            return QtGui.QPixmap(1, 1)  # Return minimal pixmap to avoid crash
+        
         painter = QtGui.QPainter(pixmap)
-        # Disable anti-aliasing for text so the LED font's dot-grid stays sharp.
-        # (Antialiasing blurs the pixel boundaries, making it look like the large
-        # "ghosted" letters vs. the crisp small fallback logo text.)
+        # Disable anti-aliasing for LED fonts - PreferBitmap removed, so let Qt render TrueType normally
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         painter.setRenderHint(QtGui.QPainter.TextAntialiasing, False)
         
@@ -2623,10 +2694,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
         text_y = (self.ticker_height - _br.height()) // 2 - _br.top()
         time_y = text_y
         record_y = None
-        # Calculate record_y for player info if:
-        # 1. show_records is on (W-L records + player info), or
-        # 2. We have probable pitchers for scheduled games
-        if show_records or (scheduled_subtext_enabled and (away_subtext or home_subtext)):
+        # Calculate record_y only when show_records is on.
+        if show_records:
             line_gap = 2  # Minimum spacing between team names and player info
             text_y = -_br.top() + 4
             record_y = text_y + _br.bottom() + line_gap + small_metrics.ascent()
@@ -2649,27 +2718,31 @@ class MLBTickerWindow(QtWidgets.QWidget):
         odds_y = text_y - _main_cap + _small_cap
 
         if status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']:
-            # Away team name (colored) — moneyline odds float to the left, top-aligned
+            # Away team name (colored) — W-L record floats to the left, top-aligned;
+            # moneyline odds appear below the W-L when present.
             painter.setFont(self._qfont)
             painter.setPen(away_color)
-            if away_odds_text:
-                away_top_w = away_odds_w + odds_gap + away_name_width
+            if away_col_w > 0:
+                away_top_w = away_col_w + odds_gap + away_name_width
                 unit_off = (away_block_width - away_top_w) // 2
-                away_odds_draw_x = x + unit_off
-                away_name_x = away_odds_draw_x + away_odds_w + odds_gap
+                away_col_draw_x = x + unit_off
+                away_name_x = away_col_draw_x + away_col_w + odds_gap
             else:
-                away_odds_draw_x = None
+                away_col_draw_x = None
                 away_name_x = x + (away_block_width - away_name_width) // 2
-            if away_odds_draw_x is not None:
-                _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
-                painter.setFont(self.small_font)
-                painter.setPen(_ac)
-                painter.drawText(away_odds_draw_x, odds_y, away_odds_text)
-                # Draw W-L below moneyline for live/final games
+            if away_col_draw_x is not None:
+                # W-L on top
                 if show_records:
+                    painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
-                    wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(away_odds_draw_x, wl_below_odds_y, away_record_text)
+                    painter.drawText(away_col_draw_x, odds_y, away_record_text)
+                # Moneyline below W-L
+                if away_odds_text:
+                    _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
+                    painter.setFont(self.small_font)
+                    painter.setPen(_ac)
+                    odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
+                    painter.drawText(away_col_draw_x, odds_below_wl_y, away_odds_text)
                 painter.setFont(self._qfont)
                 painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
@@ -2727,28 +2800,32 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawPixmap(x, logo_y, home_logo)
             x += logo_size + 5  # Mirror: name→logo gap on away side
             
-            # Home team name (colored) — moneyline odds float to the right, top-aligned
+            # Home team name (colored) — W-L record floats to the right, top-aligned;
+            # moneyline odds appear below the W-L when present.
             painter.setFont(self._qfont)
             painter.setPen(home_color)
-            if home_odds_text:
-                home_top_w = home_name_width + odds_gap + home_odds_w
+            if home_col_w > 0:
+                home_top_w = home_name_width + odds_gap + home_col_w
                 unit_off = (home_block_width - home_top_w) // 2
                 home_name_x = x + unit_off
-                home_odds_draw_x = home_name_x + home_name_width + odds_gap
+                home_col_draw_x = home_name_x + home_name_width + odds_gap
             else:
                 home_name_x = x + (home_block_width - home_name_width) // 2
-                home_odds_draw_x = None
+                home_col_draw_x = None
             painter.drawText(home_name_x, text_y, home_team)
-            if home_odds_draw_x is not None:
-                _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
-                painter.setFont(self.small_font)
-                painter.setPen(_hc)
-                painter.drawText(home_odds_draw_x, odds_y, home_odds_text)
-                # Draw W-L below moneyline for live/final games
+            if home_col_draw_x is not None:
+                # W-L on top
                 if show_records:
+                    painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
-                    wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(home_odds_draw_x, wl_below_odds_y, home_record_text)
+                    painter.drawText(home_col_draw_x, odds_y, home_record_text)
+                # Moneyline below W-L
+                if home_odds_text:
+                    _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
+                    painter.setFont(self.small_font)
+                    painter.setPen(_hc)
+                    odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
+                    painter.drawText(home_col_draw_x, odds_below_wl_y, home_odds_text)
             if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
@@ -2763,57 +2840,47 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     painter.drawText(pc_x, record_y, pitch_count_text)
 
         else:
-            # Scheduled games: new layout with time above vs, W-L next to team names
-            # Calculate W-L baseline position (flush with bottom of team name)
-            _name_br = metrics.boundingRect(away_team)
-            wl_y = text_y + _name_br.bottom() + 2  # 2px below team name baseline
-            
-            # Away team: moneyline and W-L stacked to left of team name
-            # Calculate left column width and position
-            away_left_col_w = max(
-                away_odds_w if away_odds_text else 0,
-                small_metrics.horizontalAdvance(away_record_text) if show_records else 0
-            )
-            if away_left_col_w > 0:
-                away_name_x = x + away_left_col_w + odds_gap
+            # Scheduled games: new layout with time above vs, W-L above moneyline in side columns
+
+            # Away team: W-L (top) and moneyline (below) stacked to left of team name
+            if away_col_w > 0:
+                away_name_x = x + away_col_w + odds_gap
             else:
                 away_name_x = x
-            
-            # Draw moneyline (top of left column)
+
+            # Draw W-L (top of left column)
+            if show_records:
+                painter.setFont(self.small_font)
+                painter.setPen(QtGui.QColor('#BDBDBD'))
+                painter.drawText(x, odds_y, away_record_text)
+
+            # Draw moneyline (below W-L in left column)
             if away_odds_text:
                 _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
                 painter.setFont(self.small_font)
                 painter.setPen(_ac)
-                painter.drawText(x, odds_y, away_odds_text)
-            
-            # Draw W-L (below moneyline in left column)
-            if show_records:
-                painter.setFont(self.small_font)
-                painter.setPen(QtGui.QColor('#BDBDBD'))
-                # Position W-L below odds
-                wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                painter.drawText(x, wl_below_odds_y, away_record_text)
-            
+                odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
+                painter.drawText(x, odds_below_wl_y, away_odds_text)
+
             # Draw team name
             painter.setFont(self._qfont)
             painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
-            
+
             # Probable pitcher below team name (right-justified within away block)
             if away_subtext and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                subtext_w = small_metrics.horizontalAdvance(away_subtext)
-                away_subtext_x = sched_away_w - subtext_w
+                away_subtext_x = max(x, x + sched_away_w - away_subtext_w)
                 painter.drawText(away_subtext_x, record_y, away_subtext)
-            
+
             x += sched_away_w + 5
-            
+
             # Away team logo
             away_logo = get_team_logo(away_team_full, logo_size)
             painter.drawPixmap(x, logo_y, away_logo)
             x += logo_size + 15
-            
+
             # Time above vs (centered in the gap between logos)
             if status in ['Final', 'Completed', 'Game Over']:
                 status_text = "FINAL"
@@ -2848,30 +2915,29 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawPixmap(x, logo_y, home_logo)
             x += logo_size + 5
             
-            # Home team: team name with moneyline and W-L stacked to right
+            # Home team: team name with W-L (top) and moneyline (below) stacked to right
             painter.setFont(self._qfont)
             painter.setPen(home_color)
             home_name_x = x
             painter.drawText(home_name_x, text_y, home_team)
-            
-            # Calculate right column position
+
+            # Right column starts after team name + gap
             home_right_col_x = home_name_x + home_name_width + odds_gap
-            
-            # Draw moneyline (top of right column)
+
+            # Draw W-L (top of right column)
+            if show_records:
+                painter.setFont(self.small_font)
+                painter.setPen(QtGui.QColor('#BDBDBD'))
+                painter.drawText(home_right_col_x, odds_y, home_record_text)
+
+            # Draw moneyline (below W-L in right column)
             if home_odds_text:
                 _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
                 painter.setFont(self.small_font)
                 painter.setPen(_hc)
-                painter.drawText(home_right_col_x, odds_y, home_odds_text)
-            
-            # Draw W-L (below moneyline in right column)
-            if show_records:
-                painter.setFont(self.small_font)
-                painter.setPen(QtGui.QColor('#BDBDBD'))
-                # Position W-L below odds
-                wl_below_odds_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                painter.drawText(home_right_col_x, wl_below_odds_y, home_record_text)
-            
+                odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
+                painter.drawText(home_right_col_x, odds_below_wl_y, home_odds_text)
+
             # Probable pitcher below team name
             if home_subtext and record_y is not None:
                 painter.setFont(self.small_font)
@@ -2992,7 +3058,29 @@ class MLBTickerWindow(QtWidgets.QWidget):
         phys_x = round(self.scroll_offset * self.dpr) / self.dpr
         _content_alpha = settings.get('content_opacity', 255) / 255.0
         painter.setOpacity(_content_alpha)
-        painter.drawPixmap(QtCore.QPointF(-phys_x, 0), self.ticker_pixmap)
+
+        # Draw tiles for visible period repetitions (avoids one giant pixmap that
+        # can exceed GPU texture limits at high DPR with many games).
+        period = self._scroll_max_width
+        win_w = self.width()
+        if self._ticker_tiles and period > 0:
+            # Determine how many full periods to draw to cover the window.
+            num_reps = max(2, int(win_w / period) + 2)
+            for rep in range(num_reps):
+                base_x = rep * period - phys_x
+                # Early exit: if this repetition is entirely past the window
+                if base_x > win_w:
+                    break
+                for (tile_x, tile_y, tile_pm) in self._ticker_tiles:
+                    draw_x = base_x + tile_x
+                    tile_logical_w = tile_pm.width() / self.dpr
+                    # Only draw tiles that overlap the visible window
+                    if draw_x + tile_logical_w > 0 and draw_x < win_w:
+                        painter.drawPixmap(QtCore.QPointF(draw_x, tile_y), tile_pm)
+        elif isinstance(self.ticker_pixmap, QtGui.QPixmap):
+            # Fallback for no-games message pixmap (small, no GPU issue)
+            painter.drawPixmap(QtCore.QPointF(-phys_x, 0), self.ticker_pixmap)
+
         painter.setOpacity(1.0)
 
         # Cache overlay if settings haven't changed
@@ -3107,10 +3195,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
             player_info_font = load_record_font_family() or font_to_use
         self._qfont = QtGui.QFont(font_to_use)
         self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
-        self._qfont.setStyleStrategy(
-            QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
-            QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
-        )
+        # Check if the font was resolved correctly (not falling back to system font)
+        qfont_info = QtGui.QFontInfo(self._qfont)
+        is_main_font_custom = (font_to_use == qfont_info.family())
+        if is_main_font_custom and font_to_use in ['Ozone', 'OZONE']:
+            # Custom LED/pixel font: use bitmap strategies
+            self._qfont.setStyleStrategy(
+                QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+                QtGui.QFont.PreferBitmap | QtGui.QFont.ForceIntegerMetrics
+            )
+        else:
+            # System font fallback: don't use PreferBitmap
+            self._qfont.setStyleStrategy(
+                QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+                QtGui.QFont.ForceIntegerMetrics
+            )
         self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
         
         # Apply player font scale to small_font and tiny_font

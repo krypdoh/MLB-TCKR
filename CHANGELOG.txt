@@ -1,3 +1,69 @@
+Version 2.7.2 (2026-04-14)
+--------------------------
+Display logic, W-L/moneyline layout overhaul, startup flash fix
+
+NEW FEATURES:
++ W-L records now shown on yesterday's final games (previously only on live/scheduled)
++ Probable pitcher placeholder — scheduled games with no pitcher listed now show "P: -"
+  instead of blank player info
+
+IMPROVEMENTS:
++ W-L and moneyline positions swapped for all game types
+  - W-L record is now on top (aligned with team name cap height)
+  - Moneyline is now on the same baseline as the team name (bottom row of the column)
+  - Applies to live, final/yesterday, scheduled games, away and home sides
++ Moneyline text moved up to team name baseline, eliminating crowding against player info
++ "Show Player Names, Record" setting now fully applies to all game states
+  - When disabled: W-L, player names (pitchers, WP/LP, batter info) all hidden
+  - Applies to today, tomorrow, and yesterday's games
+  - Layout reverts to single-row (team name vertically centered) when disabled
++ Side column (W-L / moneyline) now appears for yesterday finals even when moneyline
+  is disabled — block widths expand to fit the W-L text
+
+FIXES:
+* Fixed startup flash of today's pre-game schedule before yesterday's finals appear
+  - Root cause 1: 'Preview' status not included in _not_started set, causing a game
+    with that status to abort the all-pregame check and show today's schedule
+  - Root cause 2: update_timer continued firing during the two-step async fetch,
+    and on the second call _pending_today_games was already set, bypassing the guard
+    and falling through to "Normal path: display today's games"
+  - Fix: stop update_timer immediately when entering wait-for-yesterday state; add
+    explicit guard to refresh pending data and return if already waiting
+  - Fix: add 'Preview' to _not_started set
+* Fixed yesterday fetch error leaving ticker blank — now falls back to displaying
+  today's pre-game schedule instead of showing nothing
+* Removed stale [SCHED] debug print statements
+
+Version 2.7.1 (2026-04-14)
+--------------------------
+Scroll judder fix + GPU texture overflow fix + debug cleanup
+
+FIXES:
+* Fixed ~1 Hz scroll judder on 60 Hz displays
+  - Root cause: timer interval was round(1000/60) = 17 ms, but VBlank period is
+    16.667 ms — the ~0.33 ms mismatch accumulates to one missed VBlank per second,
+    causing a visible stutter (~1 Hz beat frequency)
+  - Fix: timer interval reduced to 8 ms so at least two callbacks fire per VBlank;
+    Qt coalesces the update() calls into one paintEvent per VBlank
+  - Delta-time scrolling means firing 2× faster has zero effect on scroll speed
+  - Applies for all display refresh rates up to 120 Hz
+
+* Fixed GPU texture limit overflow on 4K / HiDPI displays (DPR ≥ 2)
+  - With 15+ games at DPR 2.0, the pre-baked ticker pixmap was 80,328 physical
+    pixels wide — exceeding GPU max texture dimensions (~16–32 K px), causing
+    visual truncation and rendering artefacts
+  - Fix: replaced single mega-pixmap with a tile list (_ticker_tiles); paintEvent
+    now draws only the tiles that intersect the visible window per frame, repeating
+    one period's worth of tiles to fill the screen
+  - Per-tile GPU upload is ~2,500 px — well within any GPU limit
+  - self.ticker_pixmap = True used as truthy sentinel; all existing boolean guards
+    continue to work unchanged
+
+IMPROVEMENTS:
++ Removed synchronous repaint() call in start_data_fetch; replaced with update()
+  so the LOADING badge is shown via the normal coalesced paint path rather than
+  forcing an extra synchronous paint call on the main thread
+
 Version 2.7.0 (2026-04-13)
 --------------------------
 Scheduled game layout redesign + probable pitchers + startup improvements
