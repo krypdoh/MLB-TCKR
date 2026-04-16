@@ -8,7 +8,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
 ![Windows](https://img.shields.io/badge/os-windows%2010%7C11-purple)
-![Linux](https://img.shields.io/badge/linux-wine-800000.svg?wine%20&working%20unsupported&logoColor=white)
+![Linux](https://img.shields.io/badge/linux-wine-800000.svg?wine%20working%20unsupported&logoColor=white)
 
 ---
 
