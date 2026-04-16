@@ -11,9 +11,36 @@ echo MLB-TCKR Performance Build Script
 echo ========================================
 echo.
 
+REM Extract version from MLB-TCKR.py using PowerShell
+for /f "delims=" %%v in ('powershell -Command "(Get-Content MLB-TCKR.py)[12] -replace 'VERSION = ', '' -replace '\"\"', ''"') do set APP_VERSION=%%v
+
+if not defined APP_VERSION (
+    echo ERROR: Could not extract VERSION from MLB-TCKR.py
+    pause
+    exit /b 1
+)
+
+echo Building version %APP_VERSION%
+echo.
+
+REM Convert 3-digit version to 4-digit (e.g., 1.1.2 to 1.1.2.0)
+for /f "tokens=1,2,3 delims=." %%a in ("%APP_VERSION%") do (
+    set VER_MAJOR=%%a
+    set VER_MINOR=%%b
+    set VER_PATCH=%%c
+)
+set APP_VERSION_4=%VER_MAJOR%.%VER_MINOR%.%VER_PATCH%.0
+
+echo Updating version-mlb-tckr.txt to %APP_VERSION_4%...
+
+REM Update version-mlb-tckr.txt with new version numbers
+powershell -Command "(Get-Content 'version-mlb-tckr.txt') -replace 'filevers=\(\d+, \d+, \d+, \d+\)', 'filevers=(%VER_MAJOR%, %VER_MINOR%, %VER_PATCH%, 0)' -replace 'prodvers=\(\d+, \d+, \d+, \d+\)', 'prodvers=(%VER_MAJOR%, %VER_MINOR%, %VER_PATCH%, 0)' -replace \"FileVersion', u'[^']+'\", \"FileVersion', u'%APP_VERSION_4%'\" -replace \"ProductVersion', u'[^']+'\", \"ProductVersion', u'%APP_VERSION_4%'\" | Set-Content 'version-mlb-tckr.txt' -Encoding UTF8"
+
+echo.
+
 REM Pause Dropbox sync to prevent file access conflicts during build
 echo Pausing Dropbox sync...
-TASKKILL /F /IM dropbox.exe /T
+TASKKILL /F /IM dropbox.exe /T 2>nul
 echo.
 
 REM Check if Python is available

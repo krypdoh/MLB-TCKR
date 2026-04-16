@@ -263,7 +263,7 @@ exe = EXE(
     entitlements_file=None,
     # PyInstaller 5.3+ accepts PNG; for older versions convert mlb.png to mlb.ico
     icon='mlb.ico',
-    version_info=None,
+    version_info='version-mlb-tckr.txt',
     # Embed a Windows application manifest so the AppBar API works correctly
     # and the app is DPI-aware (matches AA_EnableHighDpiScaling in code)
     uac_admin=False,

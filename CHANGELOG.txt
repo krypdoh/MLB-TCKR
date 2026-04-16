@@ -1,3 +1,58 @@
+Version 1.2.0 (2026-04-16)
+--------------------------
+Major update with score animations, yesterday mode improvements, pause stability, and automated versioning
+
+NEW FEATURES:
++ Score changes now glow gold for 2.5 seconds
+  - When a score updates, the number changes color from white to gold (#FFD700)
+  - After 2.5 seconds, the color fades back to white
+  - Each team's score glows independently (away and home tracked separately)
+  - Automatic cache invalidation ensures smooth color transitions
+  - Uses high-precision timer for accurate glow duration
++ Yesterday mode now shows ALL games including in-progress
+  - Previously filtered to only Final/Completed/Game Over statuses
+  - Now includes any west coast late games still in progress
+  - Periodic fetches continue during yesterday mode to update in-progress games
+  - Smart polling applies (live games get frequent updates, finals get idle polling)
++ Build script (build_performance.bat) now automatically extracts version from MLB-TCKR.py
+  - Reads VERSION constant from MLB-TCKR.py line 13
+  - Automatically updates version-mlb-tckr.txt with 4-digit version format
+  - Both .spec files now reference version-mlb-tckr.txt for consistent version embedding
+  - Displays "Building version x.x.x" during build process
+
+IMPROVEMENTS:
++ Ticker speed maximum increased from 16 to 30
+  - Settings dialog slider now allows values 1-30
+  - Keyboard + shortcut can now increase speed up to 30
+  - Tooltip updated to reflect new range
++ LOADING overlay now only appears during significant state changes
+  - Shows on initial app startup, when switching between days (Yesterday/Today/Tomorrow),
+    or when recovering from a DATA DELAYED event
+  - Regular intra-day periodic fetches no longer trigger the LOADING indicator
+  - Reduces visual noise during normal operation
+  - start_data_fetch() now accepts optional show_loading parameter for explicit control
+  - _first_fetch flag tracks whether initial startup fetch has completed
++ In-progress games now show pitcher info in "P: Name ERA W-L" format (same as pre-game)
+  - Previously showed "LastName ERA" with no "P:" prefix and no W-L record
+  - Season W-L pulled from the existing boxscore players_map — no extra API call
++ Warmup-status games now render probable pitcher subtexts in the ticker
+  - 'Warmup' added to scheduled_subtext_enabled status set
+
+FIXES:
+* Fixed ticker jumping/shifting position when paused and data updates
+  - Root cause: when build_ticker_pixmap() rebuilt the ticker due to score/count changes,
+    _scroll_max_width could change slightly (due to text width variations), causing the
+    content at scroll_offset to shift visually even though the numeric offset stayed constant
+  - Fix: scroll position is now preserved as a ratio (scroll_offset / _scroll_max_width)
+    before any pixmap rebuild while paused, then restored afterward
+  - Applies to all rebuild triggers: game data updates, odds updates, settings changes,
+    monitor switches, and error recovery
+  - Also prevents _last_frame_ms resets when paused, avoiding time jumps on unpause
+* Fixed yesterday mode filtering out in-progress games
+  - _effective_fetch_date() now returns yesterday's date when in automatic yesterday mode
+  - Ensures all games are shown, not just completed ones
+
+
 Version 2.7.3 (2026-04-14)
 --------------------------
 DPR-adaptive font antialiasing

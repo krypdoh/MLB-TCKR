@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0414.1016
+Date: 2026.0416.0130
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import warnings
 warnings.filterwarnings(
@@ -828,6 +828,9 @@ def fetch_todays_games(fetch_date=None):
                             players_map.update(team_players)
 
                     pitcher_era = format_era(get_player_stat(players_map, pitcher_id, 'pitching', 'era'))
+                    pitcher_wins = get_player_stat(players_map, pitcher_id, 'pitching', 'wins')
+                    pitcher_losses = get_player_stat(players_map, pitcher_id, 'pitching', 'losses')
+                    pitcher_wl = f"{pitcher_wins}-{pitcher_losses}" if (pitcher_wins is not None and pitcher_losses is not None) else "-"
                     batter_avg = format_avg(get_player_stat(players_map, batter_id, 'batting', 'avg'))
                     pitcher_pitches = get_game_stat(players_map, pitcher_id, 'pitching', 'numberOfPitches')
 
@@ -851,13 +854,15 @@ def fetch_todays_games(fetch_date=None):
                     game_info['pitcher_pitches'] = pitcher_pitches
 
                     # Replace W-L line with live P/B stats once game starts
+                    pitcher_subtext = f"P: {pitcher_last} {pitcher_era} {pitcher_wl}"
+                    batter_subtext = f"{batter_prefix}{batter_last} {batter_avg}"
                     if game_info.get('inning_state', '') == 'Top':
-                        game_info['away_subtext'] = f"{batter_prefix}{batter_last} {batter_avg}"
-                        game_info['home_subtext'] = f"{pitcher_last} {pitcher_era}"
+                        game_info['away_subtext'] = batter_subtext
+                        game_info['home_subtext'] = pitcher_subtext
                         game_info['pitcher_side'] = 'home'
                     else:
-                        game_info['away_subtext'] = f"{pitcher_last} {pitcher_era}"
-                        game_info['home_subtext'] = f"{batter_prefix}{batter_last} {batter_avg}"
+                        game_info['away_subtext'] = pitcher_subtext
+                        game_info['home_subtext'] = batter_subtext
                         game_info['pitcher_side'] = 'away'
                     
                     # Get runners on base from linescore
@@ -1340,10 +1345,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._pending_today_date = ''   # Date string for _pending_today_games
         self._yesterday_worker = None   # Keeps the yesterday QThread alive until done
         self._loading_mode = False      # True while fetching new day's data (shows LOADING badge)
+        self._first_fetch = True        # True until first successful fetch completes
 
         # Per-game and ticker-level render caches
         self._game_pixmap_cache = {}  # game_id → (fingerprint_tuple, QPixmap)
         self._last_ticker_fp = None   # overall fingerprint; None forces first build
+        
+        # Score change tracking for glow effect
+        self._score_change_times = {}  # game_id → {'away': ms_timestamp, 'home': ms_timestamp}
+        self._previous_scores = {}     # game_id → (away_score, home_score)
 
         # Intro pixel-reveal animation state
         self.intro_active = True
@@ -1714,6 +1724,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Return the date string to fetch, based on any session-only override.
         Returns None when the normal auto-today behaviour should apply."""
         if self._date_view_override is None or self._date_view_override == "today":
+            # If in automatic yesterday mode, fetch yesterday's games to update in-progress
+            if self._yesterday_mode:
+                today = datetime.datetime.now().date()
+                return (today - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
             return None  # GameDataWorker will default to today
         today = datetime.datetime.now().date()
         if self._date_view_override == "yesterday":
@@ -1722,8 +1736,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
             return (today + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         return None
 
-    def start_data_fetch(self):
-        """Start background data fetch (non-blocking)"""
+    def start_data_fetch(self, show_loading=None):
+        """Start background data fetch (non-blocking)
+        
+        Args:
+            show_loading: If True, always show LOADING badge.
+                         If False, never show LOADING badge.
+                         If None (default), show LOADING only on first fetch or if recovering from DATA DELAYED.
+        """
         # Don't start a new fetch if one is already running
         if self.is_fetching:
             print("[MLB] Fetch already in progress, skipping")
@@ -1731,8 +1751,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         print(f"[MLB] Starting fetch for date: {self._effective_fetch_date()}")
         self.is_fetching = True
-        self._loading_mode = True  # Show LOADING badge
-        self.update()  # Schedule repaint to show LOADING badge (non-blocking)
+        
+        # Determine whether to show LOADING badge
+        if show_loading is None:
+            # Auto-detect: show on first fetch or when recovering from delayed data
+            self._loading_mode = self._first_fetch or self._data_delayed
+        else:
+            # Explicit override
+            self._loading_mode = show_loading
+        
+        if self._loading_mode:
+            self.update()  # Schedule repaint to show LOADING badge (non-blocking)
+        
         self.data_worker = GameDataWorker(fetch_date=self._effective_fetch_date())
         self.data_worker.data_fetched.connect(self.on_data_received)
         self.data_worker.fetch_error.connect(self.on_fetch_error)
@@ -1759,7 +1789,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Invalidate per-game pixmap cache so odds render on next build
         self._game_pixmap_cache.clear()
         self._last_ticker_fp = None
+        # Preserve scroll position ratio when paused (prevents visual jumps)
+        scroll_ratio = None
+        if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+            scroll_ratio = self.scroll_offset / self._scroll_max_width
         self.build_ticker_pixmap()
+        # Restore scroll position ratio after rebuild when paused
+        if scroll_ratio is not None and self._scroll_max_width > 0:
+            self.scroll_offset = scroll_ratio * self._scroll_max_width
         self.update()
 
     def _get_game_odds(self, away_full, home_full):
@@ -1792,7 +1829,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 raw_speed = self.settings.get('speed', 2)
                 self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
                 # _scroll_max_width is set inside build_ticker_pixmap
-            self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+            # Only reset frame time when not paused
+            if not self.scroll_paused and not self.is_hovered:
+                self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
             # Slow down retries while offline (no point hammering every 10 s)
             self._reschedule_update_timer()
             self.update()
@@ -1804,7 +1843,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._last_ticker_fp = None
         new_fp = self._games_fingerprint()
         self._last_ticker_fp = new_fp
+        # Preserve scroll position ratio when paused (prevents visual jumps)
+        scroll_ratio = None
+        if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+            scroll_ratio = self.scroll_offset / self._scroll_max_width
         self.build_ticker_pixmap()
+        # Restore scroll position ratio after rebuild when paused
+        if scroll_ratio is not None and self._scroll_max_width > 0:
+            self.scroll_offset = scroll_ratio * self._scroll_max_width
         if self.ticker_pixmap:
             raw_speed = self.settings.get('speed', 2)
             self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
@@ -1888,6 +1934,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Successful fetch — update cache and clear any delayed-data flag
         self._cached_games = games
         self._no_data_mode = False  # Connectivity restored
+        self._first_fetch = False   # First fetch completed successfully
         if self._data_delayed:
             self._data_delayed = False
             self._last_ticker_fp = None  # Force rebuild to remove the delay banner
@@ -1902,24 +1949,51 @@ class MLBTickerWindow(QtWidgets.QWidget):
             new_fp = self._games_fingerprint()
             if new_fp != self._last_ticker_fp:
                 self._last_ticker_fp = new_fp
+                # Preserve scroll position ratio when paused (prevents visual jumps)
+                scroll_ratio = None
+                if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+                    scroll_ratio = self.scroll_offset / self._scroll_max_width
                 self.build_ticker_pixmap()
+                # Restore scroll position ratio after rebuild when paused
+                if scroll_ratio is not None and self._scroll_max_width > 0:
+                    self.scroll_offset = scroll_ratio * self._scroll_max_width
                 if self.ticker_pixmap:
                     raw_speed = self.settings.get('speed', 2)
                     self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-                self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                # Only reset frame time when not paused (avoids time jump on unpause)
+                if not self.scroll_paused and not self.is_hovered:
+                    self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
             self.update()
             return
 
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
         self.last_fetch_date = current_date
 
-        # If already showing yesterday's finals, update pending games and recheck cutoff
-        # rather than replacing the display with today's pre-game schedule.
+        # If already showing yesterday's games, these fetched games ARE yesterday's games
+        # (because _effective_fetch_date returns yesterday when in yesterday mode).
+        # Update the display and continue polling to keep in-progress games current.
         if self._yesterday_mode:
-            self._pending_today_games = games
-            self._pending_today_date = current_date
             self._loading_mode = False
-            self._check_yesterday_cutoff()
+            self.games = games  # Update yesterday's games (may have status changes)
+            self._reschedule_update_timer()
+            new_fp = self._games_fingerprint()
+            if new_fp != self._last_ticker_fp:
+                self._last_ticker_fp = new_fp
+                # Preserve scroll position ratio when paused (prevents visual jumps)
+                scroll_ratio = None
+                if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+                    scroll_ratio = self.scroll_offset / self._scroll_max_width
+                self.build_ticker_pixmap()
+                # Restore scroll position ratio after rebuild when paused
+                if scroll_ratio is not None and self._scroll_max_width > 0:
+                    self.scroll_offset = scroll_ratio * self._scroll_max_width
+                if self.ticker_pixmap:
+                    raw_speed = self.settings.get('speed', 2)
+                    self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
+                # Only reset frame time when not paused
+                if not self.scroll_paused and not self.is_hovered:
+                    self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+            self.update()
             return
 
         # If we already decided to fetch yesterday (pending set but worker hasn't returned
@@ -1959,12 +2033,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
         new_fp = self._games_fingerprint()
         if new_fp != self._last_ticker_fp:
             self._last_ticker_fp = new_fp
+            # Preserve scroll position ratio when paused (prevents visual jumps)
+            scroll_ratio = None
+            if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+                scroll_ratio = self.scroll_offset / self._scroll_max_width
             self.build_ticker_pixmap()
+            # Restore scroll position ratio after rebuild when paused
+            if scroll_ratio is not None and self._scroll_max_width > 0:
+                self.scroll_offset = scroll_ratio * self._scroll_max_width
             if self.ticker_pixmap:
                 raw_speed = self.settings.get('speed', 2)
                 self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
                 # _scroll_max_width is set inside build_ticker_pixmap
-            self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+            # Only reset frame time when not paused (avoids time jump on unpause)
+            if not self.scroll_paused and not self.is_hovered:
+                self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
 
         self.update()
     
@@ -2014,6 +2097,32 @@ class MLBTickerWindow(QtWidgets.QWidget):
     # Yesterday mode — show previous day's finals until today's games near
     # ------------------------------------------------------------------
 
+    def _invalidate_glow_cache(self):
+        """Invalidate ticker cache to update score glow colors as they expire."""
+        # Check if we still have active glows
+        current_time_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        glow_duration_ms = 2500
+        has_active_glow = False
+        
+        for game_id, change_times in self._score_change_times.items():
+            if change_times['away'] is not None:
+                if current_time_ms - change_times['away'] <= glow_duration_ms:
+                    has_active_glow = True
+                    break
+            if change_times['home'] is not None:
+                if current_time_ms - change_times['home'] <= glow_duration_ms:
+                    has_active_glow = True
+                    break
+        
+        if has_active_glow:
+            # Force a rebuild to update colors
+            self._last_ticker_fp = None
+            new_fp = self._games_fingerprint()
+            if new_fp != self._last_ticker_fp:
+                self._last_ticker_fp = new_fp
+                self.build_ticker_pixmap()
+                self.update()
+
     def start_preview_fetch(self):
         """Fetch today's schedule without immediately replacing the display.
         Results go to on_preview_data_received instead of on_data_received."""
@@ -2055,7 +2164,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
             new_fp = self._games_fingerprint()
             if new_fp != self._last_ticker_fp:
                 self._last_ticker_fp = new_fp
+                # Preserve scroll position ratio when paused (prevents visual jumps)
+                scroll_ratio = None
+                if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+                    scroll_ratio = self.scroll_offset / self._scroll_max_width
                 self.build_ticker_pixmap()
+                # Restore scroll position ratio after rebuild when paused
+                if scroll_ratio is not None and self._scroll_max_width > 0:
+                    self.scroll_offset = scroll_ratio * self._scroll_max_width
                 if self.ticker_pixmap:
                     raw_speed = self.settings.get('speed', 2)
                     self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
@@ -2063,12 +2179,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.update()
 
     def on_yesterday_data_received(self, games):
-        """Display yesterday's final scores while today's games are pre-game."""
-        final_statuses = {'Final', 'Completed', 'Game Over'}
-        yesterday_finals = [g for g in games if g.get('status') in final_statuses]
-
-        if not yesterday_finals:
-            print("[MLB] No final games from yesterday — staying with today's pre-game schedule")
+        """Display yesterday's games (all statuses) while today's games are pre-game."""
+        if not games:
+            print("[MLB] No games from yesterday — staying with today's pre-game schedule")
             self._pending_today_games = []
             self._pending_today_date = ''
             self._loading_mode = False
@@ -2076,23 +2189,33 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         self._yesterday_mode = True
         self._loading_mode = False
-        self.games = yesterday_finals
-        # Stop normal polling; use next_day_timer every 5 min to recheck the cutoff
-        self.waiting_for_next_day = True
-        self.update_timer.stop()
+        self.games = games  # Show ALL games, including any still in progress
+        # Keep normal polling active to update any in-progress games from yesterday
+        self.waiting_for_next_day = False
+        self._reschedule_update_timer()  # Use smart polling (live games get frequent updates)
+        # Also run next_day_timer every 5 min to recheck the cutoff
         self.next_day_timer.stop()
         self.next_day_timer.start(300_000)  # 5 min
 
         self._last_ticker_fp = None
         new_fp = self._games_fingerprint()
         self._last_ticker_fp = new_fp
+        # Preserve scroll position ratio when paused (prevents visual jumps)
+        scroll_ratio = None
+        if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+            scroll_ratio = self.scroll_offset / self._scroll_max_width
         self.build_ticker_pixmap()
+        # Restore scroll position ratio after rebuild when paused
+        if scroll_ratio is not None and self._scroll_max_width > 0:
+            self.scroll_offset = scroll_ratio * self._scroll_max_width
         if self.ticker_pixmap:
             raw_speed = self.settings.get('speed', 2)
             self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-        self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        # Only reset frame time when not paused
+        if not self.scroll_paused and not self.is_hovered:
+            self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
         self.update()
-        print(f"[MLB] Yesterday mode active — showing {len(yesterday_finals)} final games")
+        print(f"[MLB] Yesterday mode active — showing {len(games)} games (including any still in progress)")
 
     def _on_preview_fetch_error(self):
         """Preview fetch failed — stay in yesterday mode and retry next cycle."""
@@ -2173,7 +2296,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._last_ticker_fp = None
         new_fp = self._games_fingerprint()
         self._last_ticker_fp = new_fp
+        # Preserve scroll position ratio when paused (prevents visual jumps)
+        scroll_ratio = None
+        if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+            scroll_ratio = self.scroll_offset / self._scroll_max_width
         self.build_ticker_pixmap()
+        # Restore scroll position ratio after rebuild when paused
+        if scroll_ratio is not None and self._scroll_max_width > 0:
+            self.scroll_offset = scroll_ratio * self._scroll_max_width
         if self.ticker_pixmap:
             raw_speed = self.settings.get('speed', 2)
             self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
@@ -2479,6 +2609,25 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Set a truthy sentinel so existing `if self.ticker_pixmap:` checks work.
         # paintEvent uses _ticker_tiles for actual drawing.
         self.ticker_pixmap = True
+        
+        # Check if any scores are currently glowing - if so, schedule a rebuild
+        # in ~100ms to update the colors as the glow expires
+        current_time_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        glow_duration_ms = 2500
+        has_active_glow = False
+        for game_id, change_times in self._score_change_times.items():
+            if change_times['away'] is not None:
+                if current_time_ms - change_times['away'] <= glow_duration_ms:
+                    has_active_glow = True
+                    break
+            if change_times['home'] is not None:
+                if current_time_ms - change_times['home'] <= glow_duration_ms:
+                    has_active_glow = True
+                    break
+        
+        # If glowing, invalidate fingerprint after a short delay to force color update
+        if has_active_glow:
+            QtCore.QTimer.singleShot(100, self._invalidate_glow_cache)
 
     def _load_mlb_logo(self, logo_size):
         """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware (cached)."""
@@ -2529,11 +2678,56 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         away_score = game['away_score']
         home_score = game['home_score']
+        game_id = game.get('game_id')
+        
+        # Track score changes for glow effect
+        current_time_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        if game_id:
+            prev_scores = self._previous_scores.get(game_id)
+            if prev_scores is None:
+                # First time seeing this game - initialize
+                self._previous_scores[game_id] = (away_score, home_score)
+                self._score_change_times[game_id] = {'away': None, 'home': None}
+            else:
+                prev_away, prev_home = prev_scores
+                change_times = self._score_change_times.get(game_id, {'away': None, 'home': None})
+                
+                # Check for away score change
+                if away_score != prev_away:
+                    change_times['away'] = current_time_ms
+                    self._previous_scores[game_id] = (away_score, home_score)
+                
+                # Check for home score change
+                if home_score != prev_home:
+                    change_times['home'] = current_time_ms
+                    self._previous_scores[game_id] = (away_score, home_score)
+                
+                self._score_change_times[game_id] = change_times
+        
+        # Determine score colors based on time since change (2.5 second glow)
+        away_score_color = '#FFFFFF'  # Default white
+        home_score_color = '#FFFFFF'
+        if game_id and game_id in self._score_change_times:
+            change_times = self._score_change_times[game_id]
+            glow_duration_ms = 2500  # 2.5 seconds
+            
+            # Away score glow
+            if change_times['away'] is not None:
+                elapsed = current_time_ms - change_times['away']
+                if elapsed <= glow_duration_ms:
+                    away_score_color = '#FFD700'  # Gold
+            
+            # Home score glow
+            if change_times['home'] is not None:
+                elapsed = current_time_ms - change_times['home']
+                if elapsed <= glow_duration_ms:
+                    home_score_color = '#FFD700'  # Gold
+        
         away_record = game.get('away_record', '0-0')
         home_record = game.get('home_record', '0-0')
         show_records = self.settings.get('show_team_records', True)
         live_subtext_enabled = status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']
-        scheduled_subtext_enabled = status in ['Scheduled', 'Preview', 'Pre-Game']
+        scheduled_subtext_enabled = status in ['Scheduled', 'Preview', 'Pre-Game', 'Warmup']
 
         # Get subtext (player info) only when show_records is on.
         # When disabled, neither W-L records nor player/pitcher names are shown.
@@ -2764,7 +2958,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             
             # Away score (on same line as team name)
             painter.setFont(self._qfont)
-            painter.setPen(QtGui.QColor('#FFFFFF'))
+            painter.setPen(QtGui.QColor(away_score_color))
             score_width = metrics.horizontalAdvance(str(away_score))
             painter.drawText(x, text_y, str(away_score))
             x += score_width + 8
@@ -2786,7 +2980,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
             # Home score (on same line as team name)
             painter.setFont(self._qfont)
-            painter.setPen(QtGui.QColor('#FFFFFF'))
+            painter.setPen(QtGui.QColor(home_score_color))
             score_width = metrics.horizontalAdvance(str(home_score))
             painter.drawText(x, text_y, str(home_score))
             x += score_width + 15  # Mirror: logo→score gap on away side
@@ -3225,7 +3419,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._game_pixmap_cache.clear()
         _DIAMOND_CACHE.clear()
         self._last_ticker_fp = None
+        # Preserve scroll position ratio when paused (prevents visual jumps)
+        scroll_ratio = None
+        if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+            scroll_ratio = self.scroll_offset / self._scroll_max_width
         self.build_ticker_pixmap()
+        # Restore scroll position ratio after rebuild when paused
+        if scroll_ratio is not None and self._scroll_max_width > 0:
+            self.scroll_offset = scroll_ratio * self._scroll_max_width
 
         # Odds timer — start or stop based on current settings
         show_ml = self.settings.get('show_moneyline', False)
@@ -3259,7 +3460,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.next_day_timer.stop()
             self._pending_today_games = []
             self._pending_today_date = ''
-        self.start_data_fetch()
+        self.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
         label = override if override else "auto (today)"
         print(f"[KB] Date view → {label}")
 
@@ -3292,7 +3493,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Rebuild pixmap at new DPR
         self._game_pixmap_cache.clear()
         self._last_ticker_fp = None
+        # Preserve scroll position ratio when paused (prevents visual jumps)
+        scroll_ratio = None
+        if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
+            scroll_ratio = self.scroll_offset / self._scroll_max_width
         self.build_ticker_pixmap()
+        # Restore scroll position ratio after rebuild when paused
+        if scroll_ratio is not None and self._scroll_max_width > 0:
+            self.scroll_offset = scroll_ratio * self._scroll_max_width
         self.update()
         print(f"[KB] Moved to monitor {idx_1based} ({new_screen.name()})")
 
@@ -3324,7 +3532,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # session speed starts from stored setting if not yet overridden
             if not hasattr(self, '_session_speed'):
                 self._session_speed = self.settings.get('speed', 2)
-            self._session_speed = min(16, self._session_speed + 1)
+            self._session_speed = min(30, self._session_speed + 1)
             self._scroll_speed_px_per_ms = (self._session_speed * 0.5) / 16.667
             print(f"[KB] Speed → {self._session_speed}")
             return
@@ -3457,7 +3665,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                         self.next_day_timer.stop()
                         self._pending_today_games = []
                         self._pending_today_date = ''
-                    self.start_data_fetch()
+                    self.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
                 return _handler
             act.triggered.connect(_make_date_handler())
 
@@ -4735,9 +4943,9 @@ class SettingsDialog(QtWidgets.QDialog):
         grp_perf, form_perf = make_form("Performance")
 
         self.speed_spin = QtWidgets.QSpinBox()
-        self.speed_spin.setRange(1, 16)
+        self.speed_spin.setRange(1, 30)
         self.speed_spin.setValue(self.settings.get('speed', 5))
-        self.speed_spin.setToolTip("Scroll speed of the ticker (1 = slowest, 16 = fastest)")
+        self.speed_spin.setToolTip("Scroll speed of the ticker (1 = slowest, 30 = fastest)")
         form_perf.addRow("Ticker Speed:", self.speed_spin)
 
         self.update_spin = QtWidgets.QSpinBox()
@@ -5528,7 +5736,7 @@ def main():
                     window.next_day_timer.stop()
                     window._pending_today_games = []
                     window._pending_today_date = ''
-                window.start_data_fetch()
+                window.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
             return _handler
         _act.triggered.connect(_make_tray_date_handler())
 

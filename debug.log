@@ -11,3 +11,15 @@
 [0414/173558.549:INFO:electron\dropbox\shell\common\crashpad_lib_loader.cc:78] Crashpad lib path is empty
 [0414/173558.549:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:109] Cannot load add_simple_annotations function
 [0414/173558.549:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:169] No crashpad annotations provided
+[0416/003015.137:INFO:electron\dropbox\shell\common\crashpad_lib_loader.cc:78] Crashpad lib path is empty
+[0416/003015.137:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:109] Cannot load add_simple_annotations function
+[0416/003015.138:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:169] No crashpad annotations provided
+[0416/010410.764:INFO:electron\dropbox\shell\common\crashpad_lib_loader.cc:78] Crashpad lib path is empty
+[0416/010410.765:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:109] Cannot load add_simple_annotations function
+[0416/010410.765:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:169] No crashpad annotations provided
+[0416/011822.560:INFO:electron\dropbox\shell\common\crashpad_lib_loader.cc:78] Crashpad lib path is empty
+[0416/011822.561:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:109] Cannot load add_simple_annotations function
+[0416/011822.561:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:169] No crashpad annotations provided
+[0416/011832.031:INFO:electron\dropbox\shell\common\crashpad_lib_loader.cc:78] Crashpad lib path is empty
+[0416/011832.031:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:109] Cannot load add_simple_annotations function
+[0416/011832.031:ERROR:electron\dropbox\shell\common\crashpad_lib_loader.cc:169] No crashpad annotations provided
