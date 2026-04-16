@@ -30,6 +30,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Team logos** for all 30 MLB teams
 - **Official team colors** with custom override support
 - **Pitcher info** for live and pre-game: `P: Name ERA W-L` format
+- **Moneyline odds** displayed inline next to each matchup (requires free Odds API key)
 
 ### ⚡ Performance Optimized
 - **60 FPS rendering** for silky smooth scrolling
@@ -57,14 +58,26 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **LOADING indicator** only appears on startup or when switching days — not on periodic refreshes
 
 ### ⌨️ Keyboard Shortcuts
-| Key | Action |
-|-----|--------|
-| `S` | Open Standings window |
-| `.` | Open Settings dialog |
-| `R` | Force data refresh |
-| `P` | Pause / unpause scroll |
-| `+` / `-` | Increase / decrease scroll speed |
-| `Q` | Quit application |
+
+> Click the ticker bar to give it focus first.
+
+| Key | Action | Persists? |
+|-----|--------|-----------|
+| `Q` | Quit application | — |
+| `S` | Open Standings window | — |
+| `.` | Open Settings dialog | — |
+| `P` | Pause / unpause scroll | — |
+| `G` | Refresh game data now | no |
+| `R` | Restart ticker (replay intro animation) | no |
+| `Y` | Switch to Yesterday's games | no |
+| `D` | Pin to Today / return to auto-mode | no |
+| `T` | Switch to Tomorrow's games | no |
+| `F` | Toggle FPS overlay | no |
+| `+` or `=` | Increase scroll speed by 1 (max 30) | no |
+| `-` | Decrease scroll speed by 1 (min 1) | no |
+| `1` – `4` | Move ticker to that monitor number | no |
+
+Shortcuts marked **no** are session-only and do not write to the settings file.
 
 ### 🎨 Customizable Appearance
 - **LED-style gradient background** with glass overlay effect
@@ -75,6 +88,14 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Hover-to-pause** — ticker freezes when mouse is over it
 - **Startup intro animation** — pixel-reveal block effect with MLB logo and app name
 
+### 💰 Moneyline Odds
+- **Live moneyline odds** displayed inline next to each game — e.g., `+820` / `-2200`
+- Fetched from **The Odds API** (free tier available)
+- Configurable refresh interval (default: every 15 minutes)
+- Shown for pre-game and live games; hidden once a game is final
+- Requires a free API key from [the-odds-api.com](https://the-odds-api.com)
+- Enable in Settings → Odds tab; enter your API key and set refresh frequency
+
 ### ⚙️ Flexible Configuration
 - **Scroll speed control** (1–30)
 - **Update interval** (5–300 seconds)
@@ -83,6 +104,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
   - Team cities vs nicknames only
   - Final games
   - Scheduled games
+- **Moneyline odds** with configurable refresh interval
 - **Settings persist** across sessions
 
 ### 🖥️ Windows Integration
@@ -162,7 +184,7 @@ Right-click the system tray icon to access:
 - **Quit** — Exit the ticker
 
 ### Keyboard Shortcuts
-Click the ticker bar to give it focus, then use the shortcuts listed in the Features section above.
+See the full hotkeys table in the [Keyboard Shortcuts](#️⃣-keyboard-shortcuts) feature section above.
 
 ### Settings Dialog
 
@@ -180,12 +202,22 @@ Click the ticker bar to give it focus, then use the shortcuts listed in the Feat
   - LED-Style Background
   - Glass Overlay Effect
   - Background Opacity (0–255)
+  - Content Opacity (0–255)
+
+#### Odds Tab
+- **Show Moneyline** — Toggle odds display on/off
+- **Odds API Key** — Your key from [the-odds-api.com](https://the-odds-api.com)
+- **Refresh Interval** — How often to fetch new odds in minutes (default: 15)
 
 #### Team Colors Tab
 - Customize the color for any team
 - Color picker or hex input (`#RRGGBB`)
+- Set to `1` to use the official MLB team color
 - Reset to MLB official colors anytime
 - Only modified colors are saved
+
+#### Hotkeys Tab
+- In-app reference of all keyboard shortcuts
 
 ---
 
@@ -246,6 +278,20 @@ MLB-TCKR/
 ### Score Change Glow
 When a score updates, the changed number immediately switches to gold (`#FFD700`). After 2.5 seconds it returns to white. Away and home scores are tracked independently. The glow uses a high-precision elapsed timer and invalidates the render cache automatically to ensure smooth transitions.
 
+### Moneyline Odds
+Odds are fetched from [The Odds API](https://the-odds-api.com) on a configurable interval (default: 15 minutes). A free API account provides enough quota for a full season of use. Odds appear inline in the ticker as color-coded moneyline values (e.g., `+820` / `-2200`). Odds are shown for scheduled and live games and hidden once a game is final. Configure your API key and refresh rate in Settings → Odds tab.
+
+---
+
+## Moneyline Odds Setup
+
+1. Sign up for a free account at [the-odds-api.com](https://the-odds-api.com)
+2. Copy your API key from the dashboard
+3. Open Settings (press `.`) → **Odds** tab
+4. Paste your key into the **Odds API Key** field
+5. Enable **Show Moneyline** and set your preferred **Refresh Interval**
+6. Click OK — odds will appear on the next fetch
+
 ---
 
 ## Configuration Files
@@ -253,14 +299,13 @@ When a score updates, the changed number immediately switches to gold (`#FFD700`
 ### Settings Location
 `%APPDATA%\MLB-TCKR\MLB-TCKR.Settings.json`
 
-### Default Settings
+### Example Settings
 ```json
 {
-    "speed": 5,
-    "update_interval": 10,
+    "speed": 6,
+    "update_interval": 8,
     "ticker_height": 64,
     "font": "Ozone",
-    "font_scale_percent": 150,
     "show_team_records": true,
     "show_team_cities": false,
     "include_final_games": true,
@@ -268,9 +313,58 @@ When a score updates, the changed number immediately switches to gold (`#FFD700`
     "led_background": true,
     "glass_overlay": true,
     "background_opacity": 255,
-    "team_colors": {}
+    "team_colors": {
+        "Rays": 1,
+        "White Sox": "#3a3a3a",
+        "Guardians": 1,
+        "Tigers": 1,
+        "Twins": 1,
+        "Athletics": "#005045",
+        "Mariners": 1,
+        "Braves": 1,
+        "Mets": 1,
+        "Brewers": 1,
+        "Pirates": "#ffee00",
+        "Padres": 1
+    },
+    "font_scale_percent": 150,
+    "show_fps_overlay": false,
+    "use_proxy": false,
+    "proxy": "",
+    "use_cert": false,
+    "cert_file": "",
+    "monitor_index": 0,
+    "player_info_font": "Metropolis Black",
+    "content_opacity": 255,
+    "load_at_startup": false,
+    "player_font_scale_percent": 100,
+    "yesterday_cutoff_minutes": 240,
+    "show_moneyline": true,
+    "odds_api_key": "",
+    "odds_refresh_minutes": 15
 }
 ```
+
+### Key Settings Reference
+| Key | Type | Description |
+|-----|------|-------------|
+| `speed` | int (1–30) | Scroll speed |
+| `update_interval` | int (5–300) | Game data refresh in seconds |
+| `ticker_height` | int (40–200) | Ticker bar height in pixels |
+| `font` | string | Primary font name |
+| `font_scale_percent` | int | Main font size scale % |
+| `player_info_font` | string | Pitcher/player subtext font |
+| `player_font_scale_percent` | int | Player font size scale % |
+| `background_opacity` | int (0–255) | Background layer opacity |
+| `content_opacity` | int (0–255) | Text/icon layer opacity |
+| `monitor_index` | int | Target monitor (0 = primary) |
+| `yesterday_cutoff_minutes` | int | Minutes past midnight to still show yesterday's games |
+| `show_moneyline` | bool | Show/hide moneyline odds |
+| `odds_api_key` | string | The Odds API key |
+| `odds_refresh_minutes` | int | How often to refresh odds |
+| `team_colors` | object | Per-team color overrides (`"#RRGGBB"` or `1` for official color) |
+| `load_at_startup` | bool | Launch with Windows |
+| `show_fps_overlay` | bool | Show FPS counter on ticker |
 
 ---
 
