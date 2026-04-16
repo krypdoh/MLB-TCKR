@@ -2,42 +2,59 @@
 
 **Professional MLB Live Game Ticker for Windows**
 
-A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen - just like the tickers you see on sports networks and in sports bars.
+A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen — just like the tickers you see on sports networks and in sports bars.
 
-![Version](https://img.shields.io/badge/version-2.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
+
+---
+
+## Screenshots
+
+**Live games — in-progress with scores, runners, outs, pitcher info, and odds:**
+![MLB-TCKR live ticker](docs/mlb0.png)
+
+**Multi-game view with team colors, logos, and real-time score data:**
+![MLB-TCKR multi-game](docs/mlb1.png)
 
 ---
 
 ## Features
 
 ### 🎯 Live Game Data
-- **Real-time scores** from MLB-StatsAPI
+- **Real-time scores** from MLB-StatsAPI with **score change glow** — updated numbers glow gold (#FFD700) for 2.5 seconds, then fade back to white
 - **Runners on base** displayed as bright green diamonds
 - **Outs count** shown as bright red circles
 - **Inning indicator** with Top/Bottom format (T5, B5) or Final (F)
 - **Team logos** for all 30 MLB teams
 - **Official team colors** with custom override support
+- **Pitcher info** for live and pre-game: `P: Name ERA W-L` format
 
 ### ⚡ Performance Optimized
 - **60 FPS rendering** for silky smooth scrolling
 - **Sub-pixel accuracy** eliminates visible stepping
 - **Background threading** prevents interruptions during data fetches
-- **Intelligent polling** stops when games finish, resumes next day
-- **Cached rendering** reduces CPU usage by 40%
+- **Intelligent polling** — live games update every 10s, finished days switch to idle checks
+- **Cached rendering** reduces CPU usage
 - **Optional Cython optimization** for maximum performance
 - **Hardware acceleration** with SmoothPixmapTransform
+- **Pause stability** — scroll position preserved precisely when paused during data updates
 
 ### 📊 Standings Window
 - **Full AL/NL standings** in a sleek LED-style popup window
-- **"STANDINGS" header** in bright white with league selector below
 - **American League** (bright red) and **National League** (bright blue) — click to switch
 - **Three division columns** (East / Central / West) with fixed-width table alignment
 - **Per-team rows**: logo, colored nickname, W-L, Pct., Last 10
 - **Background fetch** — non-blocking, loads while window is open
 - **Draggable**, frameless, always-on-top; auto-centers on screen
 - Access via system tray → **Standings...** or press **S**
+
+### 📅 Day Navigation
+- **Yesterday / Today / Tomorrow** modes accessible from the tray menu
+- **Yesterday mode** shows ALL games — including west coast games that finished late
+- In-progress games in yesterday mode continue to receive live updates
+- **LOADING indicator** only appears on startup or when switching days — not on periodic refreshes
 
 ### ⌨️ Keyboard Shortcuts
 | Key | Action |
@@ -46,20 +63,21 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 | `.` | Open Settings dialog |
 | `R` | Force data refresh |
 | `P` | Pause / unpause scroll |
+| `+` / `-` | Increase / decrease scroll speed |
 | `Q` | Quit application |
 
 ### 🎨 Customizable Appearance
 - **LED-style gradient background** with glass overlay effect
-- **Adjustable transparency** (0-255 opacity)
-- **Custom team colors** - override any team's color
+- **Adjustable transparency** (0–255 opacity)
+- **Custom team colors** — override any team's color
 - **Multiple font options** with live in-dropdown preview (each name shown in its own typeface)
-- **Configurable ticker height** (40-200 pixels)
-- **Hover-to-pause** - ticker pauses when mouse is over it
-- **Startup intro animation** - pixel-reveal block effect with MLB logo and app name
+- **Configurable ticker height** (40–200 pixels)
+- **Hover-to-pause** — ticker freezes when mouse is over it
+- **Startup intro animation** — pixel-reveal block effect with MLB logo and app name
 
 ### ⚙️ Flexible Configuration
-- **Scroll speed control** (1-10)
-- **Update interval** (5-300 seconds)
+- **Scroll speed control** (1–30)
+- **Update interval** (5–300 seconds)
 - **Toggle display options**:
   - Team records (W-L)
   - Team cities vs nicknames only
@@ -68,22 +86,20 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Settings persist** across sessions
 
 ### 🖥️ Windows Integration
-- **AppBar integration** - docks persistently at top of screen, DPI-aware (works at 100 %, 125 %, 150 %, 200 % display scaling)
+- **AppBar integration** — docks persistently at top of screen, DPI-aware (works at 100%, 125%, 150%, 200% display scaling)
 - **System tray icon** with quick access menu
 - **Stays on top** of all windows
-- **Transparent background** blends with desktop
 
 ---
 
 ## Requirements
 
 - **Operating System**: Windows 10/11
-- **Python**: 3.13 (recommended)
-  - Path: `C:\Users\prc\AppData\Local\Programs\Python\Python313\python.exe`
+- **Python**: 3.13
 - **Dependencies**:
-  - `statsapi` - MLB game data
-  - `PyQt5` - GUI framework
-  - `Cython` (optional) - performance optimizations
+  - `statsapi` — MLB game data
+  - `PyQt5` — GUI framework
+  - `Cython` (optional) — performance optimizations
 
 ---
 
@@ -101,11 +117,11 @@ pip install -r requirements.txt
 ```
 
 ### 3. Setup Assets
-The ticker automatically creates directories in `%APPDATA%\MLB-TCKR\`:
-- `MLB-TCKR.images\` - Place team logo PNG files here (e.g., `yankees.png`, `dodgers.png`)
-- `led_board-7.ttf` - Custom LED font (optional)
-- `mlb.png` - System tray icon (optional)
-- `MLB-TCKR.Settings.json` - Auto-generated settings file
+The ticker automatically creates its data directory at `%APPDATA%\MLB-TCKR\`:
+- `MLB-TCKR.images\` — Place team logo PNG files here (e.g., `yankees.png`, `dodgers.png`)
+- `led_board-7.ttf` — Custom LED font (optional)
+- `mlb.png` — System tray icon (optional)
+- `MLB-TCKR.Settings.json` — Auto-generated on first run
 
 ### 4. Run
 ```powershell
@@ -122,12 +138,16 @@ For maximum smoothness, compile the Cython optimizations:
 .\build_performance.bat
 ```
 
-This enables:
-- `calculate_smooth_scroll()` - Optimized scroll calculations
-- `get_pixel_position()` - Fast float-to-int conversion
-- `adjust_speed_for_framerate()` - FPS-aware speed scaling
+This compiles the Cython module and automatically reads the version from `MLB-TCKR.py` to update all version resource files before building. The application falls back to pure Python if the Cython module is not present.
 
-The application automatically falls back to Python if Cython modules aren't available.
+**Cython functions:**
+- `calculate_smooth_scroll()` — Optimized scroll calculations
+- `get_pixel_position()` — Fast float-to-int conversion
+- `adjust_speed_for_framerate()` — FPS-aware speed scaling
+
+**Performance targets:**
+- With Cython: ~1–2% CPU, smooth 60 FPS
+- Without Cython: ~3–5% CPU, smooth 60 FPS
 
 ---
 
@@ -135,26 +155,22 @@ The application automatically falls back to Python if Cython modules aren't avai
 
 ### System Tray Menu
 Right-click the system tray icon to access:
-- **Refresh Games** - Force immediate data update
-- **Standings...** - Open standings window
-- **Settings** - Open settings dialog
-- **Quit** - Exit the ticker
+- **Refresh Games** — Force immediate data update
+- **Yesterday / Today / Tomorrow** — Switch day view
+- **Standings...** — Open standings window
+- **Settings** — Open settings dialog
+- **Quit** — Exit the ticker
 
 ### Keyboard Shortcuts
-Click the ticker bar to give it focus, then:
-- **S** — Open Standings window
-- **.** — Open Settings dialog
-- **R** — Force data refresh
-- **P** — Pause / unpause scrolling
-- **Q** — Quit application
+Click the ticker bar to give it focus, then use the shortcuts listed in the Features section above.
 
 ### Settings Dialog
 
 #### General Tab
-- **Ticker Speed** - How fast the content scrolls (1-10)
-- **Update Interval** - Frequency of API calls (5-300 seconds)
-- **Ticker Height** - Vertical size in pixels (40-200)
-- **Font** - Choose from available fonts
+- **Ticker Speed** — Scroll speed (1–30)
+- **Update Interval** — API call frequency in seconds (5–300)
+- **Ticker Height** — Height in pixels (40–200)
+- **Font** — Choose from available fonts with live preview
 - **Display Options**:
   - Show Team Records (W-L)
   - Show Team Cities
@@ -163,11 +179,11 @@ Click the ticker bar to give it focus, then:
 - **Visual Effects**:
   - LED-Style Background
   - Glass Overlay Effect
-  - Background Opacity (0-255)
+  - Background Opacity (0–255)
 
 #### Team Colors Tab
 - Customize the color for any team
-- Color picker or hex input (#RRGGBB)
+- Color picker or hex input (`#RRGGBB`)
 - Reset to MLB official colors anytime
 - Only modified colors are saved
 
@@ -178,10 +194,10 @@ Click the ticker bar to give it focus, then:
 ```
 MLB-TCKR/
 │
-├── MLB-TCKR.py                    # Main application (v2.0.0)
-├── mlb_ticker_utils_cython.pyx    # Cython optimizations
+├── MLB-TCKR.py                    # Main application
+├── mlb_ticker_utils_cython.pyx    # Cython optimizations source
 ├── setup_mlb_cython.py            # Cython build config
-├── build_performance.bat          # Windows build script
+├── build_performance.bat          # Automated build + version extraction
 ├── requirements.txt               # Python dependencies
 ├── CHANGELOG.txt                  # Version history
 ├── README.md                      # This file
@@ -204,32 +220,31 @@ MLB-TCKR/
 ### Data Flow
 1. **Background Worker Thread** (`GameDataWorker`) fetches data from MLB-StatsAPI
 2. **Signal/Slot Communication** passes game data to main UI thread
-3. **Ticker Builder** creates pixmap with all games (duplicated for seamless loop)
+3. **Ticker Builder** creates a pixmap with all games (duplicated for seamless loop)
 4. **60 FPS Animation** scrolls content smoothly with sub-pixel precision
 5. **Intelligent Polling** adjusts update frequency based on game status
 
 ### Game States
-- **Live/In Progress**: Shows scores, runners, outs, inning (updates every 10s)
-- **Final/Completed**: Shows final scores with "F" indicator
-- **Scheduled/Pre-Game**: Shows game time
+- **Live/In Progress**: Scores, runners, outs, inning, pitcher info (updates every 10s)
+- **Final/Completed**: Final scores with "F" indicator
+- **Scheduled/Pre-Game**: Game time and probable pitchers
 
 ### Polling Intelligence
 - **Active Games**: Updates every 10 seconds (configurable)
-- **All Games Finished**: Switches to hourly checks
-- **Midnight Rollover**: Detects new day, fetches next day's schedule
-- **Automatic Resume**: Returns to normal polling when games start
+- **All Games Finished**: Switches to idle polling
+- **Midnight Rollover**: Detects new day, fetches the next day's schedule
+- **Automatic Resume**: Returns to normal polling when games begin
 
 ### Baseball Diamond
 - **Three Bases**: Triangle formation (1st, 2nd, 3rd)
-  - Green (#00FF00) when runner on base
-  - Gray outline when empty
-- **Three Outs**: Circles below bases
-  - Red (#FF0000) for recorded outs
-  - Gray outline for remaining outs
-- **Inning Indicator**: Gold text (#FFD700)
-  - "T5" = Top of 5th
-  - "B5" = Bottom of 5th
-  - "F" = Final
+  - Green (`#00FF00`) when runner is on base; gray outline when empty
+- **Three Outs**: Circles below the bases
+  - Red (`#FF0000`) for recorded outs; gray outline for remaining outs
+- **Inning Indicator**: Gold text (`#FFD700`)
+  - `T5` = Top of 5th, `B5` = Bottom of 5th, `F` = Final
+
+### Score Change Glow
+When a score updates, the changed number immediately switches to gold (`#FFD700`). After 2.5 seconds it returns to white. Away and home scores are tracked independently. The glow uses a high-precision elapsed timer and invalidates the render cache automatically to ensure smooth transitions.
 
 ---
 
@@ -261,33 +276,11 @@ MLB-TCKR/
 
 ## Team Logos
 
-Logo files should be placed in `%APPDATA%\MLB-TCKR\MLB-TCKR.images\`
+Logo files go in `%APPDATA%\MLB-TCKR\MLB-TCKR.images\`. Use lowercase team nicknames with no spaces:
 
-### Naming Convention
-Use team nickname (lowercase, no spaces):
-- `yankees.png`
-- `redsox.png`
-- `dodgers.png`
-- `whitesox.png`
-- `bluejays.png`
-- etc.
+- `yankees.png`, `redsox.png`, `dodgers.png`, `whitesox.png`, `bluejays.png`, etc.
 
-The application performs case-insensitive searches and automatically falls back to colored squares with team abbreviations if logos are missing.
-
----
-
-## Performance Tips
-
-1. **Enable Cython**: Run `build_performance.bat` for best results
-2. **Adjust Update Interval**: Increase to 30-60 seconds if CPU usage is a concern
-3. **Disable Visual Effects**: Turn off LED background and glass overlay for minimal resource usage
-4. **Reduce Ticker Height**: Smaller height = less rendering work
-5. **Close Settings Dialog**: Keep it closed during normal operation
-
-### Performance Metrics
-- **With Cython**: Smooth 60 FPS, ~1-2% CPU usage
-- **Without Cython**: Smooth 60 FPS, ~3-5% CPU usage
-- **API Usage**: 1 call per update interval (or 1/hour when games finished)
+Case-insensitive lookup is used. If a logo is missing, the ticker falls back to a colored square with the team abbreviation.
 
 ---
 
@@ -300,8 +293,8 @@ The application performs case-insensitive searches and automatically falls back 
 
 ### Logos don't show
 - Ensure PNG files are in `%APPDATA%\MLB-TCKR\MLB-TCKR.images\`
-- Check file naming (should match team nickname, lowercase)
-- Application will use colored fallback if logos missing
+- Check file naming (lowercase team nickname, no spaces)
+- Colored fallback squares will be used if logos are missing
 
 ### Scrolling is choppy
 - Run `build_performance.bat` to enable Cython optimizations
@@ -311,44 +304,41 @@ The application performs case-insensitive searches and automatically falls back 
 ### Games not updating
 - Check internet connection
 - Verify MLB-StatsAPI is accessible
-- Check console for error messages
-- Try manual refresh from tray menu
+- Try manual refresh from the tray menu or press `R`
 
 ### Settings don't save
-- Ensure `%APPDATA%\MLB-TCKR\` directory is writable
-- Check for JSON syntax errors in settings file
-- Try resetting to defaults
+- Ensure `%APPDATA%\MLB-TCKR\` is writable
+- Check for JSON syntax errors in the settings file
 
 ---
 
 ## Development
 
-### Code Structure
-- **Main Classes**:
-  - `MLBTickerWindow` - Main application window with DPI-aware AppBar integration
-  - `GameDataWorker` - Background thread for API calls
-  - `StandingsWindow` - AL/NL standings popup with LED-style background
-  - `_StandingsWorker` - Background thread for standings fetch
-  - `FontPreviewDelegate` - Custom item delegate for font combo box
-  - `SettingsDialog` - Configuration UI with tabs
-- **Key Methods**:
-  - `fetch_todays_games()` - MLB API integration
-  - `fetch_standings()` - AL/NL standings from statsapi
-  - `build_ticker_pixmap()` - Render complete ticker
-  - `draw_baseball_diamond()` - Create diamond visualization
-  - `update_scroll()` - 60 FPS animation loop
-  - `setup_appbar()` - DPI-aware Win32 AppBar registration
-  - `check_all_games_finished()` - Game status detection
-  - `check_for_next_day_games()` - Midnight rollover
+### Main Classes
+| Class | Description |
+|-------|-------------|
+| `MLBTickerWindow` | Main application window with DPI-aware AppBar integration |
+| `GameDataWorker` | Background thread for MLB API calls |
+| `StandingsWindow` | AL/NL standings popup with LED-style background |
+| `_StandingsWorker` | Background thread for standings fetch |
+| `FontPreviewDelegate` | Custom delegate for font combo box live previews |
+| `SettingsDialog` | Configuration UI with tabbed layout |
 
-### Cython Modules
-- `calculate_smooth_scroll()` - Sub-pixel scroll calculation
-- `get_pixel_position()` - Fast float-to-int conversion
-- `adjust_speed_for_framerate()` - FPS-aware speed scaling
+### Key Methods
+| Method | Description |
+|--------|-------------|
+| `fetch_todays_games()` | MLB API integration |
+| `build_ticker_pixmap()` | Render complete ticker to pixmap |
+| `build_game_pixmap()` | Render a single game segment with score glow |
+| `draw_baseball_diamond()` | Render runners/outs diamond |
+| `update_scroll()` | 60 FPS animation loop |
+| `setup_appbar()` | DPI-aware Win32 AppBar registration |
+| `_effective_fetch_date()` | Returns today's or yesterday's date based on mode |
+| `_invalidate_glow_cache()` | Triggers rebuild while score glow is active |
 
 ### Build System
-- `build_performance.bat` - Automated Cython compilation for Windows
-- `setup_mlb_cython.py` - Distutils configuration with MSVC optimizations
+- `build_performance.bat` — Compiles Cython, extracts version from `MLB-TCKR.py` line 13, updates `version-mlb-tckr.txt` automatically
+- `setup_mlb_cython.py` — Distutils configuration with MSVC optimizations
 
 ---
 
@@ -368,36 +358,28 @@ You should have received a copy of the GNU Affero General Public License along w
 
 **Paul R. Charovkine**
 
-- Program: MLB-TCKR.py
-- Version: 2.2.0
-- Date: 2026.03.16
+- Program: MLB-TCKR
+- Version: 1.2.0
+- Date: 2026.04.16
 
 ---
 
 ## Acknowledgments
 
-- **MLB-StatsAPI** - MLB game data provider
-- **PyQt5** - Cross-platform GUI framework
-- **Cython** - Python to C compiler for optimizations
-- **LED Board-7 Font** - Custom LED-style font for authentic ticker appearance
+- **MLB-StatsAPI** — MLB game data provider
+- **PyQt5** — Cross-platform GUI framework
+- **Cython** — Python to C compiler for optimizations
+- **LED Board-7 Font** — Custom LED-style font for authentic ticker appearance
 
 ---
 
 ## Support
 
 For issues, questions, or feature requests:
-1. Check the CHANGELOG.txt for known issues
-2. Review PERFORMANCE.md for optimization guidance
-3. Check console output for error messages
-4. Verify all dependencies are installed
-
----
-
-## Roadmap
-
-### Potential Future Features
-- [ ] Game alerts and notifications
-- [ ] Score change pop-ups
+1. Check `CHANGELOG.txt` for version history and known issues
+2. Review `PERFORMANCE.md` for optimization guidance
+3. Check console output for detailed error messages
+4. Verify all dependencies are installed via `pip install -r requirements.txt`
 - [ ] Expanded statistics display
 - [ ] Multi-monitor support
 - [ ] Custom positioning (top/bottom/left/right)
