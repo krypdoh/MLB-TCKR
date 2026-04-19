@@ -4,7 +4,7 @@
 
 A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen — just like the tickers you see on sports networks and in sports bars.
 
-![Version](https://img.shields.io/badge/version-1.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
 
@@ -31,6 +31,20 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Official team colors** with custom override support
 - **Pitcher info** for live and pre-game: `P: Name ERA W-L` format
 - **Moneyline odds** displayed inline next to each matchup (requires free Odds API key)
+
+### 🔔 Watched Team Alerts
+- **Select any of the 30 MLB teams** to watch from Settings → Alerts tab
+- **Scoring alerts** — full-viewport Sweep Reveal animation fires whenever a watched team scores or an opponent scores against them
+  - Alert text auto-fits the bar: `YANKEES SCORE  Judge: Home Run (2 RBI)`
+  - Gold scanner beam sweeps right→left against a translucent team-colour background
+  - Text pulses gently during the hold phase, then fades out
+- **Game-start alerts** — `GAME STARTING  YANKEES vs METS` fires as the game goes live
+  - Uses home team colour; if only the away team is watched, uses away team colour
+- **Game-final alerts** — `FINAL  YANKEES DEFEAT METS  10-1` fires when the game ends
+  - Always uses the winning team’s colour regardless of which team is watched
+- **Alert duration** configurable from 3–15 seconds (default 6 s)
+- **Multiple alerts** queue up and play sequentially with a 300 ms gap between each
+- **De-duplication** prevents the same scoring play from triggering twice across poll cycles
 
 ### ⚡ Performance Optimized
 - **60 FPS rendering** for silky smooth scrolling
@@ -209,6 +223,14 @@ See the full hotkeys table in the [Keyboard Shortcuts](#️⃣-keyboard-shortcut
 - **Odds API Key** — Your key from [the-odds-api.com](https://the-odds-api.com)
 - **Refresh Interval** — How often to fetch new odds in minutes (default: 15)
 
+#### Alerts Tab
+- **Alert Duration** — How long each alert displays (3–15 seconds)
+- **Alert when watched team scores** — Full-viewport Sweep Reveal on scoring plays
+- **Alert when opponent scores against watched team** — Also fires for opposition runs
+- **Alert when watched team’s game starts** — Fires on status transition to In Progress
+- **Alert when watched team’s game finishes** — Fires when game reaches Final
+- **Watched Teams grid** — Select/deselect any of the 30 MLB teams; Select All / Clear All buttons
+
 #### Team Colors Tab
 - Customize the color for any team
 - Color picker or hex input (`#RRGGBB`)
@@ -263,8 +285,9 @@ MLB-TCKR/
 
 ### Polling Intelligence
 - **Active Games**: Updates every 10 seconds (configurable)
+- **Warmup / Pre-Game**: Immediately exits idle mode; polls at the normal update interval
 - **All Games Finished**: Switches to idle polling
-- **Midnight Rollover**: Detects new day, fetches the next day's schedule
+- **Midnight Rollover**: Detects new day, fetches the next day’s schedule
 - **Automatic Resume**: Returns to normal polling when games begin
 
 ### Baseball Diamond

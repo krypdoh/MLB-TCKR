@@ -1,3 +1,65 @@
+Version 1.3.0 (2026-04-19)
+--------------------------
+Watched-team scoring alerts with full-viewport Sweep Reveal animation
+
+NEW FEATURES:
++ Watched Teams — full-viewport scoring alert system
+  - New "Alerts" tab in Settings lets you select any of the 30 MLB teams to watch
+  - When a watched team scores (or an opponent scores against them), the scrolling ticker
+    freezes and a full-viewport alert animates in
+  - Alert text auto-fits the bar width using Ozone font: "YANKEES SCORE  Judge: Home Run (2 RBI)"
+  - Animation uses Sweep Reveal: a gold scanner beam sweeps right→left, revealing bright gold
+    text in its wake against a translucent team-colour background with a dark top vignette
+  - After the reveal, text pulses gently (±7.5% brightness sine wave) during the hold phase
+  - Alert fades out smoothly then the ticker immediately resumes scrolling
+  - Alert duration configurable from 3–15 seconds (default 6 s)
+  - Separate toggles: alert when your team scores vs. alert when opponent scores against your team
+  - Multiple alerts queue up and play in order (300 ms gap between each)
+  - Alerts queued during the intro animation start 400 ms after the intro finishes
+  - De-duplication via atBatIndex prevents the same scoring play from triggering twice
+    across multiple 10-second data-poll cycles
++ Game-start alerts — "GAME STARTING  YANKEES vs METS"
+  - Fires once per game when status transitions from Scheduled/Pre-Game/Warmup → In Progress
+  - Uses home team colour; if only the away team is watched, uses away team colour
+  - If both teams are watched, home team colour takes precedence
+  - Toggle in Settings → Alerts: "Alert when watched team's game starts"
++ Game-final alerts — "FINAL  YANKEES DEFEAT METS  10-1"
+  - Fires once per game when status transitions to Final/Completed/Game Over
+  - Always uses the winning team's colour regardless of which team is watched
+  - Tie results render as "FINAL  YANKEES 3-3 METS (TIE)"
+  - Toggle in Settings → Alerts: "Alert when watched team's game finishes"
++ Delayed Start / Delayed games now appear in the ticker
+  - Games with status "Delayed Start" or "Delayed" are shown alongside scheduled games
+  - Centre element toggles every 2 seconds between the original start time (cyan) and
+    the word "DELAYED" (amber #FF8C00)
+  - Centre column width is fixed to the wider of the two labels so no layout shift occurs
++ ESPN logo fallback in team logo lookup
+  - Added MLB_ESPN_ABBR dict mapping all 30 team nicknames to ESPN CDN abbreviations
+  - If a logo file is not found under the standard nickname, the lookup retries using
+    the ESPN abbreviation (e.g. "mil.png" for Brewers, "tb.png" for Rays)
++ Hits (H) stat added to live pitcher detail line
+  - Pitcher line now shows: IP  H  K  BB  ER
+
+IMPROVEMENTS:
++ Uniform card layout across all game types (in-progress, scheduled, delayed, postponed, final)
+  - All cards now use identical block widths and gaps so team names, logos, odds, and
+    records sit at the same horizontal positions regardless of game state
+  - 2-row subtext layout uses the same vertical baselines as the 3-row live layout
+  - Delayed and Postponed games now show probable pitcher subtext
++ Player info rows shifted up for better vertical centering within the ticker bar
+  - Top subtext row moved up 4 px; bottom live-stats row moved up 3 px (net)
++ Hotkeys updated
+  - I  = Restart Intro animation  (previously R)
+  - R  = Replay last alert  (re-queues and re-plays the most recently shown alert)
++ Settings → Hotkeys tab updated to reflect new I / R assignments
+
+IDLE POLLING:
++ Idle polling now exits immediately when any game enters Warmup or Pre-Game status
+  - Previously relied solely on a 2-minute countdown before first pitch
+  - Games in Warmup/Pre-Game are now treated as imminent, switching to the normal
+    user-configured update interval instantly rather than waiting up to 5 minutes
+
+
 Version 1.2.0 (2026-04-16)
 --------------------------
 Major update with score animations, yesterday mode improvements, pause stability, and automated versioning
