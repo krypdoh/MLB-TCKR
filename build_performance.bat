@@ -3,7 +3,7 @@ REM Build script for MLB ticker Cython optimizations
 REM Run this to compile the performance-critical code
 
 REM set PYTHON_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python314\python.exe
-set PYTHON_EXE=C:\Users\pchar\AppData\Local\Programs\Python\Python313\python.exe 
+set PYTHON_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python313\python.exe 
 set PIP_EXE=C:\Users\prc\AppData\Local\Programs\Python\Python314\Scripts\pip.exe
 
 echo ========================================

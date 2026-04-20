@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0419.2332
+Date: 2026.0419.1637
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.3.1"
+VERSION = "1.3.0"
 
 import warnings
 warnings.filterwarnings(
@@ -2918,11 +2918,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         content_w = logo_w + (gap if logo_pm else 0) + text_width
         start_x = (w_phys - content_w) // 2
         logo_y = (h_phys - logo_h_phys) // 2
-        # Use tightBoundingRect for accurate vertical centering — typographic
-        # ascent/descent metrics on display fonts like Ozone often include extra
-        # whitespace that shifts the visual glyphs off-centre.
-        _tbr = metrics.tightBoundingRect(text)
-        text_y = (h_phys - _tbr.height()) // 2 - _tbr.top()
+        text_y = (h_phys + metrics.ascent() - metrics.descent()) // 2
 
         # Full intro pixmap at physical resolution — NO DPR set (raw pixel surface)
         self.intro_pixmap = QtGui.QPixmap(w_phys, h_phys)
@@ -3462,37 +3458,29 @@ class MLBTickerWindow(QtWidgets.QWidget):
         has_live_detail = bool(away_live_detail or home_live_detail)
         # Calculate record_y (and detail_y for live games) only when show_records is on.
         if show_records:
-            # Team names are all-caps — their visual bottom is the baseline (text_y),
-            # not text_y + metrics.descent(). Using metrics.ascent() as the visual
-            # height avoids the large descender gap that pushed rows apart.
-            _row_gap = 3  # px between team-name baseline and top of player-info glyphs
-            _visual_block_h = (metrics.ascent()
-                               + _row_gap
-                               + small_metrics.ascent()
-                               + small_metrics.descent())
-            _block_center_top = (self.ticker_height - _visual_block_h) // 2
-            # Never clip the top of the main font glyphs
-            _min_text_y = -_br.top() + 1
-            text_y   = max(_min_text_y, _block_center_top + metrics.ascent())
-            record_y = text_y + _row_gap + small_metrics.ascent()
+            line_gap = 1
             if has_live_detail:
-                # 3-row: recalculate block height with tiny row
-                _tiny_gap = 2
-                _visual_block_h3 = (_visual_block_h
-                                    + _tiny_gap
-                                    + tiny_metrics.ascent()
-                                    + tiny_metrics.descent())
-                _block_center_top3 = (self.ticker_height - _visual_block_h3) // 2
-                text_y   = max(_min_text_y, _block_center_top3 + metrics.ascent())
-                record_y = text_y + _row_gap + small_metrics.ascent()
-                detail_y = record_y + small_metrics.descent() + _tiny_gap + tiny_metrics.ascent()
-                # Clamp if it overflows the bar
+                # 3-row layout: team name / player info / live game stats
+                text_y = -_br.top() + 3
+                record_y = text_y + _br.bottom() + line_gap + small_metrics.ascent() - 8  # top line 3px higher
+                detail_y = record_y + small_metrics.descent() + line_gap + tiny_metrics.ascent() - 3  # bottom line 2px higher (net)
+                # Shift all rows up together if tiny line clips the bottom
                 max_detail_y = self.ticker_height - 1 - tiny_metrics.descent()
                 if detail_y > max_detail_y:
                     shift = detail_y - max_detail_y
-                    text_y   -= shift
+                    text_y -= shift
                     record_y -= shift
                     detail_y -= shift
+            else:
+                # 2-row layout: use identical positions to 3-row so all game
+                # types share the same team-name and subtext baselines.
+                text_y = -_br.top() + 3
+                record_y = text_y + _br.bottom() + line_gap + small_metrics.ascent() - 8  # top line 3px higher
+                max_record_y = self.ticker_height - 2 - small_metrics.descent()
+                if record_y > max_record_y:
+                    delta = record_y - max_record_y
+                    text_y -= delta
+                    record_y -= delta
         time_y = text_y
         # odds_y: place the small-font baseline so its cap-letter top aligns with the
         # cap-letter top of the main font. capHeight() is the purpose-built Qt metric

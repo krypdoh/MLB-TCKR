@@ -1,3 +1,13 @@
+Version 1.3.1 (2026-04-19)
+--------------------------
+BUG FIXES:
+- Player info / pitcher-batter subtext no longer touches the team name at higher display
+  resolutions. Replaced a hardcoded -8 px offset with metrics.descent() so the gap between
+  the team name row and the player info row scales correctly with font size across all DPR
+  and screen resolution settings.
+
+------------------------------------------------------------------------------
+
 Version 1.3.0 (2026-04-19)
 --------------------------
 Watched-team scoring alerts with full-viewport Sweep Reveal animation
