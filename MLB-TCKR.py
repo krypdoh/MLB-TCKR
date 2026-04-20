@@ -5030,9 +5030,9 @@ class AboutDialog(QtWidgets.QDialog):
 
         # Website (clickable)
         url_lbl = QtWidgets.QLabel(
-            '<a href="https://krypdoh.github.io/MLB-TCKR/" '
+            '<a href="https://krypdoh.github.io/MLB-TCKR" '
             'style="color:#00AAFF; text-decoration:none;">'
-            'https://krypdoh.github.io/MLB-TCKR/</a>'
+            'https://krypdoh.github.io/MLB-TCKR</a>'
         )
         url_font = QtGui.QFont(record_family)
         url_font.setPixelSize(18)
