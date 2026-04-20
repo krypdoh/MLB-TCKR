@@ -5112,9 +5112,9 @@ class AboutDialog(QtWidgets.QDialog):
             " font-size:16px; padding:6px 18px; border-radius:6px;"
         )
         self._url_lbl.setText(
-            f'<a href="https://krypdoh.github.io/MLB-TCKR/" '
+            f'<a href="https://krypdoh.github.io/MLB-TCKR" '
             f'style="color:{hex_c}; text-decoration:none;">'
-            f'https://krypdoh.github.io/MLB-TCKR/</a>'
+            f'https://krypdoh.github.io/MLB-TCKR</a>'
         )
 
     def paintEvent(self, event):
