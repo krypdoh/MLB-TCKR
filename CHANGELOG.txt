@@ -1,3 +1,29 @@
+Version 1.3.2 (2026-04-20)
+--------------------------
+NEW FEATURES:
++ "Show Live Games Only" mode
+  - New "⚡ Show Live Games Only" toggle in Settings
+  - When enabled and at least one game is currently In Progress / Live, the ticker
+    shows only those in-progress games, hiding Final and Scheduled cards
+  - If no games are live (between games, off-day) the setting is ignored and normal
+    filtering applies so the ticker is never left empty
+
+IMPROVEMENTS:
++ Corporate / proxy SSL certificate handling hardened
+  - At startup, pip_system_certs.wrapt_requests is used (when installed) to inject
+    the Windows system certificate store directly into requests, allowing the app to
+    reach MLB APIs on corporate networks with internal CAs out of the box
+  - New _build_system_ca_bundle() helper merges certifi's CA bundle with Windows
+    CA and ROOT certificate stores and writes the result to AppData so the merged
+    bundle persists across PyInstaller _MEIPASS cleanup cycles
+  - When a proxy is enabled but no custom .pem file is selected, apply_proxy_settings()
+    automatically builds and uses the merged bundle — no manual cert export required
+  - When proxy is disabled (or bundle build fails), the function restores the
+    AppData-cached cacert.pem so requests always has a valid CA path even after
+    the PyInstaller temp directory is deleted
+
+------------------------------------------------------------------------------
+
 Version 1.3.1 (2026-04-19)
 --------------------------
 BUG FIXES:

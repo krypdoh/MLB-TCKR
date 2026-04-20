@@ -123,6 +123,20 @@ if os.path.isdir(_appdata_images_dir):
             if _entry not in _datas:
                 _datas.append(_entry)
 
+# Include ESPN logos (espnlogos/png/*.png) as MLB-TCKR.images\* so the bundled
+# exe ships with pre-downloaded team logo PNGs without needing AppData populated.
+_espn_logos_dir = os.path.join(_spec_dir, 'espnlogos', 'png')
+if os.path.isdir(_espn_logos_dir):
+    _espn_count = 0
+    for _img in glob.glob(os.path.join(_espn_logos_dir, '*.png')):
+        _entry = (os.path.abspath(_img), 'MLB-TCKR.images')
+        if _entry not in _datas:
+            _datas.append(_entry)
+            _espn_count += 1
+    print(f'[SPEC] Bundled {_espn_count} ESPN logo(s) from espnlogos/png')
+else:
+    print(f'[SPEC] WARNING: espnlogos/png not found at {_espn_logos_dir} — logos not bundled')
+
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------

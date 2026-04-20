@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 import warnings
 warnings.filterwarnings(
@@ -214,6 +214,7 @@ def get_settings():
         "show_team_cities": False,
         "include_final_games": True,
         "include_scheduled_games": True,
+        "live_games_only": False,
         "led_background": True,
         "glass_overlay": True,
         "background_opacity": 255,
@@ -305,6 +306,56 @@ def normalize_proxy_url(proxy_value):
     return proxy_value
 
 
+_SYSTEM_CA_BUNDLE_PATH: str = ""  # cached path to merged certifi + system CA bundle
+
+
+def _build_system_ca_bundle() -> str:
+    """Return a path to a PEM file that merges certifi's CA bundle with the
+    Windows system certificate stores (CA and ROOT).  The result is written to
+    APPDATA_DIR/system_ca_bundle.pem and cached for the lifetime of the process
+    so we don't regenerate on every apply_proxy_settings call.
+
+    Returns an empty string if the bundle cannot be built."""
+    global _SYSTEM_CA_BUNDLE_PATH
+    if _SYSTEM_CA_BUNDLE_PATH and os.path.isfile(_SYSTEM_CA_BUNDLE_PATH):
+        return _SYSTEM_CA_BUNDLE_PATH
+
+    try:
+        import base64
+        import ssl
+        import certifi  # always available — bundled with the app
+
+        with open(certifi.where(), 'rb') as fh:
+            bundle = fh.read()
+
+        added = 0
+        if sys.platform == 'win32':
+            for store in ('CA', 'ROOT'):
+                try:
+                    for cert_bytes, encoding, _trust in ssl.enum_certificates(store):
+                        if isinstance(cert_bytes, bytes) and encoding == 'x509_asn':
+                            pem = (
+                                b"-----BEGIN CERTIFICATE-----\n"
+                                + base64.encodebytes(cert_bytes)
+                                + b"-----END CERTIFICATE-----\n"
+                            )
+                            bundle += pem
+                            added += 1
+                except Exception:
+                    pass
+
+        os.makedirs(APPDATA_DIR, exist_ok=True)
+        dest = os.path.join(APPDATA_DIR, 'system_ca_bundle.pem')
+        with open(dest, 'wb') as fh:
+            fh.write(bundle)
+        _SYSTEM_CA_BUNDLE_PATH = dest
+        print(f"[SSL] System CA bundle built: {added} system root(s) merged → {dest}")
+        return dest
+    except Exception as exc:
+        print(f"[SSL] Could not build system CA bundle: {exc}")
+        return ""
+
+
 def apply_proxy_settings():
     """Push proxy/cert config into environment variables so that the
     requests library (used by statsapi and all HTTP calls) picks them up
@@ -321,29 +372,43 @@ def apply_proxy_settings():
 
     cert_file = settings.get('cert_file', '')
     if settings.get('use_cert') and cert_file and os.path.exists(cert_file):
-        # User specified a custom certificate file — point requests at it explicitly.
+        # User specified a custom certificate file — use it directly.
         os.environ['REQUESTS_CA_BUNDLE'] = cert_file
         os.environ['SSL_CERT_FILE'] = cert_file
         print(f"[PROXY] Certificate: {cert_file}")
+        return
+
+    if settings.get('use_proxy') and proxy_value:
+        # Proxy is active but no custom cert file selected — automatically build
+        # a merged bundle (certifi + Windows system root CAs) so that corporate
+        # proxy certificates are trusted without requiring a manual .pem file.
+        sys_bundle = _build_system_ca_bundle()
+        if sys_bundle:
+            os.environ['REQUESTS_CA_BUNDLE'] = sys_bundle
+            os.environ['SSL_CERT_FILE'] = sys_bundle
+            print(f"[PROXY] Using system CA bundle: {sys_bundle}")
+            return
+        # If bundle build failed, fall through to the standard cacert fallback below.
+
+    # No custom cert and no proxy (or proxy bundle build failed) —
+    # restore the AppData-cached cacert.pem so requests always has a working
+    # path even after _MEIPASS is deleted.
+    _local = os.environ.get('LOCALAPPDATA', '')
+    _appdata_cacert = (
+        os.path.join(_local, 'MLB-TCKR', 'certifi', 'cacert.pem')
+        if _local else ''
+    )
+    if _appdata_cacert and os.path.isfile(_appdata_cacert):
+        os.environ['REQUESTS_CA_BUNDLE'] = _appdata_cacert
+        os.environ['SSL_CERT_FILE'] = _appdata_cacert
+    elif getattr(sys, '_MEIPASS', None):
+        # First-ever run before hook has cached it — use _MEIPASS (fine, not deleted yet)
+        _meipass_cacert = os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem')
+        if os.path.isfile(_meipass_cacert):
+            os.environ['REQUESTS_CA_BUNDLE'] = _meipass_cacert
+            os.environ['SSL_CERT_FILE'] = _meipass_cacert
     else:
-        # No custom cert — restore the AppData-cached cacert.pem so that
-        # requests always has a working path even after _MEIPASS is deleted.
-        _local = os.environ.get('LOCALAPPDATA', '')
-        _appdata_cacert = (
-            os.path.join(_local, 'MLB-TCKR', 'certifi', 'cacert.pem')
-            if _local else ''
-        )
-        if _appdata_cacert and os.path.isfile(_appdata_cacert):
-            os.environ['REQUESTS_CA_BUNDLE'] = _appdata_cacert
-            os.environ['SSL_CERT_FILE'] = _appdata_cacert
-        elif getattr(sys, '_MEIPASS', None):
-            # First-ever run before hook has cached it — use _MEIPASS (fine, not deleted yet)
-            _meipass_cacert = os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem')
-            if os.path.isfile(_meipass_cacert):
-                os.environ['REQUESTS_CA_BUNDLE'] = _meipass_cacert
-                os.environ['SSL_CERT_FILE'] = _meipass_cacert
-        else:
-            os.environ.pop('REQUESTS_CA_BUNDLE', None)
+        os.environ.pop('REQUESTS_CA_BUNDLE', None)
 
 
 def register_all_font_files():
@@ -1181,22 +1246,30 @@ def fetch_todays_games(fetch_date=None):
         # Filter games based on settings
         settings = get_settings()
         filtered_games = []
-        
-        for game in game_data:
-            status = game['status']
-            
-            # Always include live/in-progress games
-            if status in ['In Progress', 'Live']:
-                filtered_games.append(game)
-            # Include final games if setting allows
-            elif status in ['Final', 'Completed', 'Game Over']:
-                if settings.get('include_final_games', True):
+        live_statuses = ['In Progress', 'Live']
+        final_statuses = ['Final', 'Completed', 'Game Over']
+        scheduled_statuses_filter = ['Pre-Game', 'Scheduled', 'Warmup', 'Postponed', 'Delayed Start', 'Delayed']
+
+        live_games_only = settings.get('live_games_only', False)
+        any_live = any(g['status'] in live_statuses for g in game_data)
+
+        # When "Live Games Only" is on AND at least one game is live,
+        # show only in-progress games.  If nothing is live, fall through
+        # to normal filtering so the ticker isn't empty.
+        if live_games_only and any_live:
+            filtered_games = [g for g in game_data if g['status'] in live_statuses]
+        else:
+            for game in game_data:
+                status = game['status']
+                if status in live_statuses:
                     filtered_games.append(game)
-            # Include scheduled/pre-game/postponed/delayed if setting allows
-            elif status in ['Pre-Game', 'Scheduled', 'Warmup', 'Postponed', 'Delayed Start', 'Delayed']:
-                if settings.get('include_scheduled_games', True):
-                    filtered_games.append(game)
-        
+                elif status in final_statuses:
+                    if settings.get('include_final_games', True):
+                        filtered_games.append(game)
+                elif status in scheduled_statuses_filter:
+                    if settings.get('include_scheduled_games', True):
+                        filtered_games.append(game)
+
         print(f"[MLB] Fetched {len(game_data)} games, showing {len(filtered_games)} after filtering")
         return filtered_games
         
@@ -5752,6 +5825,14 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cities_check.setChecked(not self.settings.get('show_team_cities', False))
         form_content.addRow("🗺️  Show Only Team Name:", self.cities_check)
 
+        self.live_only_check = QtWidgets.QCheckBox("Enabled")
+        self.live_only_check.setChecked(self.settings.get('live_games_only', False))
+        self.live_only_check.setToolTip(
+            "When checked and at least one game is in progress, only live games are shown.\n"
+            "If no games are live, falls back to showing Final and Scheduled games normally."
+        )
+        form_content.addRow("⚡  Show Live Games Only:", self.live_only_check)
+
         self.final_check = QtWidgets.QCheckBox("Enabled")
         self.final_check.setChecked(self.settings.get('include_final_games', True))
         form_content.addRow("🏁  Include Final Games:", self.final_check)
@@ -6245,6 +6326,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['font_scale_percent'] = self.font_scale_slider.value()
         self.settings['player_info_font'] = self.player_info_font_combo.currentText()
         self.settings['show_team_records'] = self.records_check.isChecked()
+        self.settings['live_games_only'] = self.live_only_check.isChecked()
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
         self.settings['show_moneyline'] = self.moneyline_check.isChecked()
