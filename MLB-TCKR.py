@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0419.2332
+Date: 2026.0420.1250
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 
 import warnings
 warnings.filterwarnings(
@@ -3539,10 +3539,23 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # not text_y + metrics.descent(). Using metrics.ascent() as the visual
             # height avoids the large descender gap that pushed rows apart.
             _row_gap = 3  # px between team-name baseline and top of player-info glyphs
+
+            # QFontMetrics.descent() is the typographic descent baked into the font
+            # definition, which can be 2-3x the actual rendered pixel depth and varies
+            # between display configurations.  tightBoundingRect() measures the real
+            # pixel extent of the characters we actually draw, giving consistent inter-row
+            # spacing regardless of DPI, font substitution, or OS scaling settings.
+            _s_tbr = small_metrics.tightBoundingRect(
+                'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,: -%')
+            _small_visual_descent = max(2, _s_tbr.bottom())
+            _t_tbr = tiny_metrics.tightBoundingRect(
+                'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,: -%')
+            _tiny_visual_descent = max(2, _t_tbr.bottom())
+
             _visual_block_h = (metrics.ascent()
                                + _row_gap
                                + small_metrics.ascent()
-                               + small_metrics.descent())
+                               + _small_visual_descent)
             _block_center_top = (self.ticker_height - _visual_block_h) // 2
             # Never clip the top of the main font glyphs
             _min_text_y = -_br.top() + 1
@@ -3554,13 +3567,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 _visual_block_h3 = (_visual_block_h
                                     + _tiny_gap
                                     + tiny_metrics.ascent()
-                                    + tiny_metrics.descent())
+                                    + _tiny_visual_descent)
                 _block_center_top3 = (self.ticker_height - _visual_block_h3) // 2
                 text_y   = max(_min_text_y, _block_center_top3 + metrics.ascent())
                 record_y = text_y + _row_gap + small_metrics.ascent()
-                detail_y = record_y + small_metrics.descent() + _tiny_gap + tiny_metrics.ascent()
+                detail_y = record_y + _small_visual_descent + _tiny_gap + tiny_metrics.ascent()
                 # Clamp if it overflows the bar
-                max_detail_y = self.ticker_height - 1 - tiny_metrics.descent()
+                max_detail_y = self.ticker_height - 1 - _tiny_visual_descent
                 if detail_y > max_detail_y:
                     shift = detail_y - max_detail_y
                     text_y   -= shift

@@ -1,3 +1,22 @@
+Version 1.3.3 (2026-04-20)
+--------------------------
+BUG FIXES:
+- Player info row spacing is now consistent across all display resolutions and DPI settings
+  - Root cause: QFontMetrics.descent() is the typographic descent defined in the font
+    file, which can be 2–3× the actual rendered pixel depth and differs significantly
+    between font substitutions, OS scaling settings, and display configurations. This
+    caused the gap between player info line 1 (pitcher/batter) and line 2 (live stats)
+    to be huge on some PCs while looking fine on others.
+  - Fix: all inter-row spacing calculations now use QFontMetrics.tightBoundingRect() on
+    a representative character set (upper, lower, digits, punctuation) to measure the
+    actual rendered pixel extent of the small and tiny fonts. The typographic descent
+    is no longer used for any vertical block height or row gap calculation.
+  - Affects 2-row layout (team name + player info) and 3-row layout (team name +
+    player info + live stats line); both the centering block height and the row-to-row
+    gap are now DPI-stable.
+
+------------------------------------------------------------------------------
+
 Version 1.3.2 (2026-04-20)
 --------------------------
 NEW FEATURES:
