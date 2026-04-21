@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 
 import warnings
 warnings.filterwarnings(
@@ -1249,15 +1249,21 @@ def fetch_todays_games(fetch_date=None):
         live_statuses = ['In Progress', 'Live']
         final_statuses = ['Final', 'Completed', 'Game Over']
         scheduled_statuses_filter = ['Pre-Game', 'Scheduled', 'Warmup', 'Postponed', 'Delayed Start', 'Delayed']
+        _known_statuses = set(live_statuses) | set(final_statuses) | set(scheduled_statuses_filter)
 
         live_games_only = settings.get('live_games_only', False)
-        any_live = any(g['status'] in live_statuses for g in game_data)
+        # Treat any unrecognised status (e.g. "Manager challenge") as live/in-progress
+        any_live = any(
+            g['status'] in live_statuses or g['status'] not in _known_statuses
+            for g in game_data
+        )
 
         # When "Live Games Only" is on AND at least one game is live,
         # show only in-progress games.  If nothing is live, fall through
         # to normal filtering so the ticker isn't empty.
         if live_games_only and any_live:
-            filtered_games = [g for g in game_data if g['status'] in live_statuses]
+            filtered_games = [g for g in game_data
+                              if g['status'] in live_statuses or g['status'] not in _known_statuses]
         else:
             for game in game_data:
                 status = game['status']
@@ -1269,6 +1275,10 @@ def fetch_todays_games(fetch_date=None):
                 elif status in scheduled_statuses_filter:
                     if settings.get('include_scheduled_games', True):
                         filtered_games.append(game)
+                else:
+                    # Unknown/unrecognised status — treat as live so games are never silently dropped
+                    print(f"[MLB] Unknown status '{status}' for game — displaying as in-progress")
+                    filtered_games.append(game)
 
         print(f"[MLB] Fetched {len(game_data)} games, showing {len(filtered_games)} after filtering")
         return filtered_games
@@ -1738,6 +1748,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._qfont.setStyleStrategy(self._font_style_strategy)
         print(f"[FONT] Main ticker font '{qfont_info.family()}' using TrueType rendering (no PreferBitmap)")
         self._qfont.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        self._qfont.setKerning(False)
         
         # Apply player font scale to small_font and tiny_font
         player_font_scale = self.settings.get('player_font_scale_percent', 75) / 100.0
@@ -1753,12 +1764,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.small_font.setStyleStrategy(self._font_style_strategy)
         print(f"[FONT] Player info font '{font_info.family()}' using TrueType rendering")
         self.small_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        self.small_font.setKerning(False)
         
         self.time_font = QtGui.QFont(font_to_use)
         self.time_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.6)))
         # All fonts are TrueType (.ttf), don't use PreferBitmap
         self.time_font.setStyleStrategy(self._font_style_strategy)
         self.time_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        self.time_font.setKerning(False)
         
         self.vs_font = QtGui.QFont(font_to_use)
         self.vs_font.setPixelSize(max(6, int(self.ticker_height * 0.35 * font_scale * 0.5)))
@@ -1766,6 +1779,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # All fonts are TrueType (.ttf), don't use PreferBitmap
         self.vs_font.setStyleStrategy(self._font_style_strategy)
         self.vs_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        self.vs_font.setKerning(False)
         
         small_px = self.small_font.pixelSize()
         self.tiny_font = QtGui.QFont(player_info_font)
@@ -1773,6 +1787,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # All fonts are TrueType (.ttf), don't use PreferBitmap
         self.tiny_font.setStyleStrategy(self._font_style_strategy)
         self.tiny_font.setHintingPreference(QtGui.QFont.PreferFullHinting)
+        self.tiny_font.setKerning(False)
         
         # Odds API (moneyline)
         self._odds_cache = {}       # {(away_lower, home_lower): (away_price, home_price)}
@@ -2147,10 +2162,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """
         live_statuses  = {'In Progress', 'Live'}
         final_statuses = {'Final', 'Completed', 'Game Over'}
+        _pre_statuses_all = {'Scheduled', 'Pre-Game', 'Warmup', 'Preview',
+                             'Delayed Start', 'Delayed', 'Postponed', 'Cancelled'}
         normal_ms = self.settings.get('update_interval', 10) * 1000
         idle_ms   = 300_000  # 5 minutes
 
-        has_live  = any(g.get('status') in live_statuses  for g in self.games)
+        # Also treat unknown statuses (e.g. "Manager challenge") as live for polling rate
+        _known_all = live_statuses | final_statuses | _pre_statuses_all
+        has_live  = any(
+            g.get('status') in live_statuses or g.get('status') not in _known_all
+            for g in self.games
+        )
         all_final = bool(self.games) and all(
             g.get('status') in final_statuses for g in self.games
         )
@@ -2442,11 +2464,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if not alert_for_team and not alert_vs_team:
             return
 
+        _score_alert_final = {'Final', 'Completed', 'Game Over'}
+        _score_alert_pre   = {'Scheduled', 'Pre-Game', 'Warmup', 'Preview',
+                               'Delayed Start', 'Delayed', 'Postponed', 'Cancelled'}
         for new_g in new_games:
             game_id = new_g.get('game_id')
             if not game_id:
                 continue
-            if new_g.get('status', '') not in ('In Progress', 'Live'):
+            # Skip only games that are definitively not in-progress; treat unknown
+            # statuses (e.g. "Manager challenge") the same as "In Progress"
+            _st = new_g.get('status', '')
+            if _st in _score_alert_final or _st in _score_alert_pre:
                 continue
             old_g = old_games_map.get(game_id)
             if old_g is None:
@@ -2689,12 +2717,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         for candidate in range(max_px, min_px - 1, -1):
             f = QtGui.QFont(ozone_family)
             f.setPixelSize(candidate)
+            f.setKerning(False)
             if QtGui.QFontMetrics(f).horizontalAdvance(text) <= w - 32:
                 font_px = candidate
                 break
 
         af = QtGui.QFont(ozone_family)
         af.setPixelSize(font_px)
+        af.setKerning(False)
         af.setStyleStrategy(
             QtGui.QFont.NoAntialias | QtGui.QFont.ForceIntegerMetrics
             if self.dpr >= 2.0 else
@@ -3366,8 +3396,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         away_record = game.get('away_record', '0-0')
         home_record = game.get('home_record', '0-0')
         show_records = self.settings.get('show_team_records', True)
-        live_subtext_enabled = status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']
-        scheduled_subtext_enabled = status in ['Scheduled', 'Preview', 'Pre-Game', 'Warmup', 'Delayed Start', 'Delayed', 'Postponed']
+        _pre_statuses_render = {'Scheduled', 'Preview', 'Pre-Game', 'Warmup',
+                                  'Delayed Start', 'Delayed', 'Postponed'}
+        _final_statuses_render = {'Final', 'Completed', 'Game Over'}
+        scheduled_subtext_enabled = status in _pre_statuses_render
+        # Unknown statuses (e.g. "Manager challenge") are treated as live
+        live_subtext_enabled = (status in ('In Progress', 'Live') or
+                                status in _final_statuses_render or
+                                status not in _pre_statuses_render)
 
         # Get subtext (player info) only when show_records is on.
         # When disabled, neither W-L records nor player/pitcher names are shown.
@@ -3393,8 +3429,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         tiny_metrics = QtGui.QFontMetrics(self.tiny_font)
         time_metrics = QtGui.QFontMetrics(self.time_font)
 
-        # Live stats detail (pitcher/batter) — only for live games
-        is_live = status in ['In Progress', 'Live']
+        # Live stats detail (pitcher/batter) — for live games and any unknown status
+        is_live = (status in ('In Progress', 'Live') or
+                   (status not in _final_statuses_render and status not in _pre_statuses_render))
         pitcher_side = game.get('pitcher_side', 'home') if is_live else None
         _p_live = game.get('pitcher_live_detail', '') if is_live else ''
         _b_live = game.get('batter_live_detail', '') if is_live else ''
@@ -3447,7 +3484,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             home_block_width = max(home_top_w, home_record_width)
 
         # Calculate width based on game status
-        if status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']:
+        # Unknown statuses (e.g. "Manager challenge") render as live (show scores + diamond)
+        if status not in _pre_statuses_render:
             # Live or Final game: Team Logo Score | Diamond/F-label | Score Logo Team
             is_final = status in ['Final', 'Completed', 'Game Over']
 
@@ -3591,7 +3629,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             _small_cap = -small_metrics.boundingRect('0123456789').top()
         odds_y = text_y - _main_cap + _small_cap
 
-        if status in ['In Progress', 'Live', 'Final', 'Completed', 'Game Over']:
+        if status not in _pre_statuses_render:
             # Away team name (colored) — W-L record floats to the left, top-aligned;
             # moneyline odds appear below the W-L when present.
             painter.setFont(self._qfont)

@@ -1,3 +1,42 @@
+Version 1.3.4 (2026-04-21)
+--------------------------
+BUG FIXES:
+- Games with unrecognised statuses (e.g. "Manager challenge", "Replay Review") no longer
+  disappear from the ticker
+  - Root cause: all filtering, rendering, alert, and polling-rate logic used explicit
+    allowlists of known statuses. Any status string not in those lists caused the game
+    to be silently dropped from the display, skipped for score-change alerts, and
+    excluded from the "has live game" check (which would slow polling to 5-min idle).
+  - Fix: six callsites updated to treat any unknown/unrecognised status as live/in-progress:
+    · Game filter: added explicit else-branch that appends the game and logs the unknown status
+    · Live-only filter: any_live and filtered-games list now include unknown-status games
+    · Score-change alert: now only skips games whose status is definitively pre-game or final;
+      unknown statuses pass through so score changes during stoppages are still caught
+    · Polling-rate timer: has_live includes unknown-status games so the fast poll interval
+      is maintained during Manager challenges, review stoppages, etc.
+    · Rendering is_live flag: unknown status treated as live (shows pitcher/batter detail
+      and baseball diamond rather than blank)
+    · Rendering width/draw branch: condition changed from status-in-live-list to
+      status-not-in-pre-game-list so unknown statuses get the live card layout (scores +
+      diamond) instead of the scheduled card layout (no scores)
+
+------------------------------------------------------------------------------
+
+Version 1.3.4 (2026-04-21)
+--------------------------
+BUG FIXES:
+- Fixed Ozone font kerning causing `:` (and other narrow glyphs) to render inside the
+  preceding `r` character (e.g. "r:" appeared as a single merged glyph)
+  - Root cause: Ozone-xRRO.ttf contains aggressive negative kerning pairs for `r`
+    followed by narrow glyphs. The `r` glyph in a dot-matrix font has significant
+    open space on its right side; the font's kerning table tried to close that gap,
+    which pulled `:` (and similar characters) leftward into the `r`.
+  - Fix: setKerning(False) applied to all QFont objects (_qfont, small_font, time_font,
+    vs_font, tiny_font, and the alert auto-fit fonts) so Qt ignores the embedded
+    kerning table and uses each glyph's nominal advance width consistently.
+
+------------------------------------------------------------------------------
+
 Version 1.3.3 (2026-04-20)
 --------------------------
 BUG FIXES:
