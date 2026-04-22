@@ -4,7 +4,7 @@
 
 A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen — just like the tickers you see on sports networks and in sports bars.
 
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
 
@@ -56,7 +56,17 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Hardware acceleration** with SmoothPixmapTransform
 - **Pause stability** — scroll position preserved precisely when paused during data updates
 
-### 📊 Standings Window
+### � TV / Radio / SiriusXM Schedule
+- **Full broadcast info** for every game today or tomorrow — press **M** or right-click the tray → **TV/Radio Today…**
+- **TV channels** displayed as away | home call signs (e.g. SCHN | CLEG); national broadcasts highlighted in gold
+- **Radio stations** with frequencies (e.g. `WFAN 660/101.9 FM`, `WTAM 1100`) — generic network names and app-only entries automatically filtered
+- **SiriusXM** satellite channel (home feed) and app channels for both teams on every applicable game
+- **Today / Tomorrow toggle** — switch between today's and tomorrow's broadcast schedules with one click
+- **Team logos** next to team names, colored in each team's official color
+- **Parallel fetch** — MLB Stats API and SiriusXM page load simultaneously for fast display
+- **Fully resizable** frameless window with 8-direction edge/corner drag resize and custom LED-style border
+
+### �📊 Standings Window
 - **Full AL/NL standings** in a sleek LED-style popup window
 - **American League** (bright red) and **National League** (bright blue) — click to switch
 - **Three division columns** (East / Central / West) with fixed-width table alignment
@@ -79,6 +89,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 |-----|--------|-----------|
 | `Q` | Quit application | — |
 | `S` | Open Standings window | — |
+| `M` | Open TV / Radio / XM Schedule | — |
 | `.` | Open Settings dialog | — |
 | `P` | Pause / unpause scroll | — |
 | `G` | Refresh game data now | no |
@@ -194,6 +205,7 @@ Right-click the system tray icon to access:
 - **Refresh Games** — Force immediate data update
 - **Yesterday / Today / Tomorrow** — Switch day view
 - **Standings...** — Open standings window
+- **TV/Radio Today...** — Open TV / Radio / XM Schedule dialog
 - **Settings** — Open settings dialog
 - **Quit** — Exit the ticker
 
@@ -438,6 +450,8 @@ Case-insensitive lookup is used. If a logo is missing, the ticker falls back to 
 | `GameDataWorker` | Background thread for MLB API calls |
 | `StandingsWindow` | AL/NL standings popup with LED-style background |
 | `_StandingsWorker` | Background thread for standings fetch |
+| `TVScheduleWindow` | TV / Radio / SiriusXM broadcast schedule popup |
+| `_TvScheduleWorker` | Background thread for broadcast + SiriusXM fetch |
 | `FontPreviewDelegate` | Custom delegate for font combo box live previews |
 | `SettingsDialog` | Configuration UI with tabbed layout |
 
@@ -476,7 +490,7 @@ You should have received a copy of the GNU Affero General Public License along w
 **Paul R. Charovkine**
 
 - Program: MLB-TCKR
-- Version: 1.2.0
+- Version: 1.4.0
 - Date: 2026.04.16
 
 ---

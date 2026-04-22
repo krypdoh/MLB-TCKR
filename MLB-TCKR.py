@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0420.1250
+Date: 2026.0421.1111
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.3.4"
+VERSION = "1.4"
 
 import warnings
 warnings.filterwarnings(
@@ -60,7 +60,7 @@ import time
 import datetime
 import random
 import requests
-import statsapi
+import statsapi # type: ignore
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5 import QtSvg
@@ -98,9 +98,10 @@ except ImportError as _cython_err:
 # Configuration
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "MLB-TCKR")
 SETTINGS_FILE = os.path.join(APPDATA_DIR, "MLB-TCKR.Settings.json")
-TEAM_LOGO_CACHE = {}
-MLB_LOGO_CACHE  = {}  # keyed by (logo_size, dpr)
-_DIAMOND_CACHE  = {}  # keyed by (runners_key, outs, inning_text, size, dpr)
+TEAM_LOGO_CACHE  = {}
+TEAM_IMAGE_CACHE = {}  # normalized_name → QImage; populated off-thread for fast QPixmap creation
+MLB_LOGO_CACHE   = {}  # keyed by (logo_size, dpr)
+_DIAMOND_CACHE   = {}  # keyed by (runners_key, outs, inning_text, size, dpr)
 
 #  MLB Team Colors — official primary / secondary / tertiary per team
 MLB_TEAM_COLORS_ALL = {
@@ -709,7 +710,12 @@ def get_team_logo(team_name, size=40):
         return pixmap
     
     print(f"[LOGO] Loading from: {logo_path}")
-    pixmap = QtGui.QPixmap(logo_path)
+    # Fast path: use QImage pre-loaded by background thread (avoids disk I/O on main thread)
+    _pre_img = TEAM_IMAGE_CACHE.get(normalized_name)
+    if _pre_img is not None and not _pre_img.isNull():
+        pixmap = QtGui.QPixmap.fromImage(_pre_img)
+    else:
+        pixmap = QtGui.QPixmap(logo_path)
     
     if pixmap.isNull():
         print(f"[LOGO] Failed to load pixmap, using fallback")
@@ -745,6 +751,56 @@ def get_team_logo(team_name, size=40):
         scaled_logo = pixmap.scaled(max_w, size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
     TEAM_LOGO_CACHE[cache_key] = scaled_logo
     return scaled_logo
+
+
+def _preload_logos_background(team_names, logo_size):
+    """Load team logo QImages in a background thread so the main thread only
+    needs a cheap QPixmap.fromImage() call instead of disk I/O.
+
+    QImage (unlike QPixmap) is safe to create from any thread.  Results are
+    stored in TEAM_IMAGE_CACHE keyed by normalized team name.  get_team_logo()
+    checks this cache before falling back to disk I/O.
+    """
+    images_dirs = [os.path.join(APPDATA_DIR, "MLB-TCKR.images")]
+    runtime_base = getattr(sys, '_MEIPASS', None)
+    if runtime_base:
+        images_dirs.append(os.path.join(runtime_base, "MLB-TCKR.images"))
+    images_dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "MLB-TCKR.images"))
+
+    seen = set()
+    for team_name in team_names:
+        try:
+            nickname        = get_team_nickname(team_name)
+            normalized_name = nickname.lower().replace(' ', '')
+            if normalized_name in seen or normalized_name in TEAM_IMAGE_CACHE:
+                continue
+            seen.add(normalized_name)
+
+            logo_filename = f"{normalized_name}.png"
+            logo_path = None
+            for images_dir in images_dirs:
+                candidate = os.path.join(images_dir, logo_filename)
+                if os.path.exists(candidate):
+                    logo_path = candidate
+                    break
+
+            # ESPN-abbreviation fallback
+            if logo_path is None:
+                espn_abbr = MLB_ESPN_ABBR.get(nickname)
+                if espn_abbr:
+                    for images_dir in images_dirs:
+                        candidate = os.path.join(images_dir, f"{espn_abbr}.png")
+                        if os.path.exists(candidate):
+                            logo_path = candidate
+                            break
+
+            if logo_path and os.path.exists(logo_path):
+                img = QtGui.QImage(logo_path)
+                if not img.isNull():
+                    TEAM_IMAGE_CACHE[normalized_name] = img
+                    print(f"[LOGO] Pre-loaded: {normalized_name}")
+        except Exception as _e:
+            print(f"[LOGO] Pre-load error for {team_name}: {_e}")
 
 
 def _fetch_probable_pitchers_parallel(scheduled_games):
@@ -873,7 +929,7 @@ def _fetch_pitcher_stats_parallel(game_data):
     return stats_map
 
 
-def fetch_todays_games(fetch_date=None):
+def fetch_todays_games(fetch_date=None, on_teams_known=None):
     """Fetch all MLB games for today, or for a specific date (YYYY-MM-DD)."""
     def format_last_name(player_obj):
         full_name = str(player_obj.get('fullName', '')).strip()
@@ -945,9 +1001,45 @@ def fetch_todays_games(fetch_date=None):
         today = fetch_date or datetime.datetime.now().strftime('%Y-%m-%d')
         season_year = int(today[:4])
         print(f"[MLB] Fetching games for {today}")
-        
-        games = statsapi.schedule(date=today)
-        team_records = fetch_team_records_map(season_year)
+
+        # Fetch schedule and standings concurrently — on slow proxies this
+        # saves a full network round-trip over the sequential approach.
+        with ThreadPoolExecutor(max_workers=2) as _init_ex:
+            _f_sched   = _init_ex.submit(statsapi.schedule, date=today)
+            _f_records = _init_ex.submit(fetch_team_records_map, season_year)
+        games        = _f_sched.result()
+        team_records = _f_records.result()
+
+        # Notify caller of team names immediately so logo pre-loading can
+        # start in a background thread while game-detail fetches continue.
+        if on_teams_known and games:
+            _names = [n for g in games for n in (g.get('away_name'), g.get('home_name')) if n]
+            if _names:
+                on_teams_known(_names)
+
+        # Pre-fetch game feeds for live/final games in parallel — eliminates
+        # N sequential round-trips when multiple games are in progress.
+        _live_final_statuses = {'In Progress', 'Live', 'Final', 'Completed', 'Game Over'}
+        _needs_feed = [
+            g['game_id'] for g in games
+            if g.get('status') in _live_final_statuses and g.get('game_id')
+        ]
+
+        def _fetch_one_feed(gid):
+            try:
+                return gid, statsapi.get('game', {'gamePk': gid})
+            except Exception as _fe:
+                print(f"[MLB] Pre-fetch failed for game {gid}: {_fe}")
+                return gid, None
+
+        _pre_fetched_feeds: dict = {}
+        if _needs_feed:
+            with ThreadPoolExecutor(max_workers=min(10, len(_needs_feed))) as _feed_ex:
+                for _gid, _feed in _feed_ex.map(_fetch_one_feed, _needs_feed):
+                    if _feed is not None:
+                        _pre_fetched_feeds[_gid] = _feed
+            print(f"[MLB] Pre-fetched {len(_pre_fetched_feeds)}/{len(_needs_feed)} game feeds in parallel")
+
         game_data = []
         
         for game in games:
@@ -976,9 +1068,11 @@ def fetch_todays_games(fetch_date=None):
                 try:
                     # Get live game feed for detailed information
                     game_id = game_info['game_id']
-                    
-                    # Get game feed which has detailed play-by-play data
-                    game_feed = statsapi.get('game', {'gamePk': game_id})
+
+                    # Use feed pre-fetched in parallel above (avoids sequential round-trips)
+                    game_feed = _pre_fetched_feeds.get(game_id)
+                    if game_feed is None:
+                        raise Exception(f"No pre-fetched feed for game {game_id}")
                     
                     # Extract current game state
                     live_data = game_feed.get('liveData', {})
@@ -1142,7 +1236,10 @@ def fetch_todays_games(fetch_date=None):
                 game_info['outs'] = 0
                 game_info['runners'] = {'first': False, 'second': False, 'third': False}
                 try:
-                    game_feed = statsapi.get('game', {'gamePk': game_info['game_id']})
+                    # Use feed pre-fetched in parallel above
+                    game_feed = _pre_fetched_feeds.get(game_info['game_id'])
+                    if game_feed is None:
+                        raise Exception(f"No pre-fetched feed for game {game_info['game_id']}")
                     live_data = game_feed.get('liveData', {})
                     players_map = {}
                     for side in ['away', 'home']:
@@ -1406,7 +1503,8 @@ def _match_team_odds(statsapi_name, odds_map_keys):
 class GameDataWorker(QtCore.QThread):
     """Background thread for fetching game data without blocking UI"""
     data_fetched = QtCore.pyqtSignal(list)  # Signal to emit fetched game data
-    fetch_error = QtCore.pyqtSignal()       # Emitted when a network/API error prevents fetch
+    fetch_error  = QtCore.pyqtSignal()      # Emitted when a network/API error prevents fetch
+    teams_known  = QtCore.pyqtSignal(list)  # Team names emitted early for logo pre-loading
 
     def __init__(self, fetch_date=None):
         super().__init__()
@@ -1415,7 +1513,10 @@ class GameDataWorker(QtCore.QThread):
     def run(self):
         """Fetch game data in background thread"""
         try:
-            games = fetch_todays_games(self.fetch_date)
+            games = fetch_todays_games(
+                self.fetch_date,
+                on_teams_known=lambda names: self.teams_known.emit(names),
+            )
             self.data_fetched.emit(games)
         except Exception as e:
             print(f"[MLB WORKER] Fetch failed — emitting fetch_error: {e}")
@@ -2061,6 +2162,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.data_worker.data_fetched.connect(self.on_data_received)
         self.data_worker.fetch_error.connect(self.on_fetch_error)
         self.data_worker.finished.connect(self.on_fetch_complete)
+        self.data_worker.teams_known.connect(self._on_teams_known)
         self.data_worker.start()
 
     def start_odds_fetch(self):
@@ -2368,7 +2470,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self.data_worker:
             self.data_worker.deleteLater()
             self.data_worker = None
-    
+
+    def _on_teams_known(self, team_names):
+        """Start logo pre-loading in a background thread the moment team names
+        are available from the schedule — well before game-detail fetches finish."""
+        import threading
+        logo_size = int(self.ticker_height * 0.625)
+        threading.Thread(
+            target=_preload_logos_background,
+            args=(team_names, logo_size),
+            daemon=True,
+        ).start()
+
     def check_all_games_finished(self):
         """Check if all games for today are finished"""
         if not self.games:
@@ -3229,7 +3342,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Calculate total width needed
         game_pixmaps = []
         total_width = logo_segment_w
-        spacing = 100
+        spacing = 67
 
         _settings_key = (
             self.settings.get('show_team_records', True),
@@ -4241,6 +4354,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Keyboard shortcuts (active when ticker window has focus).
         Q          = quit app entirely
         S          = standings window
+        M          = Media: TV & Radio Info window
         .          = settings dialog
         P          = pause/unpause scroll
         G          = refresh games (does not save)
@@ -4323,6 +4437,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self._kb_set_date_override("today")
         elif key == 't':
             self._kb_set_date_override("tomorrow")
+        elif key == 'm':
+            self._open_tv_schedule()
         elif key == 'f':
             # Toggle FPS overlay — session-only, not written to disk
             self.settings['show_fps_overlay'] = not self.settings.get('show_fps_overlay', False)
@@ -4345,6 +4461,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self._current_alert is None:
             self._start_next_alert()
         print(f"[KB] Replaying last alert: {self._last_alert_data.get('text', '')}")
+
+    def _open_tv_schedule(self):
+        """Open (or raise) the Media: TV & Radio Info window (M key)."""
+        if not hasattr(self, '_tv_win') or self._tv_win is None or not self._tv_win.isVisible():
+            self._tv_win = TVScheduleWindow(ticker_widget=self)
+            self._tv_win.show()
+        else:
+            self._tv_win.raise_()
+            self._tv_win.activateWindow()
 
     def _debug_test_alert(self):
         """Fire a fake scoring alert for testing (Shift+A)."""
@@ -4472,6 +4597,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self._standings_win.raise_()
                 self._standings_win.activateWindow()
         standings_action.triggered.connect(_open_standings)
+
+        tv_action = menu.addAction("TV/Radio Today...")
+        def _open_tv():
+            self._open_tv_schedule()
+        tv_action.triggered.connect(_open_tv)
 
         menu.addSeparator()
 
@@ -5095,6 +5225,789 @@ class StandingsWindow(QtWidgets.QWidget):
     def mouseMoveEvent(self, event):
         if event.buttons() & QtCore.Qt.LeftButton and hasattr(self, '_drag_pos'):
             self.move(event.globalPos() - self._drag_pos)
+
+# ---------------------------------------------------------------------------
+# TV / Radio schedule fetch and worker
+# ---------------------------------------------------------------------------
+
+def fetch_sxm_channels():
+    """Scrape siriusxm.com/sports/mlb for satellite/internet channel numbers.
+
+    The page embeds today + next few days of games as RSC payload JSON.
+    Returns a dict keyed by (away_full_name, home_full_name)::
+
+        {('Houston Astros', 'Cleveland Guardians'): {
+            'sat_home': '175',  # satellite, home-team feed only
+            'app_away': '851',  # SiriusXM app, away-team feed
+            'app_home': '848',  # SiriusXM app, home-team feed
+        }, ...}
+    """
+    import urllib.request as _ureq
+    try:
+        req = _ureq.Request(
+            'https://www.siriusxm.com/sports/mlb',
+            headers={'User-Agent': 'Mozilla/5.0'},
+        )
+        with _ureq.urlopen(req, timeout=12) as r:
+            content = r.read().decode('utf-8', errors='replace')
+    except Exception as _e:
+        print(f"[SXM] Fetch failed: {_e}")
+        return {}
+
+    # Data is embedded as RSC JSON payload with escaped quotes: \"games\":[{...}]
+    marker = '\\"games\\":[{'
+    idx = content.find(marker)
+    if idx < 0:
+        print("[SXM] No games data in page")
+        return {}
+
+    arr_start = content.index('[', idx + len(marker) - 2)
+    depth = 0
+    i = arr_start
+    arr_end = arr_start
+    while i < len(content):
+        ch = content[i]
+        if ch == '\\' and i + 1 < len(content):
+            i += 2
+            continue
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                arr_end = i + 1
+                break
+        i += 1
+
+    raw = content[arr_start:arr_end]
+    raw = raw.replace('\\"', '"').replace('\\\\', '\\')
+    raw = raw.replace('"$undefined"', 'null')
+    try:
+        sxm_games = json.loads(raw)
+    except Exception as _e:
+        print(f"[SXM] JSON parse failed: {_e}")
+        return {}
+
+    result = {}
+    for sg in sxm_games:
+        away_name = sg.get('awayTeamCity', '')
+        home_name = sg.get('homeTeamCity', '')
+        if not away_name or not home_name:
+            continue
+        sat_home = sg.get('homeStream') or None
+        app_home = sg.get('homeInternetStream') or None
+        app_away = sg.get('awayInternetStream') or None
+        if sat_home == '$undefined':
+            sat_home = None
+        if app_home == '$undefined':
+            app_home = None
+        if app_away == '$undefined':
+            app_away = None
+        result[(away_name, home_name)] = {
+            'sat_home': sat_home,
+            'app_away': app_away,
+            'app_home': app_home,
+        }
+
+    print(f"[SXM] Loaded {len(result)} game channel entries")
+    return result
+
+
+def _fetch_mlb_broadcast_games(date_str):
+    """Inner helper: call MLB Stats API and return raw game dicts for *date_str*."""
+    try:
+        data = statsapi.get('schedule', {
+            'sportId': 1,
+            'date': date_str,
+            'hydrate': 'broadcasts(all)',
+        })
+    except Exception as _e:
+        print(f"[TV] MLB schedule fetch failed: {_e}")
+        return []
+    out = []
+    for date_block in data.get('dates', []):
+        out.extend(date_block.get('games', []))
+    return out
+
+
+def fetch_tv_schedule(date_str):
+    """Fetch game schedule with broadcast + SiriusXM info for *date_str* (YYYY-MM-DD).
+
+    Runs the MLB Stats API call and SiriusXM scrape in parallel.
+
+    Returns a list of dicts:
+        {'away_name': str, 'home_name': str, 'game_time': str,
+         'status': str,
+         'away_tv': [str, ...], 'away_radio': [str, ...],
+         'home_tv': [str, ...], 'home_radio': [str, ...],
+         'national_tv': [str, ...],
+         'sxm_sat':      str|None,   # satellite channel (home feed)
+         'sxm_app_away': str|None,   # SiriusXM app channel, away feed
+         'sxm_app_home': str|None}   # SiriusXM app channel, home feed
+    Only English-language broadcasts are included.
+    """
+    with ThreadPoolExecutor(max_workers=2) as _pool:
+        _mlb_fut = _pool.submit(_fetch_mlb_broadcast_games, date_str)
+        _sxm_fut = _pool.submit(fetch_sxm_channels)
+        mlb_games = _mlb_fut.result()
+        sxm_map   = _sxm_fut.result()
+
+    games_out = []
+    for g in mlb_games:
+        teams  = g.get('teams', {})
+        away   = teams.get('away', {}).get('team', {}).get('name', '?')
+        home   = teams.get('home', {}).get('team', {}).get('name', '?')
+        status = g.get('status', {}).get('detailedState', '')
+
+        # Game start time → local clock
+        game_time = ''
+        game_dt_str = g.get('gameDate', '')
+        if game_dt_str:
+            try:
+                utc_dt   = datetime.datetime.strptime(game_dt_str, '%Y-%m-%dT%H:%M:%SZ')
+                local_dt = utc_dt.replace(tzinfo=datetime.timezone.utc).astimezone(tz=None)
+                hr = int(local_dt.strftime('%I'))  # 1-12, no leading zero
+                mn = local_dt.strftime('%M')
+                am = local_dt.strftime('%p')
+                game_time = f"{hr}:{mn} {am}"
+            except Exception:
+                game_time = game_dt_str[:16]
+
+        away_tv, away_radio = [], []
+        home_tv, home_radio = [], []
+        national_tv = []
+        seen: set = set()
+
+        for bc in g.get('broadcasts', []):
+            if bc.get('language', 'en').lower() != 'en':
+                continue
+            bc_type = bc.get('type', '').upper()   # TV | AM | FM
+            is_radio = bc_type in ('AM', 'FM')
+            # TV uses callSign; Radio uses full name (includes frequency)
+            if is_radio:
+                display = (bc.get('name') or bc.get('callSign', '')).strip()
+            else:
+                display = (bc.get('callSign') or bc.get('name', '')).strip()
+            if not display or display in seen:
+                continue
+            seen.add(display)
+            is_national = bc.get('isNational', False)
+            ha          = bc.get('homeAway', '')
+
+            if bc_type == 'TV':
+                if is_national:
+                    national_tv.append(display)
+                elif ha == 'away':
+                    away_tv.append(display)
+                else:
+                    home_tv.append(display)
+            elif is_radio:
+                if ha == 'away':
+                    away_radio.append(display)
+                else:
+                    home_radio.append(display)
+
+        # Filter generic network/app names from radio lists unless it's the only entry
+        def _filter_radio(lst):
+            def _is_generic(s):
+                u = s.upper()
+                return (
+                    'AUDACY' in u or
+                    u.endswith('RADIO NETWORK') or
+                    u == "A'S CAST"
+                )
+            filtered = [s for s in lst if not _is_generic(s)]
+            return filtered if filtered else lst
+
+        away_radio = _filter_radio(away_radio)
+        home_radio = _filter_radio(home_radio)
+
+        # Merge SiriusXM channel data (keyed by full team city names)
+        sxm = sxm_map.get((away, home), {})
+
+        games_out.append({
+            'away_name':    away,
+            'home_name':    home,
+            'game_time':    game_time,
+            'status':       status,
+            'away_tv':      away_tv,
+            'away_radio':   away_radio,
+            'home_tv':      home_tv,
+            'home_radio':   home_radio,
+            'national_tv':  national_tv,
+            'sxm_sat':      sxm.get('sat_home'),
+            'sxm_app_away': sxm.get('app_away'),
+            'sxm_app_home': sxm.get('app_home'),
+        })
+
+    return games_out
+
+
+class _TvScheduleWorker(QtCore.QThread):
+    """Background thread for fetching TV/Radio schedule data."""
+    done = QtCore.pyqtSignal(object)
+
+    def __init__(self, date_str):
+        super().__init__()
+        self._date_str = date_str
+
+    def run(self):
+        self.done.emit(fetch_tv_schedule(self._date_str))
+
+
+# ---------------------------------------------------------------------------
+# TV / Radio Schedule window
+# ---------------------------------------------------------------------------
+
+class TVScheduleWindow(QtWidgets.QWidget):
+    """Popup window showing today's or tomorrow's TV/Radio schedule.
+
+    Styled to match the rest of the LED-board aesthetic.
+    Teams show in blue (away) and orange (home); national broadcasts in gold.
+    Toggle between Today and Tomorrow via buttons at the top.
+    """
+
+    def __init__(self, ticker_widget=None, parent=None):
+        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setWindowTitle("TV/Radio Schedule")
+        self.setMinimumWidth(975)
+        self.setMinimumHeight(300)
+        self._initial_resize_done = False
+        self.setMouseTracking(True)   # enables cursor updates on hover (no button held)
+        self._resize_dir  = None
+        self._resize_geom = None
+        self._resize_start = None
+
+        self._ticker_widget = ticker_widget
+        self._data    = None
+        self._worker  = None
+        self._date_mode = 'today'   # 'today' | 'tomorrow'
+
+        self._ozone_family = load_ozone_font() or load_custom_font()
+
+        self._build_ui()
+        self._position_below_ticker()
+        self._fetch()
+
+    # ── UI construction ─────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(24, 16, 24, 16)
+        outer.setSpacing(8)
+
+        # Title
+        title_font = QtGui.QFont(self._ozone_family)
+        title_font.setPixelSize(35)
+        title_lbl = QtWidgets.QLabel("TV / RADIO / XM SCHEDULE")
+        title_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        title_lbl.setFont(title_font)
+        title_lbl.setStyleSheet("color:#FFFFFF; padding-bottom:4px;")
+        outer.addWidget(title_lbl)
+
+        # Day-toggle row
+        _ss_on  = ("background:#1E90FF; color:#fff; border:1px solid #1E90FF;"
+                   " border-radius:4px; padding:4px 20px;")
+        _ss_off = ("background:#2a2a2a; color:#888; border:1px solid #444;"
+                   " border-radius:4px; padding:4px 20px;")
+        self._btn_ss_on  = _ss_on
+        self._btn_ss_off = _ss_off
+
+        btn_font = QtGui.QFont(self._ozone_family)
+        btn_font.setPixelSize(19)
+        self._today_btn = QtWidgets.QPushButton("Today's Games")
+        self._tmrw_btn  = QtWidgets.QPushButton("Tomorrow's Games")
+        for _btn in (self._today_btn, self._tmrw_btn):
+            _btn.setFont(btn_font)
+            _btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self._today_btn.setStyleSheet(_ss_on)
+        self._tmrw_btn.setStyleSheet(_ss_off)
+        self._today_btn.clicked.connect(lambda: self._set_date_mode('today'))
+        self._tmrw_btn.clicked.connect(lambda: self._set_date_mode('tomorrow'))
+
+        tog_row = QtWidgets.QHBoxLayout()
+        tog_row.addStretch()
+        tog_row.addWidget(self._today_btn)
+        tog_row.addSpacing(8)
+        tog_row.addWidget(self._tmrw_btn)
+        tog_row.addStretch()
+        outer.addLayout(tog_row)
+
+        # Divider
+        _sep = QtWidgets.QFrame()
+        _sep.setFrameShape(QtWidgets.QFrame.HLine)
+        _sep.setStyleSheet("color:#444; background:#444; max-height:1px; margin:4px 0;")
+        outer.addWidget(_sep)
+
+        # Loading label
+        self._loading_lbl = QtWidgets.QLabel("Loading…")
+        _lf = QtGui.QFont(self._ozone_family)
+        _lf.setPixelSize(27)
+        self._loading_lbl.setFont(_lf)
+        self._loading_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self._loading_lbl.setStyleSheet("color:#888; padding:24px 0;")
+        outer.addWidget(self._loading_lbl)
+
+        # Scrollable card area
+        self._scroll = QtWidgets.QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background:transparent; }"
+            "QScrollBar:vertical { background:#1a1a1a; width:8px; border-radius:4px; }"
+            "QScrollBar::handle:vertical { background:#444; border-radius:4px; min-height:20px; }"
+        )
+        self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll.setMinimumHeight(400)
+        self._card_container = QtWidgets.QWidget()
+        self._card_container.setStyleSheet("background:transparent;")
+        self._card_layout = QtWidgets.QVBoxLayout(self._card_container)
+        self._card_layout.setContentsMargins(0, 0, 4, 0)
+        self._card_layout.setSpacing(0)
+        self._scroll.setWidget(self._card_container)
+        outer.addWidget(self._scroll)
+        self._scroll.hide()
+
+        # Close button
+        _bottom = QtWidgets.QHBoxLayout()
+        _bottom.addStretch()
+        close_btn = QtWidgets.QPushButton("✕  Close")
+        _cf = QtGui.QFont(self._ozone_family)
+        _cf.setPixelSize(19)
+        close_btn.setFont(_cf)
+        close_btn.setFixedSize(140, 38)
+        close_btn.setStyleSheet(
+            "QPushButton { background:#2a2a2a; color:#ccc; border:1px solid #555; border-radius:6px; }"
+            "QPushButton:hover { background:#3a3a3a; color:#fff; }"
+            "QPushButton:pressed { background:#111; }"
+        )
+        close_btn.clicked.connect(self.close)  # type: ignore[arg-type]
+        _bottom.addWidget(close_btn)
+
+        # Resize grip in bottom-right corner for vertical (and horizontal) resizing
+        _grip = QtWidgets.QSizeGrip(self)
+        _grip.setStyleSheet("background:transparent;")
+        _bottom.addWidget(_grip, 0, QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight)
+        outer.addLayout(_bottom)
+
+    # ── Data management ──────────────────────────────────────────────────────
+
+    def _date_str_for_mode(self):
+        d = datetime.datetime.now()
+        if self._date_mode == 'tomorrow':
+            d += datetime.timedelta(days=1)
+        return d.strftime('%Y-%m-%d')
+
+    def _set_date_mode(self, mode):
+        if mode == self._date_mode:
+            return
+        self._date_mode = mode
+        self._today_btn.setStyleSheet(
+            self._btn_ss_on if mode == 'today' else self._btn_ss_off)
+        self._tmrw_btn.setStyleSheet(
+            self._btn_ss_on if mode == 'tomorrow' else self._btn_ss_off)
+        self._fetch()
+
+    def _fetch(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait()
+        self._scroll.hide()
+        self._loading_lbl.show()
+        self._worker = _TvScheduleWorker(self._date_str_for_mode())
+        self._worker.done.connect(self._on_data)
+        self._worker.start()
+
+    def _on_data(self, games):
+        self._data = games
+        self._loading_lbl.hide()
+        self._populate()
+        self._scroll.show()
+        if not self._initial_resize_done:
+            self._initial_resize_done = True
+            # Size to ~2x the old fixed cap, clamped to available screen height
+            _scr = QtWidgets.QApplication.primaryScreen()
+            if self._ticker_widget is not None:
+                _s2 = QtWidgets.QApplication.screenAt(self._ticker_widget.geometry().center())
+                if _s2:
+                    _scr = _s2
+            avail_h = _scr.availableGeometry().height()
+            target_h = min(1360, max(600, avail_h - 80))
+            self.resize(975, target_h)
+        self._position_below_ticker()
+
+    # ── Card population ───────────────────────────────────────────────────────
+
+    def _populate(self):
+        # Clear old cards
+        while self._card_layout.count():
+            item = self._card_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        name_font = QtGui.QFont(self._ozone_family)
+        name_font.setPixelSize(21)
+        info_font = QtGui.QFont(self._ozone_family)
+        info_font.setPixelSize(16)
+        time_font = QtGui.QFont(self._ozone_family)
+        time_font.setPixelSize(15)
+
+        COL_NAT  = "#FFD700"
+        COL_TV   = "#FFFFFF"   # bright white for TV stations
+        COL_RAD  = "#CCCCCC"   # slightly dimmer for Radio
+        COL_SXM  = "#AAAAAA"   # slightly dimmer again for SiriusXM
+        COL_TIME = "#00B3FF"   # same cyan as ticker game times
+        COL_VS   = "#777777"
+        COL_LBL  = "#AAAAAA"
+
+        def join_or_dash(lst):
+            return "  |  ".join(lst) if lst else "—"
+
+        if not self._data:
+            no_lbl = QtWidgets.QLabel("No games scheduled.")
+            _nf = QtGui.QFont(self._ozone_family)
+            _nf.setPixelSize(21)
+            no_lbl.setFont(_nf)
+            no_lbl.setStyleSheet("color:#888; padding:20px 0;")
+            no_lbl.setAlignment(QtCore.Qt.AlignCenter)
+            self._card_layout.addWidget(no_lbl)
+            self._card_layout.addStretch()
+            return
+
+        for idx, g in enumerate(self._data):
+            # Per-game team colors from settings
+            col_away = get_team_color(g['away_name'])
+            col_home = get_team_color(g['home_name'])
+
+            card = QtWidgets.QFrame()
+            card.setStyleSheet(
+                "QFrame { background:rgba(255,255,255,10); border-radius:6px; "
+                "margin:2px 0; padding:2px; }"
+                if idx % 2 == 0 else
+                "QFrame { background:rgba(0,0,0,0); border-radius:6px; "
+                "margin:2px 0; padding:2px; }"
+            )
+            cl = QtWidgets.QVBoxLayout(card)
+            cl.setContentsMargins(10, 6, 10, 6)
+            cl.setSpacing(2)
+
+            # ── Header: time · AWAY (logo) vs (logo) HOME · [status] ──────
+            hdr = QtWidgets.QHBoxLayout()
+            hdr.setSpacing(4)
+
+            time_col = QtWidgets.QVBoxLayout()
+            time_col.setSpacing(1)
+            time_col.setContentsMargins(0, 0, 0, 0)
+            time_lbl = QtWidgets.QLabel(g['game_time'])
+            time_lbl.setFont(time_font)
+            time_lbl.setStyleSheet(f"color:{COL_TIME};")
+            time_lbl.setFixedWidth(72)
+            time_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            time_col.addWidget(time_lbl)
+            if g['status'] not in ('', 'Scheduled', 'Pre-Game'):
+                _st_font = QtGui.QFont(time_font)
+                _st_font.setPointSize(max(6, time_font.pointSize() - 1))
+                st_lbl = QtWidgets.QLabel(g['status'].upper())
+                st_lbl.setFont(_st_font)
+                st_lbl.setStyleSheet("color:#FF4444;")
+                st_lbl.setFixedWidth(72)
+                st_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                time_col.addWidget(st_lbl)
+            hdr.addLayout(time_col)
+
+            _logo_sz = 32
+
+            away_name_lbl = QtWidgets.QLabel(g['away_name'].upper())
+            away_name_lbl.setFont(name_font)
+            away_name_lbl.setStyleSheet(f"color:{col_away};")
+            away_name_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            hdr.addWidget(away_name_lbl, 5)
+
+            _away_px = get_team_logo(g['away_name'], _logo_sz)
+            if not _away_px.isNull():
+                away_logo_lbl = QtWidgets.QLabel()
+                away_logo_lbl.setPixmap(_away_px)
+                away_logo_lbl.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
+                hdr.addWidget(away_logo_lbl)
+
+            vs_lbl = QtWidgets.QLabel("vs")
+            vs_lbl.setFont(time_font)
+            vs_lbl.setStyleSheet(f"color:{COL_VS};")
+            vs_lbl.setAlignment(QtCore.Qt.AlignCenter)
+            vs_lbl.setFixedWidth(28)
+            hdr.addWidget(vs_lbl)
+
+            _home_px = get_team_logo(g['home_name'], _logo_sz)
+            if not _home_px.isNull():
+                home_logo_lbl = QtWidgets.QLabel()
+                home_logo_lbl.setPixmap(_home_px)
+                home_logo_lbl.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+                hdr.addWidget(home_logo_lbl)
+
+            home_name_lbl = QtWidgets.QLabel(g['home_name'].upper())
+            home_name_lbl.setFont(name_font)
+            home_name_lbl.setStyleSheet(f"color:{col_home};")
+            home_name_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            hdr.addWidget(home_name_lbl, 5)
+
+            cl.addLayout(hdr)
+
+            # ── National TV (if any) ───────────────────────────────────────
+            if g['national_tv']:
+                nat_row = QtWidgets.QHBoxLayout()
+                nat_row.setSpacing(4)
+                nat_lbl = QtWidgets.QLabel("NATL TV:")
+                nat_lbl.setFont(info_font)
+                nat_lbl.setStyleSheet(f"color:{COL_NAT}; font-weight:bold;")
+                nat_lbl.setFixedWidth(72)
+                nat_row.addWidget(nat_lbl)
+                nat_row.addStretch(1)
+                nat_val = QtWidgets.QLabel(join_or_dash(g['national_tv']))
+                nat_val.setFont(info_font)
+                nat_val.setStyleSheet(f"color:{COL_TV};")
+                nat_val.setAlignment(QtCore.Qt.AlignCenter)
+                nat_row.addWidget(nat_val)
+                nat_row.addStretch(1)
+                cl.addLayout(nat_row)
+
+            # ── TV row ────────────────────────────────────────────────────
+            tv_row = QtWidgets.QHBoxLayout()
+            tv_row.setSpacing(4)
+            tv_hdr = QtWidgets.QLabel("TV:")
+            tv_hdr.setFont(info_font)
+            tv_hdr.setStyleSheet(f"color:{COL_TV}; font-weight:bold;")
+            tv_hdr.setFixedWidth(72)
+            tv_row.addWidget(tv_hdr)
+
+            away_tv_lbl = QtWidgets.QLabel(join_or_dash(g['away_tv']))
+            away_tv_lbl.setFont(info_font)
+            away_tv_lbl.setStyleSheet(f"color:{COL_TV};")
+            away_tv_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            tv_row.addWidget(away_tv_lbl, 1)
+
+            tv_div = QtWidgets.QLabel(" | ")
+            tv_div.setFont(info_font)
+            tv_div.setStyleSheet(f"color:{COL_VS};")
+            tv_div.setAlignment(QtCore.Qt.AlignCenter)
+            tv_row.addWidget(tv_div)
+
+            home_tv_lbl = QtWidgets.QLabel(join_or_dash(g['home_tv']))
+            home_tv_lbl.setFont(info_font)
+            home_tv_lbl.setStyleSheet(f"color:{COL_TV};")
+            home_tv_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            tv_row.addWidget(home_tv_lbl, 1)
+
+            cl.addLayout(tv_row)
+
+            # ── Radio row ─────────────────────────────────────────────────
+            rad_row = QtWidgets.QHBoxLayout()
+            rad_row.setSpacing(4)
+            rad_hdr = QtWidgets.QLabel("Radio:")
+            rad_hdr.setFont(info_font)
+            rad_hdr.setStyleSheet(f"color:{COL_RAD}; font-weight:bold;")
+            rad_hdr.setFixedWidth(72)
+            rad_row.addWidget(rad_hdr)
+
+            away_rad_lbl = QtWidgets.QLabel(join_or_dash(g['away_radio']))
+            away_rad_lbl.setFont(info_font)
+            away_rad_lbl.setStyleSheet(f"color:{COL_RAD};")
+            away_rad_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            rad_row.addWidget(away_rad_lbl, 1)
+
+            rad_div = QtWidgets.QLabel(" | ")
+            rad_div.setFont(info_font)
+            rad_div.setStyleSheet(f"color:{COL_VS};")
+            rad_div.setAlignment(QtCore.Qt.AlignCenter)
+            rad_row.addWidget(rad_div)
+
+            home_rad_lbl = QtWidgets.QLabel(join_or_dash(g['home_radio']))
+            home_rad_lbl.setFont(info_font)
+            home_rad_lbl.setStyleSheet(f"color:{COL_RAD};")
+            home_rad_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            rad_row.addWidget(home_rad_lbl, 1)
+
+            cl.addLayout(rad_row)
+
+            # ── SiriusXM row ──────────────────────────────────────────────
+            # Away side: app channel only (satellite carries home feed only)
+            # Home side: app channel + satellite channel
+            sxm_sat      = g.get('sxm_sat')
+            sxm_app_home = g.get('sxm_app_home')
+            sxm_app_away = g.get('sxm_app_away')
+            if sxm_sat or sxm_app_home or sxm_app_away:
+
+                away_sxm_parts = []
+                if sxm_app_away:
+                    away_sxm_parts.append(f"APP CH {sxm_app_away}")
+                away_sxm_str = "  |  ".join(away_sxm_parts) if away_sxm_parts else "—"
+
+                home_sxm_parts = []
+                if sxm_sat:
+                    home_sxm_parts.append(f"SAT CH {sxm_sat}")
+                if sxm_app_home:
+                    home_sxm_parts.append(f"APP CH {sxm_app_home}")
+                home_sxm_str = "  |  ".join(home_sxm_parts) if home_sxm_parts else "—"
+
+                sxm_row = QtWidgets.QHBoxLayout()
+                sxm_row.setSpacing(4)
+
+                sxm_hdr = QtWidgets.QLabel("SiriusXM:")
+                sxm_hdr.setFont(info_font)
+                sxm_hdr.setStyleSheet(f"color:{COL_SXM}; font-weight:bold;")
+                sxm_hdr.setFixedWidth(72)
+                sxm_row.addWidget(sxm_hdr)
+
+                away_sxm_lbl = QtWidgets.QLabel(away_sxm_str)
+                away_sxm_lbl.setFont(info_font)
+                away_sxm_lbl.setStyleSheet(f"color:{COL_SXM};")
+                away_sxm_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                sxm_row.addWidget(away_sxm_lbl, 1)
+
+                sxm_div = QtWidgets.QLabel(" | ")
+                sxm_div.setFont(info_font)
+                sxm_div.setStyleSheet(f"color:{COL_VS};")
+                sxm_div.setAlignment(QtCore.Qt.AlignCenter)
+                sxm_row.addWidget(sxm_div)
+
+                home_sxm_lbl = QtWidgets.QLabel(home_sxm_str)
+                home_sxm_lbl.setFont(info_font)
+                home_sxm_lbl.setStyleSheet(f"color:{COL_SXM};")
+                home_sxm_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                sxm_row.addWidget(home_sxm_lbl, 1)
+
+                cl.addLayout(sxm_row)
+
+            self._card_layout.addWidget(card)
+
+            # Thin divider between games (not after the last)
+            if idx < len(self._data) - 1:
+                _div = QtWidgets.QFrame()
+                _div.setFrameShape(QtWidgets.QFrame.HLine)
+                _div.setStyleSheet(
+                    "color:#2a2a2a; background:#2a2a2a; max-height:1px; margin:1px 0;"
+                )
+                self._card_layout.addWidget(_div)
+
+        self._card_layout.addStretch()
+
+    # ── Positioning / paint (same style as StandingsWindow) ─────────────────
+
+    def _position_below_ticker(self):
+        ticker = self._ticker_widget
+        if ticker is not None:
+            _scr = QtWidgets.QApplication.screenAt(ticker.geometry().center())
+            if _scr is None:
+                _scr = QtWidgets.QApplication.primaryScreen()
+        else:
+            _scr = QtWidgets.QApplication.primaryScreen()
+        screen = _scr.availableGeometry()
+        if ticker is not None:
+            tg = ticker.frameGeometry()
+            x  = tg.left() + (tg.width() - self.width()) // 2
+            y  = tg.bottom() + 8
+        else:
+            x = screen.x() + (screen.width()  - self.width())  // 2
+            y = screen.y() + (screen.height() - self.height()) // 2
+        x = max(screen.left(), min(x, screen.right()  - self.width()))
+        y = max(screen.top(),  min(y, screen.bottom() - self.height()))
+        self.move(x, y)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect()
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 255)))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#FFFFFF'), 1.5))
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
+        scan = QtGui.QColor(0, 0, 0, 35)
+        for y in range(0, rect.height(), 2):
+            painter.fillRect(0, y, rect.width(), 1, scan)
+        painter.end()
+
+    # ── Resize / drag helpers ────────────────────────────────────────────────
+
+    _RESIZE_MARGIN = 8   # px from edge that activates resize cursor / drag
+
+    def _edge_hit(self, pos):
+        """Return (left, top, right, bottom) bools for which edges pos is near."""
+        m = self._RESIZE_MARGIN
+        r = self.rect()
+        return (
+            pos.x() < m,
+            pos.y() < m,
+            pos.x() > r.width()  - m,
+            pos.y() > r.height() - m,
+        )
+
+    @staticmethod
+    def _cursor_for_edge(left, top, right, bottom):
+        if (left and top) or (right and bottom):
+            return QtCore.Qt.SizeFDiagCursor
+        if (right and top) or (left and bottom):
+            return QtCore.Qt.SizeBDiagCursor
+        if left or right:
+            return QtCore.Qt.SizeHorCursor
+        if top or bottom:
+            return QtCore.Qt.SizeVerCursor
+        return QtCore.Qt.ArrowCursor
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            left, top, right, bottom = self._edge_hit(event.pos())
+            if any((left, top, right, bottom)):
+                self._resize_dir   = (left, top, right, bottom)
+                self._resize_geom  = self.frameGeometry()
+                self._resize_start = event.globalPos()
+                self._drag_pos     = None
+            else:
+                self._resize_dir = None
+                self._drag_pos   = event.globalPos() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & QtCore.Qt.LeftButton:
+            if self._resize_dir and any(self._resize_dir):
+                left, top, right, bottom = self._resize_dir
+                delta = event.globalPos() - self._resize_start
+                geo   = QtCore.QRect(self._resize_geom)
+                min_w = self.minimumWidth()
+                min_h = self.minimumHeight()
+                if left:
+                    new_l = geo.left() + delta.x()
+                    if geo.right() - new_l >= min_w:
+                        geo.setLeft(new_l)
+                if right:
+                    new_r = geo.right() + delta.x()
+                    if new_r - geo.left() >= min_w:
+                        geo.setRight(new_r)
+                if top:
+                    new_t = geo.top() + delta.y()
+                    if geo.bottom() - new_t >= min_h:
+                        geo.setTop(new_t)
+                if bottom:
+                    new_b = geo.bottom() + delta.y()
+                    if new_b - geo.top() >= min_h:
+                        geo.setBottom(new_b)
+                self.setGeometry(geo)
+            elif self._drag_pos is not None:
+                self.move(event.globalPos() - self._drag_pos)
+        else:
+            # Hover — update cursor to hint which edge/corner can be dragged
+            left, top, right, bottom = self._edge_hit(event.pos())
+            self.setCursor(self._cursor_for_edge(left, top, right, bottom))
+
+    def mouseReleaseEvent(self, event):
+        self._resize_dir   = None
+        self._resize_geom  = None
+        self._resize_start = None
+        self._drag_pos     = None
+        self.setCursor(QtCore.Qt.ArrowCursor)
+
+    def closeEvent(self, event):
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait()
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -6302,6 +7215,7 @@ class SettingsDialog(QtWidgets.QDialog):
             ("Y"       , "Show Yesterday's games"),
             ("D"       , "Show Today's games  (return to auto mode)"),
             ("T"       , "Show Tomorrow's games"),
+            ("M"       , "Open Media: TV & Radio Info window"),
             ("I"       , "Restart Intro animation"),
             ("R"       , "Replay last alert"),
             ("G"       , "Refresh / fetch latest game data"),
@@ -6468,6 +7382,13 @@ class SettingsDialog(QtWidgets.QDialog):
                 'QT_PLUGIN_PATH',
                 'QML2_IMPORT_PATH',
                 'QT_QPA_PLATFORM_PLUGIN_PATH',
+                # PyInstaller bootloader env vars — if inherited, the child's
+                # bootloader skips extraction and reuses the PARENT's _MEI temp
+                # dir.  When the parent exits and its atexit deletes that dir,
+                # the child loses python313.dll and crashes.  Clearing these
+                # forces the child to extract its own independent _MEI dir.
+                '_MEIPASS2',          # PyInstaller 4.x / 5.x
+                '_PYIBoot_MEIPASS',   # PyInstaller 6.x+
             ):
                 _child_env.pop(_qt_var, None)
             # Release the AppBar reservation NOW, before spawning the child.

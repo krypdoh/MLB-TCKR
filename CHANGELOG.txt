@@ -1,3 +1,73 @@
+Version 1.4.0 (2026-04-21)
+--------------------------
+NEW FEATURES:
+- TV / Radio / XM Schedule dialog (press M or right-click → "TV/Radio Today…")
+  - Shows all MLB games for today or tomorrow with full broadcast details
+  - Toggle between Today's Games / Tomorrow's Games with one click
+  - Per-game cards display:
+      · Team names in team colors with logos (same as ticker)
+      · Game time in ticker cyan; status (WARMUP, IN PROGRESS, etc.) below the time
+      · TV channel call signs (away | home) and national TV in gold when present
+      · Radio station names with frequencies (e.g. WFAN 660/101.9 FM, WTAM 1100)
+      · SiriusXM: satellite channel (home feed) and app channels (away + home)
+  - Fetches MLB Stats API broadcasts and SiriusXM page in parallel for fast load
+  - Window is fully user-resizable from all 8 edges and corners (custom frameless
+    resize implementation — rounded border and LED scanline aesthetic preserved)
+  - QSizeGrip in bottom-right corner for quick diagonal resize
+  - Window drags from interior; resize cursors appear on edge hover
+
+IMPROVEMENTS:
+- Radio display now uses full station name from API (includes frequency where available)
+  e.g. "KBME 790 AM/94.5 FM HD-2" instead of bare call sign "KBME"
+- TV display uses call sign (e.g. YES, NESN+, SCHN) — cleaner than full network name
+- Generic/app-only radio entries suppressed when real stations are available:
+    · AUDACY / Audacy App entries hidden unless the only option for that team
+    · "… Radio Network" umbrella names (Guardians, Royals, etc.) hidden unless sole entry
+    · "A's Cast" app-only entry hidden unless sole entry
+- Game status moved below the game time column instead of appended at end of row,
+  keeping team names and logos perfectly centered regardless of game state
+- Media dialog label colors now match their data: TV: white, Radio: light grey,
+  SiriusXM: dimmer grey
+- National TV value centered under the "vs" divider
+
+BUG FIXES:
+- Team logos in media dialog no longer clipped — label sized to actual pixmap dimensions
+  instead of a fixed square, accommodating wide logos (Cardinals, Giants, etc.)
+
+------------------------------------------------------------------------------
+
+Version 1.3.5 (2026-04-21)
+--------------------------
+BUG FIXES:
+- Fixed crash on first height-resize restart: "Failed to load Python DLL python313.dll"
+  - Root cause: PyInstaller's bootloader reads _MEIPASS2 / _PYIBoot_MEIPASS from the
+    environment. When the child process inherited these vars from the parent it skipped
+    extraction and reused the parent's _MEI temp dir. After the parent's 3-second delay
+    it exited and its atexit handler deleted that dir, taking python313.dll with it.
+    The crash occurred exactly once per fresh session (subsequent restarts were
+    unaffected because by then the child's env no longer carried the parent's vars).
+  - Fix: both _MEIPASS2 and _PYIBoot_MEIPASS are now stripped from _child_env before
+    subprocess.Popen(), alongside the existing Qt env-var strip. This forces the child
+    to extract its own independent _MEI dir that the parent never touches.
+  - Note: the harmless "[PYI:WARNING] Failed to remove temporary directory" message
+    that appears after the fix is expected — it is the parent's own _MEI dir that
+    cannot be deleted while its DLLs remain memory-mapped. Windows cleans it up on
+    reboot or on the next fresh launch.
+
+IMPROVEMENTS:
+- Significantly faster startup and data refresh on slow or proxy-connected networks
+  - statsapi.schedule() and standings fetch now run concurrently (saves one full
+    network round-trip on every data refresh)
+  - All live/final game detail feeds are now pre-fetched in parallel (up to 10
+    concurrent requests) instead of sequentially. With multiple games in progress
+    the wall-clock fetch time drops from N×RTT to ~1×RTT.
+  - Team PNG logos are now pre-loaded from disk as QImage objects in a background
+    thread the moment the schedule response arrives (before game-detail fetches
+    complete). By the time the ticker renders, get_team_logo() only needs a cheap
+    QPixmap.fromImage() instead of disk I/O on the main thread.
+
+------------------------------------------------------------------------------
+
 Version 1.3.4 (2026-04-21)
 --------------------------
 BUG FIXES:
