@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0421.1111
+Date: 2026.0424.1700
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.4"
+VERSION = "1.4.1"
 
 import warnings
 warnings.filterwarnings(
@@ -232,8 +232,10 @@ def get_settings():
         "load_at_startup": False,  # Register in Windows Run key on launch
         "docked": True,  # When True, ticker is docked (not moveable) and registered as AppBar
         "yesterday_cutoff_minutes": 30,  # Show yesterday's finals until N min before first pitch
-        "show_moneyline": False,   # Show H2H moneyline odds from The Odds API
+        "show_moneyline": False,   # Show H2H moneyline odds
+        "odds_api_provider": "action-network",  # "action-network", "the-odds-api", or "odds-api-io"
         "odds_api_key": "",        # API key for api.the-odds-api.com
+        "odds_api_io_key": "",     # API key for api.odds-api.io
         "odds_refresh_minutes": 15, # How often to re-fetch moneyline odds (minutes)
         "allow_drag": False,                    # Allow repositioning the ticker bar by dragging it
         "watched_teams": [],                   # Team nicknames to watch for scoring alerts
@@ -640,8 +642,6 @@ def get_team_logo(team_name, size=40):
         if os.path.exists(candidate):
             logo_path = candidate
             break
-    
-    print(f"[LOGO] Looking for: {team_name} -> {logo_filename}")
 
     # Case-insensitive file search if exact match not found
     if logo_path is None:
@@ -653,7 +653,6 @@ def get_team_logo(team_name, size=40):
                 for filename in files_in_dir:
                     if filename.lower() == logo_filename.lower():
                         logo_path = os.path.join(images_dir, filename)
-                        print(f"[LOGO] Found case-insensitive match: {filename}")
                         break
             except Exception as e:
                 print(f"[LOGO] Error searching directory: {e}")
@@ -669,7 +668,6 @@ def get_team_logo(team_name, size=40):
                 candidate = os.path.join(images_dir, espn_filename)
                 if os.path.exists(candidate):
                     logo_path = candidate
-                    print(f"[LOGO] Found ESPN-abbr fallback: {espn_filename}")
                     break
             # Case-insensitive scan for ESPN abbreviation file as last resort.
             if logo_path is None:
@@ -680,7 +678,6 @@ def get_team_logo(team_name, size=40):
                         for filename in os.listdir(images_dir):
                             if filename.lower() == espn_filename.lower():
                                 logo_path = os.path.join(images_dir, filename)
-                                print(f"[LOGO] Found ESPN-abbr case-insensitive: {filename}")
                                 break
                     except Exception:
                         pass
@@ -709,12 +706,12 @@ def get_team_logo(team_name, size=40):
         TEAM_LOGO_CACHE[cache_key] = pixmap
         return pixmap
     
-    print(f"[LOGO] Loading from: {logo_path}")
     # Fast path: use QImage pre-loaded by background thread (avoids disk I/O on main thread)
     _pre_img = TEAM_IMAGE_CACHE.get(normalized_name)
     if _pre_img is not None and not _pre_img.isNull():
         pixmap = QtGui.QPixmap.fromImage(_pre_img)
     else:
+        print(f"[LOGO] Loading from disk: {logo_path}")
         pixmap = QtGui.QPixmap(logo_path)
     
     if pixmap.isNull():
@@ -739,7 +736,6 @@ def get_team_logo(team_name, size=40):
         TEAM_LOGO_CACHE[cache_key] = pixmap
         return pixmap
     
-    print(f"[LOGO] Successfully loaded: {logo_path} ({pixmap.width()}x{pixmap.height()})")
     pixmap = _crop_logo_to_content(pixmap)  # trim transparent padding before scaling
     # Scale to fixed height so every logo is the same visual height regardless of
     # its aspect ratio (wide script logos like Giants SF were getting crushed in a
@@ -1409,6 +1405,52 @@ def format_game_time_local(game_datetime):
 # Odds API helpers
 # ---------------------------------------------------------------------------
 
+def fetch_mlb_odds_actionnetwork(target_date=None):
+    """Fetch MLB moneyline odds from ActionNetwork — no API key required.
+
+    target_date: 'YYYY-MM-DD' string or None for today.
+    Returns a dict mapping (away_lower, home_lower) -> (away_price, home_price)
+    in American-format integers.  Returns {} on any error.
+    """
+    try:
+        url = "https://api.actionnetwork.com/web/v1/scoreboard/mlb"
+        if target_date:
+            date_param = target_date.replace('-', '')
+            url = f"{url}?date={date_param}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        odds_map = {}
+        for game in data.get("games", []):
+            away_team_id = game.get("away_team_id")
+            home_team_id = game.get("home_team_id")
+            teams = game.get("teams", [])
+            if len(teams) < 2 or not away_team_id or not home_team_id:
+                continue
+            # Use away_team_id / home_team_id to reliably identify teams —
+            # the teams array order is NOT guaranteed to be [away, home].
+            team_by_id = {t["id"]: t for t in teams if "id" in t}
+            away_full = team_by_id.get(away_team_id, {}).get("full_name", "").lower()
+            home_full = team_by_id.get(home_team_id, {}).get("full_name", "").lower()
+            if not away_full or not home_full:
+                continue
+            # Pick the first 'game'-type odds entry with both moneyline values
+            for entry in game.get("odds", []):
+                if entry.get("type") != "game":
+                    continue
+                ml_away = entry.get("ml_away")
+                ml_home = entry.get("ml_home")
+                if ml_away is not None and ml_home is not None:
+                    odds_map[(away_full, home_full)] = (int(ml_away), int(ml_home))
+                    break
+        print(f"[ODDS-AN] Fetched {len(odds_map)} game(s) from ActionNetwork")
+        return odds_map
+    except Exception as e:
+        print(f"[ODDS-AN] Error fetching odds: {e}")
+        return {}
+
+
 def fetch_mlb_odds(api_key):
     """Fetch MLB H2H moneyline odds from The Odds API (api.the-odds-api.com).
 
@@ -1469,6 +1511,244 @@ def fetch_mlb_odds(api_key):
         return {}
 
 
+# Session-level cache for odds-api.io selected bookmakers.
+# Stored as (api_key, bookmakers_str) so it is automatically invalidated when
+# the user saves a different API key in Settings.
+_ODDSAPIO_BOOKMAKERS_CACHE: tuple = (None, None)  # (api_key, comma-sep names or None)
+
+
+def _reset_oddsapio_bookmakers_cache():
+    """Invalidate the bookmakers cache so it is re-fetched on next odds poll."""
+    global _ODDSAPIO_BOOKMAKERS_CACHE
+    _ODDSAPIO_BOOKMAKERS_CACHE = (None, None)
+    print("[ODDS-IO] Bookmakers cache cleared (API key changed)")
+
+
+def _get_oddsapio_bookmakers(api_key):
+    """Return the user's selected bookmakers string for odds-api.io.
+    Fetched once per API key; re-fetched automatically if the key changes.
+    Returns None if the API call fails so the caller can skip the odds fetch."""
+    global _ODDSAPIO_BOOKMAKERS_CACHE
+    cached_key, cached_val = _ODDSAPIO_BOOKMAKERS_CACHE
+    if cached_key == api_key and cached_val is not None:
+        return cached_val
+    # Key changed or first run — fetch from API
+    try:
+        resp = requests.get(
+            "https://api.odds-api.io/v3/bookmakers/selected",
+            params={"apiKey": api_key},
+            timeout=10,
+        )
+        print(f"[ODDS-IO] /bookmakers/selected → HTTP {resp.status_code}")
+        print(f"[ODDS-IO] /bookmakers/selected raw response: {resp.text[:500]}")
+        if resp.ok:
+            data = resp.json()
+            # Response is {"bookmakers": ["Bet365", "FanDuel"], "count": 2}
+            if isinstance(data, dict) and "bookmakers" in data:
+                names = [b for b in data["bookmakers"] if isinstance(b, str)]
+            elif isinstance(data, list):
+                # Fallback: list of dicts with "name" key
+                names = [b["name"] for b in data if isinstance(b, dict) and b.get("name")]
+            else:
+                print(f"[ODDS-IO] Unexpected response type {type(data).__name__}: {data}")
+                names = []
+            print(f"[ODDS-IO] Parsed bookmakers: {names}")
+            result = ",".join(names[:10]) if names else None
+            if not result:
+                print("[ODDS-IO] No bookmakers in response — select some at odds-api.io/dashboard")
+        else:
+            print(f"[ODDS-IO] Could not fetch bookmakers ({resp.status_code}): {resp.text[:300]}")
+            result = None
+    except Exception as e:
+        print(f"[ODDS-IO] Could not fetch bookmakers — exception: {type(e).__name__}: {e}")
+        result = None
+    _ODDSAPIO_BOOKMAKERS_CACHE = (api_key, result)
+    if result:
+        print(f"[ODDS-IO] Bookmakers: {result}")
+    return result
+
+
+def _decimal_to_american(decimal_odds):
+    """Convert decimal odds (e.g. 2.10) to American format (e.g. +110)."""
+    d = float(decimal_odds)
+    if d >= 2.0:
+        return int(round((d - 1) * 100))
+    elif d > 1.0:
+        return int(round(-100 / (d - 1)))
+    return None
+
+
+# Timestamp of the last successful odds-api.io fetch.
+# Used to enforce a minimum gap between calls so burst limits aren't tripped.
+_ODDSAPIO_LAST_FETCH: float = 0.0
+# If a 429 is received, don't retry until this time (epoch seconds).
+_ODDSAPIO_RETRY_AFTER: float = 0.0
+# Minimum seconds between any two calls to odds-api.io (burst guard).
+_ODDSAPIO_MIN_INTERVAL: int = 60
+
+
+def fetch_mlb_odds_oddsapio(api_key, target_date=None):
+    """Fetch MLB H2H moneyline odds from odds-api.io (api.odds-api.io/v3).
+
+    target_date: 'YYYY-MM-DD' local date string for the games being viewed.
+                 Defaults to today's local date.
+    Workflow:
+      1. Enforce a minimum inter-fetch interval and respect Retry-After backoff.
+      2. Get the user's selected bookmakers (cached for the session).
+      3. Fetch pending/live MLB events (league=usa-mlb).
+      4. Batch-fetch ML odds for those events via /odds/multi (max 10 at a time).
+    Returns a dict mapping (away_lower, home_lower) -> (away_price, home_price)
+    in American-format integers.  Returns {} on any error.
+    """
+    global _ODDSAPIO_LAST_FETCH, _ODDSAPIO_RETRY_AFTER
+    if not api_key:
+        return {}
+    import time
+    now = time.time()
+    if now < _ODDSAPIO_RETRY_AFTER:
+        wait = int(_ODDSAPIO_RETRY_AFTER - now)
+        print(f"[ODDS-IO] Rate-limited — skipping fetch, retry in {wait}s")
+        return {}
+    if now - _ODDSAPIO_LAST_FETCH < _ODDSAPIO_MIN_INTERVAL:
+        wait = int(_ODDSAPIO_MIN_INTERVAL - (now - _ODDSAPIO_LAST_FETCH))
+        print(f"[ODDS-IO] Too soon since last fetch — skipping, next in {wait}s")
+        return {}
+    try:
+        base = "https://api.odds-api.io/v3"
+
+        # Step 0: Get the user's selected bookmakers (cached per API key)
+        bookmakers_str = _get_oddsapio_bookmakers(api_key)
+        if not bookmakers_str:
+            print("[ODDS-IO] No bookmakers configured — visit odds-api.io/dashboard to select some")
+            return {}
+
+        # Step 1: Get all MLB events (no status filter — we filter by date client-side
+        # so that pending, live/in-progress, and recently-started games are all included).
+        events_resp = requests.get(
+            f"{base}/events?sport=baseball&league=usa-mlb&apiKey={api_key}",
+            timeout=10,
+        )
+        # Log rate-limit headers so we can diagnose 429s
+        _rl_remaining = events_resp.headers.get("x-ratelimit-remaining", "?")
+        _rl_reset = events_resp.headers.get("x-ratelimit-reset", "?")
+        print(f"[ODDS-IO] Rate limit: {_rl_remaining} remaining, resets {_rl_reset}")
+        if events_resp.status_code == 401:
+            print("[ODDS-IO] Invalid API key — check your Odds-API.io key in Settings")
+            return {}
+        if events_resp.status_code == 429:
+            # Parse Retry-After (seconds) or x-ratelimit-reset (ISO timestamp)
+            retry_after = events_resp.headers.get("Retry-After") or events_resp.headers.get("retry-after")
+            if retry_after and retry_after.isdigit():
+                _ODDSAPIO_RETRY_AFTER = time.time() + int(retry_after)
+                wait_msg = f"{retry_after}s"
+            elif _rl_reset and _rl_reset != "?":
+                try:
+                    from datetime import datetime, timezone
+                    reset_dt = datetime.fromisoformat(_rl_reset.replace("Z", "+00:00"))
+                    _ODDSAPIO_RETRY_AFTER = reset_dt.timestamp() + 5  # 5s buffer
+                    wait_secs = max(0, int(_ODDSAPIO_RETRY_AFTER - time.time()))
+                    wait_msg = f"{wait_secs}s (resets {_rl_reset})"
+                except Exception:
+                    _ODDSAPIO_RETRY_AFTER = time.time() + 300
+                    wait_msg = f"5 min (could not parse reset: {_rl_reset})"
+            else:
+                _ODDSAPIO_RETRY_AFTER = time.time() + 300
+                wait_msg = "5 min (no reset header)"
+            print(f"[ODDS-IO] Rate limited — backing off {wait_msg}")
+            return {}
+        if events_resp.status_code == 400:
+            # League slug may be wrong — retry without league filter and match client-side
+            print("[ODDS-IO] 400 on league=usa-mlb, retrying without league filter")
+            events_resp = requests.get(
+                f"{base}/events?sport=baseball&status=pending,live&apiKey={api_key}",
+                timeout=10,
+            )
+        events_resp.raise_for_status()
+        events = events_resp.json()
+        # If league filter wasn't applied server-side, narrow to MLB-sized rosters client-side
+        # by excluding events whose league slug doesn't contain 'mlb'
+        if any(e.get("league", {}).get("slug", "") for e in events):
+            events = [e for e in events
+                      if "mlb" in e.get("league", {}).get("slug", "").lower()
+                      or "mlb" in e.get("league", {}).get("name", "").lower()]
+        # Filter to the target date. US evening games can fall on the next UTC day
+        # (e.g. 8 PM EDT = 00:xx UTC), so we accept both the target date and target+1.
+        import datetime as _dt
+        if target_date:
+            _td = _dt.date.fromisoformat(target_date)
+        else:
+            _td = _dt.datetime.now().date()
+        _date_a = _td.strftime("%Y-%m-%d")
+        _date_b = (_td + _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        events = [e for e in events
+                  if str(e.get("date", "")).startswith(_date_a)
+                  or str(e.get("date", "")).startswith(_date_b)]
+        # Exclude games that are already completed/finished/settled.
+        _completed_statuses = {"completed", "finished", "final", "closed", "ended", "settled"}
+        events = [e for e in events
+                  if str(e.get("status", "")).lower() not in _completed_statuses]
+        # Deduplicate by (away, home): keep the last occurrence (tends to be live/pending).
+        seen = {}
+        for e in events:
+            key = (str(e.get("away", "")).lower(), str(e.get("home", "")).lower())
+            seen[key] = e
+        events = list(seen.values())
+        print(f"[ODDS-IO] Found {len(events)} active MLB events for {_date_a}")
+        if not events:
+            return {}
+
+        # Step 2: Batch-fetch odds (max 10 eventIds per call — API hard limit)
+        odds_map = {}
+        for batch_start in range(0, len(events), 10):
+            batch = events[batch_start:batch_start + 10]
+            event_ids = ",".join(str(e["id"]) for e in batch)
+            batch_names = [str(e.get("away")) + " @ " + str(e.get("home")) for e in batch]
+            print(f"[ODDS-IO] /odds/multi ({len(batch)} events): {batch_names}")
+            odds_resp = requests.get(
+                f"{base}/odds/multi",
+                params={"apiKey": api_key, "eventIds": event_ids, "bookmakers": bookmakers_str},
+                timeout=10,
+            )
+            print(f"[ODDS-IO] /odds/multi → HTTP {odds_resp.status_code}, {len(odds_resp.text)} bytes")
+            if not odds_resp.ok:
+                print(f"[ODDS-IO] /odds/multi {odds_resp.status_code}: {odds_resp.text[:300]}")
+                continue
+            for game_odds in odds_resp.json():
+                home_name = game_odds.get("home", "")
+                away_name = game_odds.get("away", "")
+                bk_data = game_odds.get("bookmakers", {})
+                if not bk_data:
+                    continue
+                # Use first bookmaker that has an ML market
+                away_price = None
+                home_price = None
+                for bk_markets in bk_data.values():
+                    for market in bk_markets:
+                        if market.get("name") != "ML":
+                            continue
+                        ml_odds = market.get("odds", [{}])[0]
+                        raw_away = ml_odds.get("away")
+                        raw_home = ml_odds.get("home")
+                        if raw_away is not None and raw_home is not None:
+                            away_price = _decimal_to_american(raw_away)
+                            home_price = _decimal_to_american(raw_home)
+                        break
+                    if away_price is not None:
+                        break
+                if away_price is not None and home_price is not None:
+                    print(f"[ODDS-IO]   {away_name} @ {home_name}: {away_price} / {home_price}")
+                    odds_map[(away_name.lower(), home_name.lower())] = (away_price, home_price)
+                else:
+                    print(f"[ODDS-IO]   No ML odds found for {away_name} @ {home_name}")
+
+        _ODDSAPIO_LAST_FETCH = time.time()
+        print(f"[ODDS-IO] Fetched {len(odds_map)} game(s) from Odds-API.io")
+        return odds_map
+    except Exception as e:
+        print(f"[ODDS-IO] Error fetching odds: {e}")
+        return {}
+
+
 def format_moneyline(price):
     """Format an American-odds integer price as a string: +150 or -110."""
     if price is None:
@@ -1524,15 +1804,22 @@ class GameDataWorker(QtCore.QThread):
 
 
 class OddsDataWorker(QtCore.QThread):
-    """Background thread for fetching moneyline odds from The Odds API."""
+    """Background thread for fetching moneyline odds from The Odds API or Odds-API.io."""
     odds_fetched = QtCore.pyqtSignal(dict)  # {(away_lower, home_lower): (away_price, home_price)}
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, provider='the-odds-api', target_date=None):
         super().__init__()
         self.api_key = api_key
+        self.provider = provider
+        self.target_date = target_date  # 'YYYY-MM-DD' or None for today
 
     def run(self):
-        odds = fetch_mlb_odds(self.api_key)
+        if self.provider == 'action-network':
+            odds = fetch_mlb_odds_actionnetwork(self.target_date)
+        elif self.provider == 'odds-api-io':
+            odds = fetch_mlb_odds_oddsapio(self.api_key, self.target_date)
+        else:
+            odds = fetch_mlb_odds(self.api_key)
         self.odds_fetched.emit(odds)
 
 
@@ -1942,7 +2229,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.start_data_fetch()
 
         # Initial odds fetch (if enabled)
-        if self.settings.get('show_moneyline', False) and self.settings.get('odds_api_key', ''):
+        _init_provider = self.settings.get('odds_api_provider', 'action-network')
+        _init_key = (self.settings.get('odds_api_io_key', '') if _init_provider == 'odds-api-io'
+                     else self.settings.get('odds_api_key', ''))
+        if self.settings.get('show_moneyline', False) and (_init_key or _init_provider == 'action-network'):
             self.start_odds_fetch()
             self.odds_timer.start()
 
@@ -1956,6 +2246,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Build intro animation geometry now (window is shown, size is final).
         # Start immediately — data loads in the background while the intro plays.
         self.build_intro_animation()
+
+        # Pre-load all 30 MLB team logos at startup so switching to Tomorrow/Yesterday
+        # views never hits disk — all teams are already cached in TEAM_IMAGE_CACHE.
+        import threading
+        _all_teams = list(MLB_ESPN_ABBR.keys())  # all 30 nicknames
+        _logo_sz = int(self.ticker_height * 0.625)
+        threading.Thread(
+            target=_preload_logos_background,
+            args=(_all_teams, _logo_sz),
+            daemon=True,
+        ).start()
         self.intro_timer_started = True
         QtCore.QTimer.singleShot(0, self._start_intro)
     
@@ -2165,17 +2466,40 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.data_worker.teams_known.connect(self._on_teams_known)
         self.data_worker.start()
 
-    def start_odds_fetch(self):
-        """Start a background odds fetch from The Odds API (non-blocking).
+    def _active_odds_key(self):
+        """Return (provider, api_key) for the currently selected moneyline provider."""
+        provider = self.settings.get('odds_api_provider', 'action-network')
+        if provider == 'action-network':
+            return 'action-network', ''
+        if provider == 'odds-api-io':
+            return provider, self.settings.get('odds_api_io_key', '').strip()
+        return 'the-odds-api', self.settings.get('odds_api_key', '').strip()
+
+    def start_odds_fetch(self, force=False):
+        """Start a background odds fetch (non-blocking).
+        force=True bypasses the minimum inter-fetch interval (use when switching dates).
         Silently skipped if moneyline is disabled or no API key is configured."""
         if not self.settings.get('show_moneyline', False):
             return
-        api_key = self.settings.get('odds_api_key', '').strip()
-        if not api_key:
+        provider, api_key = self._active_odds_key()
+        if not api_key and provider != 'action-network':
             return
         if self._odds_worker and self._odds_worker.isRunning():
             return  # already in flight
-        self._odds_worker = OddsDataWorker(api_key)
+        if force:
+            # Reset the last-fetch timestamp so the interval check passes,
+            # and clear stale cached odds from the previous date view.
+            global _ODDSAPIO_LAST_FETCH
+            _ODDSAPIO_LAST_FETCH = 0.0
+            self._odds_cache = {}
+            self._game_pixmap_cache.clear()
+            self._last_ticker_fp = None
+        # Resolve the effective date being viewed so the odds fetch matches the game list
+        target_date = self._effective_fetch_date()
+        if target_date is None:
+            import datetime
+            target_date = datetime.datetime.now().strftime('%Y-%m-%d')
+        self._odds_worker = OddsDataWorker(api_key, provider, target_date)
         self._odds_worker.odds_fetched.connect(self.on_odds_received)
         self._odds_worker.start()
 
@@ -4276,11 +4600,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Odds timer — start or stop based on current settings
         show_ml = self.settings.get('show_moneyline', False)
-        api_key = self.settings.get('odds_api_key', '').strip()
+        _apply_provider, _apply_key = self._active_odds_key()
+        # If the odds-api.io key changed, invalidate the bookmakers cache so it
+        # is re-fetched with the new key on the next odds poll.
+        if _apply_provider == 'odds-api-io':
+            _cached_bk_key, _ = _ODDSAPIO_BOOKMAKERS_CACHE
+            if _cached_bk_key != _apply_key:
+                _reset_oddsapio_bookmakers_cache()
         # Always update interval in case the user changed it
         _odds_interval_ms = max(1, self.settings.get('odds_refresh_minutes', 15)) * 60 * 1000
         self.odds_timer.setInterval(_odds_interval_ms)
-        if show_ml and api_key:
+        if show_ml and _apply_key:
             if not self.odds_timer.isActive():
                 self.odds_timer.start()
             self.start_odds_fetch()   # immediate refresh when settings change
@@ -4307,6 +4637,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self._pending_today_games = []
             self._pending_today_date = ''
         self.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
+        self.start_odds_fetch(force=True)  # Refresh odds for the new date view
         label = override if override else "auto (today)"
         print(f"[KB] Date view → {label}")
 
@@ -4567,6 +4898,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                         self._pending_today_games = []
                         self._pending_today_date = ''
                     self.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
+                    self.start_odds_fetch(force=True)  # Refresh odds for the new date view
                 return _handler
             act.triggered.connect(_make_date_handler())
 
@@ -5484,7 +5816,8 @@ class TVScheduleWindow(QtWidgets.QWidget):
         self._worker  = None
         self._date_mode = 'today'   # 'today' | 'tomorrow'
 
-        self._ozone_family = load_ozone_font() or load_custom_font()
+        self._ozone_family  = load_ozone_font() or load_custom_font()
+        self._record_family = load_record_font_family() or self._ozone_family
 
         self._build_ui()
         self._position_below_ticker()
@@ -5648,10 +5981,10 @@ class TVScheduleWindow(QtWidgets.QWidget):
 
         name_font = QtGui.QFont(self._ozone_family)
         name_font.setPixelSize(21)
-        info_font = QtGui.QFont(self._ozone_family)
+        info_font = QtGui.QFont(self._record_family)
         info_font.setPixelSize(16)
         time_font = QtGui.QFont(self._ozone_family)
-        time_font.setPixelSize(15)
+        time_font.setPixelSize(19)
 
         COL_NAT  = "#FFD700"
         COL_TV   = "#FFFFFF"   # bright white for TV stations
@@ -5702,7 +6035,7 @@ class TVScheduleWindow(QtWidgets.QWidget):
             time_lbl = QtWidgets.QLabel(g['game_time'])
             time_lbl.setFont(time_font)
             time_lbl.setStyleSheet(f"color:{COL_TIME};")
-            time_lbl.setFixedWidth(72)
+            time_lbl.setFixedWidth(90)
             time_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             time_col.addWidget(time_lbl)
             if g['status'] not in ('', 'Scheduled', 'Pre-Game'):
@@ -5711,7 +6044,7 @@ class TVScheduleWindow(QtWidgets.QWidget):
                 st_lbl = QtWidgets.QLabel(g['status'].upper())
                 st_lbl.setFont(_st_font)
                 st_lbl.setStyleSheet("color:#FF4444;")
-                st_lbl.setFixedWidth(72)
+                st_lbl.setFixedWidth(90)
                 st_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
                 time_col.addWidget(st_lbl)
             hdr.addLayout(time_col)
@@ -5760,7 +6093,7 @@ class TVScheduleWindow(QtWidgets.QWidget):
                 nat_lbl = QtWidgets.QLabel("NATL TV:")
                 nat_lbl.setFont(info_font)
                 nat_lbl.setStyleSheet(f"color:{COL_NAT}; font-weight:bold;")
-                nat_lbl.setFixedWidth(72)
+                nat_lbl.setFixedWidth(90)
                 nat_row.addWidget(nat_lbl)
                 nat_row.addStretch(1)
                 nat_val = QtWidgets.QLabel(join_or_dash(g['national_tv']))
@@ -5777,7 +6110,7 @@ class TVScheduleWindow(QtWidgets.QWidget):
             tv_hdr = QtWidgets.QLabel("TV:")
             tv_hdr.setFont(info_font)
             tv_hdr.setStyleSheet(f"color:{COL_TV}; font-weight:bold;")
-            tv_hdr.setFixedWidth(72)
+            tv_hdr.setFixedWidth(90)
             tv_row.addWidget(tv_hdr)
 
             away_tv_lbl = QtWidgets.QLabel(join_or_dash(g['away_tv']))
@@ -5806,7 +6139,7 @@ class TVScheduleWindow(QtWidgets.QWidget):
             rad_hdr = QtWidgets.QLabel("Radio:")
             rad_hdr.setFont(info_font)
             rad_hdr.setStyleSheet(f"color:{COL_RAD}; font-weight:bold;")
-            rad_hdr.setFixedWidth(72)
+            rad_hdr.setFixedWidth(90)
             rad_row.addWidget(rad_hdr)
 
             away_rad_lbl = QtWidgets.QLabel(join_or_dash(g['away_radio']))
@@ -5855,7 +6188,7 @@ class TVScheduleWindow(QtWidgets.QWidget):
                 sxm_hdr = QtWidgets.QLabel("SiriusXM:")
                 sxm_hdr.setFont(info_font)
                 sxm_hdr.setStyleSheet(f"color:{COL_SXM}; font-weight:bold;")
-                sxm_hdr.setFixedWidth(72)
+                sxm_hdr.setFixedWidth(90)
                 sxm_row.addWidget(sxm_hdr)
 
                 away_sxm_lbl = QtWidgets.QLabel(away_sxm_str)
@@ -6805,21 +7138,29 @@ class SettingsDialog(QtWidgets.QDialog):
         self.scheduled_check.setChecked(self.settings.get('include_scheduled_games', True))
         form_content.addRow("📆  Include Scheduled Games:", self.scheduled_check)
 
-        # Show Game Moneyline (The Odds API)
+        # Show Game Moneyline — provider dropdown + per-provider API keys
         ml_row = QtWidgets.QHBoxLayout()
         self.moneyline_check = QtWidgets.QCheckBox("Enabled")
         self.moneyline_check.setChecked(self.settings.get('show_moneyline', False))
         ml_row.addWidget(self.moneyline_check)
         ml_row.addSpacing(12)
-        ml_row.addWidget(QtWidgets.QLabel("API Key:  "))
-        self.odds_api_key_edit = QtWidgets.QLineEdit()
-        self.odds_api_key_edit.setPlaceholderText("the-odds-api key...")
-        self.odds_api_key_edit.setText(self.settings.get('odds_api_key', ''))
-        self.odds_api_key_edit.setMinimumWidth(180)
-        self.odds_api_key_edit.setToolTip("the-odds-api.com API key for fetching moneyline odds")
-        ml_row.addWidget(self.odds_api_key_edit)
+        ml_row.addWidget(QtWidgets.QLabel("Provider:"))
+        ml_row.addSpacing(4)
+        self.odds_provider_combo = QtWidgets.QComboBox()
+        self.odds_provider_combo.addItem("ActionNetwork — free, no signup (default)", "action-network")
+        self.odds_provider_combo.addItem("The-Odds-API.com — requires API key", "the-odds-api")
+        self.odds_provider_combo.addItem("Odds-API.io — requires API key", "odds-api-io")
+        _saved_provider = self.settings.get('odds_api_provider', 'action-network')
+        _provider_idx = self.odds_provider_combo.findData(_saved_provider)
+        self.odds_provider_combo.setCurrentIndex(max(0, _provider_idx))
+        self.odds_provider_combo.setToolTip(
+            "ActionNetwork requires no key and is the default.\n"
+            "Select another provider only if you have an API key for it."
+        )
+        ml_row.addWidget(self.odds_provider_combo)
         ml_row.addSpacing(12)
-        ml_row.addWidget(QtWidgets.QLabel("Refresh:  "))
+        ml_row.addWidget(QtWidgets.QLabel("Refresh:"))
+        ml_row.addSpacing(4)
         self.odds_refresh_spin = QtWidgets.QSpinBox()
         self.odds_refresh_spin.setRange(1, 120)
         self.odds_refresh_spin.setValue(self.settings.get('odds_refresh_minutes', 15))
@@ -6828,6 +7169,26 @@ class SettingsDialog(QtWidgets.QDialog):
         ml_row.addWidget(self.odds_refresh_spin)
         ml_row.addStretch()
         form_content.addRow("💵  Show Game Moneyline:", ml_row)
+
+        # API key for The Odds API (always stored, shown regardless of active provider)
+        self.odds_api_key_edit = QtWidgets.QLineEdit()
+        self.odds_api_key_edit.setPlaceholderText("Enter The Odds API key (the-odds-api.com)…")
+        self.odds_api_key_edit.setText(self.settings.get('odds_api_key', ''))
+        self.odds_api_key_edit.setToolTip(
+            "API key for api.the-odds-api.com\n"
+            "Saved independently so switching providers won't erase it."
+        )
+        form_content.addRow("  The-Odds-API.com Key (if selected above):", self.odds_api_key_edit)
+
+        # API key for Odds-API.io (always stored, shown regardless of active provider)
+        self.odds_api_io_key_edit = QtWidgets.QLineEdit()
+        self.odds_api_io_key_edit.setPlaceholderText("Enter Odds-API.io key (api.odds-api.io)…")
+        self.odds_api_io_key_edit.setText(self.settings.get('odds_api_io_key', ''))
+        self.odds_api_io_key_edit.setToolTip(
+            "API key for api.odds-api.io\n"
+            "Saved independently so switching providers won't erase it."
+        )
+        form_content.addRow("  Odds-API.io Key (if selected above):", self.odds_api_io_key_edit)
 
         self.yesterday_cutoff_spin = QtWidgets.QSpinBox()
         self.yesterday_cutoff_spin.setRange(0, 240)
@@ -7295,7 +7656,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
         self.settings['show_moneyline'] = self.moneyline_check.isChecked()
+        self.settings['odds_api_provider'] = self.odds_provider_combo.currentData()
         self.settings['odds_api_key'] = self.odds_api_key_edit.text().strip()
+        self.settings['odds_api_io_key'] = self.odds_api_io_key_edit.text().strip()
         self.settings['odds_refresh_minutes'] = self.odds_refresh_spin.value()
         self.settings['yesterday_cutoff_minutes'] = self.yesterday_cutoff_spin.value()
         self.settings['show_team_cities'] = not self.cities_check.isChecked()
@@ -7562,6 +7925,7 @@ def main():
                     window._pending_today_games = []
                     window._pending_today_date = ''
                 window.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
+                window.start_odds_fetch(force=True)  # Refresh odds for the new date view
             return _handler
         _act.triggered.connect(_make_tray_date_handler())
 

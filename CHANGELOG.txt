@@ -1,3 +1,29 @@
+Version 1.4.2 (2026-04-24)
+--------------------------
+NEW FEATURES:
+- Two additional odds providers available in Settings (three total):
+  · Action Network (default, no API key required) — free, no signup needed
+  · The Odds API (api.the-odds-api.com) — requires a free or paid API key
+  · Odds-API.io (api.odds-api.io) — requires an API key; uses your pre-selected
+    bookmakers from the Odds-API.io dashboard for averaged consensus odds
+
+IMPROVEMENTS:
+- Media dialog (TV/Radio/XM Schedule) font updates:
+  · Label column (TV:, Radio:, SiriusXM:, NATL TV:) and all data values now use
+    the Record font — the same proportional font used for standings stats — for
+    improved legibility and visual consistency with other data dialogs
+  · Team names retain the Ozone LED font and team colors (unchanged)
+  · Game time is now slightly larger and rendered in the same blue (#00B3FF) used
+    for game times on the ticker scroll
+- Media dialog label column widened from 72 px to 90 px so "SiriusXM:" is no
+  longer clipped on the right edge
+
+BUG FIXES:
+- "SiriusXM:" label in the Media dialog was truncated — fixed by widening the
+  fixed-width label column to accommodate the longest label at the new font size
+
+------------------------------------------------------------------------------
+
 Version 1.4.0 (2026-04-21)
 --------------------------
 NEW FEATURES:
