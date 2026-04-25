@@ -6514,7 +6514,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
             "background:#d32f2f; color:#fff; border:none; border-radius:6px;"
             " padding:8px 20px; font-size:18px;"
         )
-        close_btn.clicked.connect(self.close)
+        close_btn.clicked.connect(lambda: self.close())
         close_row.addWidget(close_btn)
         close_row.addStretch()
         outer.addLayout(close_row)
