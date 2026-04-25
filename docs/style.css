@@ -418,13 +418,13 @@ a {
 }
 
 .feature-card h3 {
-  font-size: 1.08rem;
+  font-size: 1.2rem;
   margin-bottom: 9px;
   color: var(--text);
 }
 
 .feature-card p {
-  font-family: 'Inter', 'Segoe UI', Tahoma, sans-serif;
+  font-family: 'Outfit', 'Segoe UI', Tahoma, sans-serif;
   font-size: 0.93rem;
   color: var(--text-muted);
   line-height: 1.66;
