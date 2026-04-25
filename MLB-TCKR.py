@@ -4686,7 +4686,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         Q          = quit app entirely
         S          = standings window
         M          = Media: TV & Radio Info window
-        Ctrl+B     = Box Scores window
+        B          = Box Scores window
         .          = settings dialog
         P          = pause/unpause scroll
         G          = refresh games (does not save)
@@ -4726,12 +4726,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
             return
 
         # ── All remaining shortcuts ignore Ctrl unless explicitly checked ────────
-        # Ctrl+B: Box Scores
-        if ctrl and key == 'b':
-            self._open_box_scores_window(game_index=0)
-            print("[KB] Box Scores window opened")
-            return
-        
         if ctrl:
             super().keyPressEvent(event)
             return
@@ -4777,6 +4771,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self._kb_set_date_override("tomorrow")
         elif key == 'm':
             self._open_tv_schedule()
+        elif key == 'b':
+            self._open_box_scores_window(game_index=0)
+            print("[KB] Box Scores window opened")
         elif key == 'f':
             # Toggle FPS overlay — session-only, not written to disk
             self.settings['show_fps_overlay'] = not self.settings.get('show_fps_overlay', False)
@@ -4865,13 +4862,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def mouseDoubleClickEvent(self, event):
         """Handle double-click to open box scores for clicked game."""
         if event.button() == QtCore.Qt.LeftButton:
-            # Find which game was clicked based on x position
-            if hasattr(self, 'game_data') and self.game_data:
-                # Simple heuristic: divide ticker into roughly equal sections per game
-                click_x = event.pos().x()
-                # Each game takes up roughly the same visual space when scrolling
-                # We'll just open the first game's box score for now, or implement
-                # more sophisticated click detection if needed
+            if hasattr(self, 'games') and self.games:
                 self._open_box_scores_window(game_index=0)
     
     def _open_box_scores_window(self, game_index=0):
@@ -6518,8 +6509,6 @@ class BoxScoreWindow(QtWidgets.QWidget):
         close_row.addWidget(close_btn)
         close_row.addStretch()
         outer.addLayout(close_row)
-        
-        self.setStyleSheet("background:#1a1a1a; border:2px solid #333; border-radius:8px;")
     
     def _position_below_ticker(self):
         """Position window below the ticker widget."""
@@ -6550,8 +6539,8 @@ class BoxScoreWindow(QtWidgets.QWidget):
     
     def _load_games_list(self):
         """Load current games list from ticker widget."""
-        if self._ticker_widget is not None and hasattr(self._ticker_widget, 'game_data'):
-            self._games_list = self._ticker_widget.game_data
+        if self._ticker_widget is not None and hasattr(self._ticker_widget, 'games'):
+            self._games_list = self._ticker_widget.games
             if self._games_list:
                 self._current_game_index = max(0, min(self._current_game_index, len(self._games_list) - 1))
                 self._update_nav_buttons()
@@ -6760,6 +6749,29 @@ class BoxScoreWindow(QtWidgets.QWidget):
             self._worker.quit()
             self._worker.wait()
         event.accept()
+
+    def paintEvent(self, event):
+        """Draw solid dark background with border (required with WA_TranslucentBackground)."""
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect()
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 240)))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#00FF44'), 1.5))
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
+        # Scanlines for LED aesthetic
+        scan = QtGui.QColor(0, 0, 0, 35)
+        for y in range(0, rect.height(), 2):
+            painter.fillRect(0, y, rect.width(), 1, scan)
+        painter.end()
+
+    def mousePressEvent(self, event):
+        """Allow dragging the box score window."""
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & QtCore.Qt.LeftButton and hasattr(self, '_drag_pos'):
+            self.move(event.globalPos() - self._drag_pos)
 
 
 class BoxScoreDataWorker(QtCore.QThread):
@@ -8011,7 +8023,7 @@ class SettingsDialog(QtWidgets.QDialog):
             ("D"       , "Show Today's games  (return to auto mode)"),
             ("T"       , "Show Tomorrow's games"),
             ("M"       , "Open Media: TV & Radio Info window"),
-            ("Ctrl+B"  , "Open Box Scores window"),
+            ("B"       , "Open Box Scores window"),
             ("I"       , "Restart Intro animation"),
             ("R"       , "Replay last alert"),
             ("G"       , "Refresh / fetch latest game data"),
