@@ -1,3 +1,46 @@
+Version 1.5.0 (2026-04-25)
+--------------------------
+NEW FEATURES:
+- Box Scores dialog — full MLB.com-style box score for any game in the ticker
+  · Open with: double-click a game in the ticker, press B while ticker is focused,
+    or right-click → "Box Score"
+  · Line score table: inning-by-inning run totals for both teams, plus R/H/E summary
+  · Full hitting table per team: AB / R / H / RBI / HR / BB / K / AVG / OBP / SLG
+    - Substitute batters indented and displayed in a lighter color
+    - Team totals row at bottom
+  · Full pitching table per team: IP / H / R / ER / BB / K / HR / PC-ST / ERA
+    - Team totals row at bottom
+  · Win / Loss / Save pitchers displayed below the line score
+  · Notes sections (Batting, Baserunning, Fielding, Pitching) from official game notes
+  · Real-time auto-refresh while game is in progress
+  · Navigation arrows to move between today's games without closing the window
+  · Linescore data fetched directly from MLB Stats API for reliable inning-by-inning runs
+  · Window is user-resizable via QSizeGrip in the bottom-right corner
+  · Dark LED aesthetic with monospace font; white rounded border matching app style
+  · Supports both today's and yesterday's games
+
+IMPROVEMENTS:
+- Box Score window opens at 1500 × 870 px by default (wide enough to fit both
+  team hitting and pitching tables side-by-side without horizontal scrolling)
+- All font sizes in the box score increased by 1 px for improved readability
+  (body 12 px, column headers / stat cells 11 px, section headers 13 px, notes 11 px)
+- Box Score border color changed from green (#00FF44) to white (#FFFFFF) to match
+  the style of other dialogs in the application
+
+BUG FIXES:
+- Inning run totals were blank — root cause was statsapi.get('linescore') returning
+  an empty structure; fixed by calling the MLB Stats API endpoint directly
+  (https://statsapi.mlb.com/api/v1/game/{gamePk}/linescore) via requests.get()
+- Box Score background was transparent — frameless/translucent window flags now
+  handled correctly with an explicit solid background drawn in paintEvent
+- Double-click on ticker game was not opening the box score — event handler wired
+  correctly to the ticker item delegate
+- Hotkey changed from Ctrl+B to plain B (when ticker is focused) for faster access
+- Box Score window was fixed-size / not resizable — now supports drag-resize via
+  QSizeGrip and edge-hover resize cursors
+
+------------------------------------------------------------------------------
+
 Version 1.4.2 (2026-04-24)
 --------------------------
 NEW FEATURES:

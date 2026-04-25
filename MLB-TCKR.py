@@ -6392,9 +6392,10 @@ class BoxScoreWindow(QtWidgets.QWidget):
         super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setWindowTitle("Box Scores")
-        self.setMinimumWidth(1000)
-        self.setMinimumHeight(600)
+        self.setMinimumWidth(1200)
+        self.setMinimumHeight(700)
         self.setMouseTracking(True)
+        self.resize(1500, 870)
         
         self._ticker_widget = ticker_widget
         self._current_game_index = game_index
@@ -6474,25 +6475,18 @@ class BoxScoreWindow(QtWidgets.QWidget):
         sep.setStyleSheet("color:#444; background:#444; max-height:1px; margin:4px 0;")
         outer.addWidget(sep)
         
-        # Scrollable content area
-        self._scroll = QtWidgets.QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self._scroll.setStyleSheet(
-            "QScrollArea { background:transparent; }"
+        # Content browser — replaces old QScrollArea + QTextEdit approach
+        self._content_browser = QtWidgets.QTextBrowser()
+        self._content_browser.setReadOnly(True)
+        self._content_browser.setOpenExternalLinks(False)
+        self._content_browser.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._content_browser.setStyleSheet(
+            "QTextBrowser { background:#111; border:none; color:#e0e0e0; }"
             "QScrollBar:vertical { background:#1a1a1a; width:8px; border-radius:4px; }"
             "QScrollBar::handle:vertical { background:#444; border-radius:4px; min-height:20px; }"
+            "QScrollBar:horizontal { height:0px; }"
         )
-        self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        
-        self._content_widget = QtWidgets.QWidget()
-        self._content_widget.setStyleSheet("background:transparent;")
-        self._content_layout = QtWidgets.QVBoxLayout(self._content_widget)
-        self._content_layout.setContentsMargins(0, 0, 4, 0)
-        self._content_layout.setSpacing(12)
-        
-        self._scroll.setWidget(self._content_widget)
-        outer.addWidget(self._scroll)
+        outer.addWidget(self._content_browser, 1)
         
         # Close button
         close_row = QtWidgets.QHBoxLayout()
@@ -6509,6 +6503,15 @@ class BoxScoreWindow(QtWidgets.QWidget):
         close_row.addWidget(close_btn)
         close_row.addStretch()
         outer.addLayout(close_row)
+
+        # Size grip for frameless window resizing
+        grip = QtWidgets.QSizeGrip(self)
+        grip.setStyleSheet("background:transparent; width:14px; height:14px;")
+        grip_row = QtWidgets.QHBoxLayout()
+        grip_row.setContentsMargins(0, 0, 0, 0)
+        grip_row.addStretch()
+        grip_row.addWidget(grip)
+        outer.addLayout(grip_row)
     
     def _position_below_ticker(self):
         """Position window below the ticker widget."""
@@ -6598,9 +6601,12 @@ class BoxScoreWindow(QtWidgets.QWidget):
         home_name = game.get('home_name', '')
         self._game_info_lbl.setText(f"{away_name} @ {home_name} - Loading...")
     
-    def _on_box_score_fetched(self, box_score_data):
+    def _on_box_score_fetched(self, json_str):
         """Handle box score data received from worker."""
-        self._box_score_data = box_score_data
+        try:
+            self._box_score_data = json.loads(json_str)
+        except Exception:
+            self._box_score_data = None
         self._render_box_score()
         self._start_refresh_if_live()
     
@@ -6628,118 +6634,412 @@ class BoxScoreWindow(QtWidgets.QWidget):
         self._fetch_box_score()
     
     def _render_box_score(self):
-        """Render the box score data in the content area."""
-        # Clear existing content
-        while self._content_layout.count():
-            item = self._content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
+        """Render the box score as rich HTML in the content browser."""
         if not self._box_score_data:
             self._show_no_data()
             return
-        
+
+        boxscore = self._box_score_data.get('boxscore', {})
+        linescore = self._box_score_data.get('linescore', {})
+
+        if not boxscore:
+            self._show_no_data()
+            return
+
         game = self._games_list[self._current_game_index]
-        away_name = game.get('away_name', 'Away')
-        home_name = game.get('home_name', 'Home')
+        away_name = game.get('away_name', boxscore.get('away', {}).get('team', {}).get('name', 'Away'))
+        home_name = game.get('home_name', boxscore.get('home', {}).get('team', {}).get('name', 'Home'))
         away_score = game.get('away_score', 0)
         home_score = game.get('home_score', 0)
         status = game.get('status', '')
         inning = game.get('current_inning', '')
         inning_state = game.get('inning_state', '')
-        
-        # Update game info label
+
         if status in ['In Progress', 'Live']:
             status_text = f"{inning_state} {inning}" if inning else status
         else:
             status_text = status
-        
+
         self._game_info_lbl.setText(
             f"{away_name} {away_score}  @  {home_name} {home_score}  •  {status_text}"
         )
-        
-        # Parse box score data
-        lines = self._box_score_data.strip().split('\n')
-        
-        # Add batting stats
-        batting_label = QtWidgets.QLabel("BATTING")
-        batting_label.setFont(QtGui.QFont(self._ozone_family, 24))
-        batting_label.setStyleSheet("color:#00FF44; padding:8px 0;")
-        self._content_layout.addWidget(batting_label)
-        
-        batting_text = self._extract_section(lines, 'BATTING', 'PITCHING')
-        if batting_text:
-            batting_widget = self._create_stats_widget(batting_text)
-            self._content_layout.addWidget(batting_widget)
-        
-        # Add pitching stats
-        pitching_label = QtWidgets.QLabel("PITCHING")
-        pitching_label.setFont(QtGui.QFont(self._ozone_family, 24))
-        pitching_label.setStyleSheet("color:#00FF44; padding:8px 0;")
-        self._content_layout.addWidget(pitching_label)
-        
-        pitching_text = self._extract_section(lines, 'PITCHING', None)
-        if pitching_text:
-            pitching_widget = self._create_stats_widget(pitching_text)
-            self._content_layout.addWidget(pitching_widget)
-        
-        self._content_layout.addStretch()
-    
-    def _extract_section(self, lines, start_marker, end_marker):
-        """Extract a section of text between markers."""
-        result = []
+
+        html = self._build_html(boxscore, linescore, away_name, home_name)
+        self._content_browser.setHtml(html)
+        self._content_browser.verticalScrollBar().setValue(0)
+
+    def _build_html(self, boxscore, linescore, away_name, home_name):
+        """Assemble the full HTML for a box score display."""
+        css = """
+        <style>
+        body { background:#111; color:#e0e0e0; font-family:'Courier New',monospace;
+               font-size:12px; margin:8px; }
+        table { border-collapse:collapse; }
+        /* ── line score ── */
+        .ls { width:100%; margin-bottom:6px; }
+        .ls th { color:#666; text-align:center; padding:3px 6px; font-size:11px;
+                 border-bottom:1px solid #333; }
+        .ls td { text-align:center; padding:3px 6px; }
+        .ls .tn { text-align:left; color:#FFD700; font-weight:bold;
+                  padding-left:4px; min-width:160px; }
+        .ls .rhe { color:#00FF44; font-weight:bold; }
+        .ls .inn0 { color:#555; }
+        /* ── decisions ── */
+        .dec { margin:4px 0 8px; font-size:12px; }
+        .win  { color:#00FF44; }
+        .loss { color:#FF4444; }
+        .save { color:#FFD700; }
+        /* ── two-column layout ── */
+        .two { width:100%; }
+        .two td.col { vertical-align:top; padding:0 8px 0 0; width:50%; }
+        .two td.col:last-child { padding:0 0 0 8px; border-left:1px solid #333; }
+        /* ── section headers ── */
+        .sh { color:#00FF44; font-weight:bold; font-size:13px;
+              margin-top:10px; padding-bottom:2px; border-bottom:1px solid #333; }
+        /* ── stats tables ── */
+        .st { width:100%; margin-top:4px; }
+        .st th { color:#666; text-align:right; padding:2px 4px; font-size:11px;
+                 border-bottom:1px solid #2a2a2a; white-space:nowrap; }
+        .st th.lc { text-align:left; }
+        .st td { padding:2px 4px; text-align:right; font-size:11px;
+                 color:#ccc; white-space:nowrap; }
+        .st td.lc { text-align:left; color:#e0e0e0; }
+        .st tr:nth-child(even) { background:#181818; }
+        .st tr.tot { color:#888; border-top:1px solid #2a2a2a; }
+        .pos { color:#666; font-size:10px; }
+        .sub { color:#bbb; }
+        /* ── notes ── */
+        .notes { color:#999; font-size:11px; padding:4px 0; line-height:1.7; }
+        .nl { color:#666; }
+        hr.d { border:none; border-top:1px solid #2a2a2a; margin:8px 0; }
+        </style>
+        """
+
+        parts = [css, '<body>']
+        parts.append(self._build_linescore_html(linescore, away_name, home_name))
+        parts.append(self._build_decisions_html(boxscore))
+
+        away_data = boxscore.get('away', {})
+        home_data = boxscore.get('home', {})
+
+        parts.append('<table class="two"><tr>')
+
+        # Away column
+        parts.append('<td class="col">')
+        parts.append(f'<div class="sh">{away_name} HITTING</div>')
+        parts.append(self._build_batting_table_html(away_data))
+        parts.append(self._build_notes_html(away_data, 'BATTING'))
+        parts.append(self._build_notes_html(away_data, 'BASERUNNING'))
+        parts.append(self._build_notes_html(away_data, 'FIELDING'))
+        parts.append('<hr class="d">')
+        parts.append(f'<div class="sh">{away_name} PITCHING</div>')
+        parts.append(self._build_pitching_table_html(away_data))
+        parts.append(self._build_notes_html(away_data, 'PITCHING'))
+        parts.append('</td>')
+
+        # Home column
+        parts.append('<td class="col">')
+        parts.append(f'<div class="sh">{home_name} HITTING</div>')
+        parts.append(self._build_batting_table_html(home_data))
+        parts.append(self._build_notes_html(home_data, 'BATTING'))
+        parts.append(self._build_notes_html(home_data, 'BASERUNNING'))
+        parts.append(self._build_notes_html(home_data, 'FIELDING'))
+        parts.append('<hr class="d">')
+        parts.append(f'<div class="sh">{home_name} PITCHING</div>')
+        parts.append(self._build_pitching_table_html(home_data))
+        parts.append(self._build_notes_html(home_data, 'PITCHING'))
+        parts.append('</td>')
+
+        parts.append('</tr></table>')
+        parts.append('</body>')
+        return ''.join(parts)
+
+    def _build_linescore_html(self, linescore, away_name, home_name):
+        """Build the innings line score table."""
+        innings = linescore.get('innings', [])
+        totals = linescore.get('teams', {})
+        away_tot = totals.get('away', {})
+        home_tot = totals.get('home', {})
+
+        num_innings = max(9, len(innings))
+
+        # Build per-inning run lookup
+        away_inn: dict = {}
+        home_inn: dict = {}
+        for inn in innings:
+            n = inn.get('num', 0)
+            a = inn.get('away', {})
+            h = inn.get('home', {})
+            away_inn[n] = str(a['runs']) if 'runs' in a else ''
+            home_inn[n] = str(h['runs']) if 'runs' in h else ''
+
+        def tn(name: str) -> str:
+            return name[:22]
+
+        parts = ['<table class="ls">']
+        # Header
+        parts.append('<tr><th></th>')
+        for i in range(1, num_innings + 1):
+            parts.append(f'<th>{i}</th>')
+        parts.append('<th class="rhe">R</th><th class="rhe">H</th><th class="rhe">E</th></tr>')
+
+        # Away row
+        parts.append(f'<tr><td class="tn">{tn(away_name)}</td>')
+        for i in range(1, num_innings + 1):
+            val = away_inn.get(i, '')
+            cls = ' class="inn0"' if val == '' else ''
+            parts.append(f'<td{cls}>{val or "&nbsp;"}</td>')
+        parts.append(
+            f'<td class="rhe">{away_tot.get("runs","")}</td>'
+            f'<td class="rhe">{away_tot.get("hits","")}</td>'
+            f'<td class="rhe">{away_tot.get("errors","")}</td></tr>'
+        )
+
+        # Home row
+        parts.append(f'<tr><td class="tn">{tn(home_name)}</td>')
+        for i in range(1, num_innings + 1):
+            val = home_inn.get(i, '')
+            cls = ' class="inn0"' if val == '' else ''
+            parts.append(f'<td{cls}>{val or "&nbsp;"}</td>')
+        parts.append(
+            f'<td class="rhe">{home_tot.get("runs","")}</td>'
+            f'<td class="rhe">{home_tot.get("hits","")}</td>'
+            f'<td class="rhe">{home_tot.get("errors","")}</td></tr>'
+        )
+
+        parts.append('</table>')
+        return ''.join(parts)
+
+    def _build_decisions_html(self, boxscore):
+        """Build Win / Loss / Save pitcher line."""
+        decisions = boxscore.get('decisions', {})
+        if not decisions:
+            return ''
+
+        def pitcher_line(info_dict, tag, css_cls):
+            if not info_dict:
+                return ''
+            name = info_dict.get('fullName', '')
+            pid = info_dict.get('id', '')
+            pid_key = f'ID{pid}'
+            stats_str = ''
+            for side in ('away', 'home'):
+                side_data = boxscore.get(side, {})
+                player = side_data.get('players', {}).get(pid_key, {})
+                if player:
+                    ps = player.get('stats', {}).get('pitching', {})
+                    if ps:
+                        ip = ps.get('inningsPitched', '0.0')
+                        h = ps.get('hits', 0)
+                        er = ps.get('earnedRuns', 0)
+                        bb = ps.get('baseOnBalls', 0)
+                        k = ps.get('strikeOuts', 0)
+                        stats_str = (
+                            f' {ip}&nbsp;IP,&nbsp;{h}&nbsp;H,&nbsp;'
+                            f'{er}&nbsp;ER,&nbsp;{bb}&nbsp;BB,&nbsp;{k}&nbsp;K'
+                        )
+                    rec = player.get('seasonStats', {}).get('pitching', {})
+                    w = rec.get('wins', '')
+                    lo = rec.get('losses', '')
+                    record = f' ({w}-{lo})' if w != '' else ''
+                    return (
+                        f'<span class="{css_cls}"><b>{tag}:</b>&nbsp;'
+                        f'{name}{record}{stats_str}</span>'
+                    )
+            return f'<span class="{css_cls}"><b>{tag}:</b>&nbsp;{name}</span>'
+
+        items = [
+            pitcher_line(decisions.get('winner'), 'W', 'win'),
+            pitcher_line(decisions.get('loser'), 'L', 'loss'),
+            pitcher_line(decisions.get('save'), 'SV', 'save'),
+        ]
+        items = [x for x in items if x]
+        if not items:
+            return ''
+        return '<div class="dec">' + '&nbsp;&nbsp;&nbsp;'.join(items) + '</div>'
+
+    def _build_batting_table_html(self, team_data):
+        """Build the HTML hitting stats table for one team."""
+        batters = team_data.get('batters', [])
+        players = team_data.get('players', {})
+        ts = team_data.get('teamStats', {}).get('batting', {})
+
+        if not batters:
+            return '<p style="color:#666">No batting data</p>'
+
+        cols = ['AB', 'R', 'H', 'RBI', 'HR', 'BB', 'K', 'AVG', 'OBP', 'SLG']
+
+        def fv(v):
+            return str(v) if v not in ('', None) else '-'
+
+        parts = ['<table class="st"><tr><th class="lc">HITTERS</th>']
+        for c in cols:
+            parts.append(f'<th>{c}</th>')
+        parts.append('</tr>')
+
+        for pid in batters:
+            player = players.get(f'ID{pid}', {})
+            if not player:
+                continue
+            name = player.get('person', {}).get('fullName', f'#{pid}')
+            pos = player.get('position', {}).get('abbreviation', '')
+            stats = player.get('stats', {}).get('batting', {})
+            bo = player.get('battingOrder', '')
+            try:
+                is_sub = bool(bo) and (int(bo) % 100 != 0)
+            except Exception:
+                is_sub = False
+
+            ab = stats.get('atBats', '')
+            r  = stats.get('runs', '')
+            h  = stats.get('hits', '')
+            # skip players with no plate appearances
+            if ab == '' and h == '' and r == '':
+                continue
+
+            name_cell = (
+                f'&nbsp;&nbsp;<span class="sub">{name}</span>'
+                if is_sub else name
+            )
+            pos_span = f'<span class="pos">&nbsp;{pos}</span>' if pos else ''
+
+            parts.append('<tr>')
+            parts.append(f'<td class="lc">{name_cell}{pos_span}</td>')
+            parts.append(
+                f'<td>{fv(ab)}</td><td>{fv(r)}</td><td>{fv(h)}</td>'
+                f'<td>{fv(stats.get("rbi",""))}</td>'
+                f'<td>{fv(stats.get("homeRuns",""))}</td>'
+                f'<td>{fv(stats.get("baseOnBalls",""))}</td>'
+                f'<td>{fv(stats.get("strikeOuts",""))}</td>'
+                f'<td>{fv(stats.get("avg",""))}</td>'
+                f'<td>{fv(stats.get("obp",""))}</td>'
+                f'<td>{fv(stats.get("slg",""))}</td>'
+            )
+            parts.append('</tr>')
+
+        # Team totals row
+        parts.append(
+            '<tr class="tot"><td class="lc">TEAM</td>'
+            f'<td>{fv(ts.get("atBats",""))}</td>'
+            f'<td>{fv(ts.get("runs",""))}</td>'
+            f'<td>{fv(ts.get("hits",""))}</td>'
+            f'<td>{fv(ts.get("rbi",""))}</td>'
+            f'<td>{fv(ts.get("homeRuns",""))}</td>'
+            f'<td>{fv(ts.get("baseOnBalls",""))}</td>'
+            f'<td>{fv(ts.get("strikeOuts",""))}</td>'
+            '<td></td><td></td><td></td></tr>'
+        )
+        parts.append('</table>')
+        return ''.join(parts)
+
+    def _build_pitching_table_html(self, team_data):
+        """Build the HTML pitching stats table for one team."""
+        pitchers = team_data.get('pitchers', [])
+        players = team_data.get('players', {})
+        ts = team_data.get('teamStats', {}).get('pitching', {})
+
+        if not pitchers:
+            return '<p style="color:#666">No pitching data</p>'
+
+        cols = ['IP', 'H', 'R', 'ER', 'BB', 'K', 'HR', 'PC-ST', 'ERA']
+
+        def fv(v):
+            return str(v) if v not in ('', None) else '-'
+
+        parts = ['<table class="st"><tr><th class="lc">PITCHERS</th>']
+        for c in cols:
+            parts.append(f'<th>{c}</th>')
+        parts.append('</tr>')
+
+        for pid in pitchers:
+            player = players.get(f'ID{pid}', {})
+            if not player:
+                continue
+            name = player.get('person', {}).get('fullName', f'#{pid}')
+            ps = player.get('stats', {}).get('pitching', {})
+            if not ps:
+                continue
+            pc = ps.get('pitchesThrown', '')
+            st = ps.get('strikes', '')
+            pc_st = f'{pc}-{st}' if pc != '' and st != '' else fv(pc)
+
+            parts.append('<tr>')
+            parts.append(f'<td class="lc">{name}</td>')
+            parts.append(
+                f'<td>{fv(ps.get("inningsPitched",""))}</td>'
+                f'<td>{fv(ps.get("hits",""))}</td>'
+                f'<td>{fv(ps.get("runs",""))}</td>'
+                f'<td>{fv(ps.get("earnedRuns",""))}</td>'
+                f'<td>{fv(ps.get("baseOnBalls",""))}</td>'
+                f'<td>{fv(ps.get("strikeOuts",""))}</td>'
+                f'<td>{fv(ps.get("homeRuns",""))}</td>'
+                f'<td>{pc_st}</td>'
+                f'<td>{fv(ps.get("era",""))}</td>'
+            )
+            parts.append('</tr>')
+
+        # Team totals
+        parts.append(
+            '<tr class="tot"><td class="lc">TEAM</td>'
+            f'<td>{fv(ts.get("inningsPitched",""))}</td>'
+            f'<td>{fv(ts.get("hits",""))}</td>'
+            f'<td>{fv(ts.get("runs",""))}</td>'
+            f'<td>{fv(ts.get("earnedRuns",""))}</td>'
+            f'<td>{fv(ts.get("baseOnBalls",""))}</td>'
+            f'<td>{fv(ts.get("strikeOuts",""))}</td>'
+            f'<td>{fv(ts.get("homeRuns",""))}</td>'
+            '<td></td><td></td></tr>'
+        )
+        parts.append('</table>')
+        return ''.join(parts)
+
+    def _build_notes_html(self, team_data, section_title):
+        """Build HTML for batting / baserunning / fielding / pitching notes."""
+        info = team_data.get('info', [])
+        if not info:
+            return ''
+
+        target = section_title.upper()
         in_section = False
-        
-        for line in lines:
-            if start_marker in line:
+        items = []
+
+        for entry in info:
+            title = (entry.get('title') or '').strip().upper()
+            label = (entry.get('label') or '').strip()
+            value = (entry.get('value') or '').strip()
+
+            if title == target:
                 in_section = True
                 continue
-            if end_marker and end_marker in line:
-                break
-            if in_section:
-                result.append(line)
-        
-        return '\n'.join(result)
-    
-    def _create_stats_widget(self, text):
-        """Create a widget displaying stats in monospace font."""
-        text_edit = QtWidgets.QTextEdit()
-        text_edit.setReadOnly(True)
-        text_edit.setFont(QtGui.QFont("Courier New", 10))
-        text_edit.setStyleSheet(
-            "background:#222; color:#ddd; border:1px solid #444;"
-            " padding:8px; border-radius:4px;"
-        )
-        text_edit.setPlainText(text)
-        text_edit.setMinimumHeight(200)
-        return text_edit
-    
+            elif title and in_section:
+                break  # next section started
+
+            if in_section and label and value:
+                items.append((label, value))
+
+        if not items:
+            return ''
+
+        parts = ['<div class="notes">']
+        for label, value in items:
+            parts.append(f'<span class="nl">{label}:</span> {value}<br>')
+        parts.append('</div>')
+        return ''.join(parts)
+
     def _show_no_data(self):
         """Show no data available message."""
-        while self._content_layout.count():
-            item = self._content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        no_data_lbl = QtWidgets.QLabel("No box score data available")
-        no_data_lbl.setFont(QtGui.QFont(self._record_family, 20))
-        no_data_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        no_data_lbl.setStyleSheet("color:#888; padding:40px;")
-        self._content_layout.addWidget(no_data_lbl)
+        self._content_browser.setHtml(
+            '<body style="background:#111;color:#888;font-family:monospace;'
+            'padding:40px;text-align:center;">No box score data available</body>'
+        )
         self._game_info_lbl.setText("No game selected")
-    
+
     def _show_error(self):
         """Show error message."""
-        while self._content_layout.count():
-            item = self._content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        error_lbl = QtWidgets.QLabel("Error loading box score data")
-        error_lbl.setFont(QtGui.QFont(self._record_family, 20))
-        error_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        error_lbl.setStyleSheet("color:#d32f2f; padding:40px;")
-        self._content_layout.addWidget(error_lbl)
+        self._content_browser.setHtml(
+            '<body style="background:#111;color:#d32f2f;font-family:monospace;'
+            'padding:40px;text-align:center;">Error loading box score data</body>'
+        )
     
     def closeEvent(self, event):
         """Handle window close event."""
@@ -6756,7 +7056,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         rect = self.rect()
         painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 240)))
-        painter.setPen(QtGui.QPen(QtGui.QColor('#00FF44'), 1.5))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#FFFFFF'), 1.5))
         painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
         # Scanlines for LED aesthetic
         scan = QtGui.QColor(0, 0, 0, 35)
@@ -6784,10 +7084,23 @@ class BoxScoreDataWorker(QtCore.QThread):
         self.game_id = game_id
     
     def run(self):
-        """Fetch box score data using statsapi."""
+        """Fetch structured box score + linescore data using statsapi."""
         try:
-            box_score_text = statsapi.boxscore(self.game_id)
-            self.data_fetched.emit(box_score_text)
+            box_data = statsapi.boxscore_data(self.game_id)
+            # Fetch linescore directly from the MLB Stats API for reliable structure
+            try:
+                ls_url = (
+                    f"https://statsapi.mlb.com/api/v1/game/{self.game_id}/linescore"
+                )
+                ls_resp = requests.get(ls_url, timeout=10)
+                ls_resp.raise_for_status()
+                linescore_data = ls_resp.json()
+                print(f"[BoxScore] Linescore innings: {len(linescore_data.get('innings', []))}")
+            except Exception as ls_err:
+                print(f"[BoxScore] Linescore fetch failed: {ls_err}")
+                linescore_data = {}
+            payload = json.dumps({'boxscore': box_data, 'linescore': linescore_data})
+            self.data_fetched.emit(payload)
         except Exception as e:
             print(f"[BoxScore] Error fetching box score for game {self.game_id}: {e}")
             self.fetch_error.emit()
