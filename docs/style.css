@@ -424,6 +424,7 @@ a {
 }
 
 .feature-card p {
+  font-family: 'Inter', 'Segoe UI', Tahoma, sans-serif;
   font-size: 0.93rem;
   color: var(--text-muted);
   line-height: 1.66;

@@ -3,7 +3,7 @@ Version 1.5.0 (2026-04-25)
 NEW FEATURES:
 - Box Scores dialog — full MLB.com-style box score for any game in the ticker
   · Open with: double-click a game in the ticker, press B while ticker is focused,
-    or right-click → "Box Score"
+    right-click → "Box Score", or tray icon menu → "Box Scores…"
   · Line score table: inning-by-inning run totals for both teams, plus R/H/E summary
   · Full hitting table per team: AB / R / H / RBI / HR / BB / K / AVG / OBP / SLG
     - Substitute batters indented and displayed in a lighter color
@@ -13,19 +13,32 @@ NEW FEATURES:
   · Win / Loss / Save pitchers displayed below the line score
   · Notes sections (Batting, Baserunning, Fielding, Pitching) from official game notes
   · Real-time auto-refresh while game is in progress
-  · Navigation arrows to move between today's games without closing the window
+  · Navigation arrows (◀ / ▶) to move between games without closing the window
   · Linescore data fetched directly from MLB Stats API for reliable inning-by-inning runs
-  · Window is user-resizable via QSizeGrip in the bottom-right corner
+  · Frameless window with rounded corners, solid dark background, and drag-to-move
+    title bar — matching the visual style of the Standings and Media windows
+  · Fully user-resizable: drag any edge or corner to resize; QSizeGrip in bottom-right
+    corner for additional resize handle
   · Dark LED aesthetic with monospace font; white rounded border matching app style
-  · Supports both today's and yesterday's games
+  · Date-aware game list: the box score locks to the date/mode that was active when
+    the window opened (yesterday / today / tomorrow); changing the ticker's date view
+    does not change the displayed game — only pressing ◀ / ▶ or closing and reopening
+    the window picks up the new date
 
 IMPROVEMENTS:
-- Box Score window opens at 1500 × 870 px by default (wide enough to fit both
-  team hitting and pitching tables side-by-side without horizontal scrolling)
+- Box Score window opens at 1050 × 700 px by default; minimum size 860 × 600 px
 - All font sizes in the box score increased by 1 px for improved readability
   (body 12 px, column headers / stat cells 11 px, section headers 13 px, notes 11 px)
 - Box Score border color changed from green (#00FF44) to white (#FFFFFF) to match
   the style of other dialogs in the application
+- Close button changed from red (#d32f2f) to grey (#2a2a2a) to match the Standings
+  and Media windows
+- AVG / OBP / SLG columns in the batting table now correctly show season averages
+  (read from seasonStats.batting instead of game-level stats)
+- ERA column in the pitching table now correctly shows season ERA
+  (read from seasonStats.pitching instead of game-level stats)
+- Tray icon menu now includes "TV/Radio Today…" and "Box Scores…" entries, matching
+  the options available in the right-click context menu
 
 BUG FIXES:
 - Inning run totals were blank — root cause was statsapi.get('linescore') returning
@@ -36,8 +49,10 @@ BUG FIXES:
 - Double-click on ticker game was not opening the box score — event handler wired
   correctly to the ticker item delegate
 - Hotkey changed from Ctrl+B to plain B (when ticker is focused) for faster access
-- Box Score window was fixed-size / not resizable — now supports drag-resize via
-  QSizeGrip and edge-hover resize cursors
+- AVG / OBP / SLG always showed "–" — these are season rate stats stored under
+  player.seasonStats.batting, not player.stats.batting (per-game object); fixed
+- ERA always showed "–" — season ERA stored under player.seasonStats.pitching,
+  not player.stats.pitching; fixed
 
 ------------------------------------------------------------------------------
 

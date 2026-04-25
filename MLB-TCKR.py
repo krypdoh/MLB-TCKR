@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0425.0838
+Date: 2026.0425.1751
 License: GNU AGPLv3
 
 Description:
@@ -1975,6 +1975,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.scroll_offset = 0.0  # Use float for sub-pixel scrolling
         self.ticker_pixmap = None
         self._ticker_tiles = []  # list of (logical_x, pixmap) for one period
+        self._ticker_game_x_ranges = []  # list of (start_x, end_x) per game for click detection
         
         # Performance optimizations
         self.cached_background = None
@@ -3707,11 +3708,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
             tiles.append((x_offset + logo_padding, logo_y, mlb_pm))
             x_offset += logo_segment_w
 
+        game_x_ranges = []
         for pixmap in game_pixmaps:
+            tile_start = x_offset
+            tile_w = int(pixmap.width() / self.dpr)
             tiles.append((x_offset, 0, pixmap))
-            x_offset += int(pixmap.width() / self.dpr) + spacing
+            game_x_ranges.append((tile_start, tile_start + tile_w))
+            x_offset += tile_w + spacing
 
         self._ticker_tiles = tiles
+        self._ticker_game_x_ranges = game_x_ranges
         self._scroll_max_width = float(total_width)
         # Set a truthy sentinel so existing `if self.ticker_pixmap:` checks work.
         # paintEvent uses _ticker_tiles for actual drawing.
@@ -4863,8 +4869,25 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Handle double-click to open box scores for clicked game."""
         if event.button() == QtCore.Qt.LeftButton:
             if hasattr(self, 'games') and self.games:
-                self._open_box_scores_window(game_index=0)
-    
+                game_index = self._game_index_at_x(event.x())
+                self._open_box_scores_window(game_index=game_index)
+
+    def _game_index_at_x(self, click_x):
+        """Return the game index corresponding to logical x position click_x in the ticker."""
+        if not self._ticker_game_x_ranges or not self.games:
+            return 0
+        period = self._scroll_max_width
+        if period <= 0:
+            return 0
+        # Map the click position into one period of the scrolling ticker
+        raw_pos = (click_x + self.scroll_offset) % period
+        if raw_pos < 0:
+            raw_pos += period
+        for i, (start_x, end_x) in enumerate(self._ticker_game_x_ranges):
+            if start_x <= raw_pos <= end_x:
+                return max(0, min(i, len(self.games) - 1))
+        return 0  # clicked on logo or gap — open first game
+
     def _open_box_scores_window(self, game_index=0):
         """Open box scores window for specified game index."""
         if not hasattr(self, '_box_score_win') or \
@@ -4873,6 +4896,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self._box_score_win = BoxScoreWindow(ticker_widget=self, game_index=game_index)
             self._box_score_win.show()
         else:
+            # Window already visible — navigate to the clicked game
+            self._box_score_win.navigate_to_game(game_index)
             self._box_score_win.raise_()
             self._box_score_win.activateWindow()
 
@@ -6391,23 +6416,39 @@ class BoxScoreWindow(QtWidgets.QWidget):
     def __init__(self, ticker_widget=None, game_index=0, parent=None):
         super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setWindowTitle("Box Scores")
-        self.setMinimumWidth(1200)
-        self.setMinimumHeight(700)
+        self.setWindowTitle("Box Score")
+        self.setMinimumWidth(860)
+        self.setMinimumHeight(600)
         self.setMouseTracking(True)
-        self.resize(1500, 870)
-        
+        # Start at a reasonable size; _auto_size_window will expand after first render
+        self.resize(1050, 700)
+        self._drag_pos     = None
+        self._resize_dir   = None
+        self._resize_geom  = None
+        self._resize_start = None
+
         self._ticker_widget = ticker_widget
         self._current_game_index = game_index
         self._games_list = []
         self._box_score_data = None
         self._worker = None
         self._refresh_timer = None
-        
+        self._user_resized = False   # becomes True once user manually resizes
+        self._displayed_game_id = None  # game_id currently shown; used for live banner lookup
+
         self._ozone_family = load_ozone_font() or load_custom_font()
         self._record_family = load_record_font_family() or self._ozone_family
-        
+
+        # Dark LED-style appearance — background is painted in paintEvent
+        self.setStyleSheet(
+            "QWidget { background:transparent; color:#e0e0e0; }"
+            "QScrollBar:vertical { background:#1a1a1a; width:8px; border-radius:4px; }"
+            "QScrollBar::handle:vertical { background:#444; border-radius:4px; min-height:20px; }"
+            "QScrollBar:horizontal { height:0px; }"
+        )
+
         self._build_ui()
+        # Position on same screen as ticker BEFORE loading data
         self._position_below_ticker()
         self._load_games_list()
         self._fetch_box_score()
@@ -6415,7 +6456,23 @@ class BoxScoreWindow(QtWidgets.QWidget):
         # Setup auto-refresh for live games
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.timeout.connect(self._on_refresh_timer)
-        
+
+        # Fast timer to keep banner (bases, outs, players) current from ticker's live data.
+        # _update_game_banner always reads tw.games directly so it sees fresh data even
+        # when the ticker replaces its games list object on each poll cycle.
+        self._banner_timer = QtCore.QTimer(self)
+        self._banner_timer.timeout.connect(self._refresh_banner_and_nav)
+        self._banner_timer.start(2000)  # 2 s — same cadence as ticker updates
+
+    def navigate_to_game(self, game_index):
+        """Navigate the already-open window to a specific game by index."""
+        self._load_games_list()
+        if self._games_list:
+            self._current_game_index = max(0, min(game_index, len(self._games_list) - 1))
+            self._update_nav_buttons()
+            self._update_game_banner()
+            self._fetch_box_score()
+
     def _build_ui(self):
         """Build the main UI layout."""
         outer = QtWidgets.QVBoxLayout(self)
@@ -6462,13 +6519,21 @@ class BoxScoreWindow(QtWidgets.QWidget):
         
         outer.addLayout(title_row)
         
-        # Game info row (teams and score)
-        self._game_info_lbl = QtWidgets.QLabel("Loading game...")
-        self._game_info_lbl.setFont(QtGui.QFont(self._record_family, 18))
-        self._game_info_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        self._game_info_lbl.setStyleSheet("color:#00AAFF; padding:8px 0;")
-        outer.addWidget(self._game_info_lbl)
-        
+        # Live game banner — pixmap rendered by the ticker's own build_game_pixmap,
+        # so it looks exactly like the scrolling ticker tile (same fonts, same layout).
+        _tw = self._ticker_widget
+        _banner_h = _tw.ticker_height if (_tw is not None and hasattr(_tw, 'ticker_height')) else 56
+        self._banner_lbl = QtWidgets.QLabel()
+        self._banner_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self._banner_lbl.setFixedHeight(_banner_h + 14)
+        self._banner_lbl.setStyleSheet(
+            "background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(10,20,34,255),stop:0.4 rgba(7,14,26,255),"
+            "stop:0.7 rgba(5,11,20,255),stop:1 rgba(3,8,16,255));"
+            "border-radius:4px;"
+        )
+        outer.addWidget(self._banner_lbl)
+
         # Divider
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.HLine)
@@ -6487,68 +6552,68 @@ class BoxScoreWindow(QtWidgets.QWidget):
             "QScrollBar:horizontal { height:0px; }"
         )
         outer.addWidget(self._content_browser, 1)
-        
-        # Close button
+
+        # Close button — far right
         close_row = QtWidgets.QHBoxLayout()
         close_row.addStretch()
-        close_btn = QtWidgets.QPushButton("✕  Close")
+        close_btn = QtWidgets.QPushButton("✕  CLOSE")
         close_btn.setFont(QtGui.QFont(self._ozone_family, 18))
         close_btn.setFixedSize(140, 44)
         close_btn.setCursor(QtCore.Qt.PointingHandCursor)
         close_btn.setStyleSheet(
-            "background:#d32f2f; color:#fff; border:none; border-radius:6px;"
-            " padding:8px 20px; font-size:18px;"
+            "QPushButton { background:#2a2a2a; color:#cccccc; border:1px solid #555; border-radius:6px; }"
+            "QPushButton:hover { background:#3a3a3a; color:#ffffff; }"
+            "QPushButton:pressed { background:#111; }"
         )
         close_btn.clicked.connect(lambda: self.close())
         close_row.addWidget(close_btn)
-        close_row.addStretch()
+        # Resize grip in bottom-right corner
+        _grip = QtWidgets.QSizeGrip(self)
+        _grip.setStyleSheet("background:transparent;")
+        close_row.addWidget(_grip, 0, QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight)
         outer.addLayout(close_row)
 
-        # Size grip for frameless window resizing
-        grip = QtWidgets.QSizeGrip(self)
-        grip.setStyleSheet("background:transparent; width:14px; height:14px;")
-        grip_row = QtWidgets.QHBoxLayout()
-        grip_row.setContentsMargins(0, 0, 0, 0)
-        grip_row.addStretch()
-        grip_row.addWidget(grip)
-        outer.addLayout(grip_row)
-    
+    def resizeEvent(self, event):
+        """Track when the user manually resizes the window."""
+        super().resizeEvent(event)
+        # Only flag as user-resized after init is done and data has been rendered
+        if hasattr(self, '_user_resized') and self._box_score_data is not None:
+            self._user_resized = True
+
     def _position_below_ticker(self):
-        """Position window below the ticker widget."""
+        """Position window below the ticker on the same screen as the ticker."""
         if self._ticker_widget is not None:
             ticker_geom = self._ticker_widget.geometry()
             screen = QtWidgets.QApplication.screenAt(ticker_geom.center())
             if screen is None:
                 screen = QtWidgets.QApplication.primaryScreen()
-            avail = screen.availableGeometry()
-            
-            x = (avail.width() - self.width()) // 2
-            y = ticker_geom.bottom() + 10
-            
-            if y + self.height() > avail.height():
-                y = avail.height() - self.height() - 10
-                
-            self.move(x, y)
         else:
-            self._center_on_screen()
-    
-    def _center_on_screen(self):
-        """Center window on primary screen."""
-        screen = QtWidgets.QApplication.primaryScreen()
+            screen = QtWidgets.QApplication.primaryScreen()
         avail = screen.availableGeometry()
-        x = (avail.width() - self.width()) // 2
-        y = (avail.height() - self.height()) // 2
+
+        # Center horizontally on that screen
+        x = avail.left() + (avail.width() - self.width()) // 2
+        if self._ticker_widget is not None:
+            y = self._ticker_widget.geometry().bottom() + 10
+        else:
+            y = avail.top() + (avail.height() - self.height()) // 2
+
+        if y + self.height() > avail.bottom() - 10:
+            y = avail.bottom() - self.height() - 10
+        y = max(y, avail.top())
+
         self.move(x, y)
     
     def _load_games_list(self):
-        """Load current games list from ticker widget."""
-        if self._ticker_widget is not None and hasattr(self._ticker_widget, 'games'):
-            self._games_list = self._ticker_widget.games
-            if self._games_list:
-                self._current_game_index = max(0, min(self._current_game_index, len(self._games_list) - 1))
-                self._update_nav_buttons()
+        """Sync game index bounds against the ticker's current live games list."""
+        live_games = getattr(self._ticker_widget, 'games', []) if self._ticker_widget else []
+        # Update our reference so the rest of the code that uses self._games_list
+        # also sees the latest list (belt-and-suspenders alongside the live property).
+        self._games_list = live_games
+        if live_games:
+            self._current_game_index = max(0, min(self._current_game_index, len(live_games) - 1))
+            self._update_nav_buttons()
         else:
-            self._games_list = []
             self._prev_btn.setEnabled(False)
             self._next_btn.setEnabled(False)
     
@@ -6559,32 +6624,76 @@ class BoxScoreWindow(QtWidgets.QWidget):
         self._next_btn.setEnabled(has_games and self._current_game_index < len(self._games_list) - 1)
     
     def _go_prev_game(self):
-        """Navigate to previous game."""
+        """Navigate to previous game, syncing to ticker's current date first."""
+        self._load_games_list()  # pick up current ticker date on explicit navigation
         if self._current_game_index > 0:
             self._current_game_index -= 1
             self._update_nav_buttons()
+            self._update_game_banner()
             self._fetch_box_score()
-    
+
     def _go_next_game(self):
-        """Navigate to next game."""
+        """Navigate to next game, syncing to ticker's current date first."""
+        self._load_games_list()  # pick up current ticker date on explicit navigation
         if self._current_game_index < len(self._games_list) - 1:
             self._current_game_index += 1
             self._update_nav_buttons()
+            self._update_game_banner()
             self._fetch_box_score()
-    
+
+    def _update_game_banner(self):
+        """Re-render the ticker-style live game banner from current game data."""
+        tw = self._ticker_widget
+        if tw is None:
+            self._banner_lbl.clear()
+            return
+        # Look up the currently-displayed game by game_id in tw.games so the banner
+        # reflects live score/bases/outs even when the ticker replaces its list object.
+        # This intentionally does NOT jump to a different game if the user changed
+        # the ticker's date — the box score stays frozen on the same game.
+        game = None
+        if self._displayed_game_id is not None:
+            for g in getattr(tw, 'games', []):
+                if g.get('game_id') == self._displayed_game_id:
+                    game = g
+                    break
+        # Fallback: use the snapshot (ticker switched dates — game no longer in tw.games)
+        if game is None and self._games_list:
+            idx = self._current_game_index
+            if 0 <= idx < len(self._games_list):
+                game = self._games_list[idx]
+        if game is None:
+            self._banner_lbl.clear()
+            return
+        try:
+            pixmap = tw.build_game_pixmap(game)
+            self._banner_lbl.setPixmap(pixmap)
+        except Exception as e:
+            print(f"[BoxScore] Banner render error: {e}")
+
+    def _refresh_banner_and_nav(self):
+        """Called by banner timer: redraw banner using live game_id lookup."""
+        # Do NOT call _load_games_list here — that would auto-switch the game list
+        # when the user changes the ticker's date.  The list is only refreshed on
+        # explicit next/prev navigation or when the window is opened.
+        self._update_game_banner()
+
     def _fetch_box_score(self):
         """Fetch box score data for current game."""
         if not self._games_list or self._current_game_index >= len(self._games_list):
             self._show_no_data()
             return
-        
+
         game = self._games_list[self._current_game_index]
         game_id = game.get('game_id')
-        
+
         if not game_id:
             self._show_no_data()
             return
-        
+
+        # Track which game is displayed so the banner can find it by id in tw.games
+        self._displayed_game_id = game_id
+
         # Stop any existing worker
         if self._worker is not None and self._worker.isRunning():
             self._worker.quit()
@@ -6596,10 +6705,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         self._worker.fetch_error.connect(self._on_fetch_error)
         self._worker.start()
         
-        # Update title to show loading
-        away_name = game.get('away_name', '')
-        home_name = game.get('home_name', '')
-        self._game_info_lbl.setText(f"{away_name} @ {home_name} - Loading...")
+        self._update_game_banner()
     
     def _on_box_score_fetched(self, json_str):
         """Handle box score data received from worker."""
@@ -6617,15 +6723,17 @@ class BoxScoreWindow(QtWidgets.QWidget):
     
     def _start_refresh_if_live(self):
         """Start auto-refresh timer if game is live."""
-        if not self._games_list or self._current_game_index >= len(self._games_list):
+        # Always read fresh from ticker so we pick up status changes
+        live_games = getattr(self._ticker_widget, 'games', []) if self._ticker_widget else []
+        if not live_games or self._current_game_index >= len(live_games):
             self._refresh_timer.stop()
             return
-        
-        game = self._games_list[self._current_game_index]
+
+        game = live_games[self._current_game_index]
         status = game.get('status', '')
-        
+
         if status in ['In Progress', 'Live']:
-            self._refresh_timer.start(30000)  # 30 seconds
+            self._refresh_timer.start(20000)  # 20 seconds for live games
         else:
             self._refresh_timer.stop()
     
@@ -6660,21 +6768,74 @@ class BoxScoreWindow(QtWidgets.QWidget):
         else:
             status_text = status
 
-        self._game_info_lbl.setText(
-            f"{away_name} {away_score}  @  {home_name} {home_score}  •  {status_text}"
-        )
+        self._update_game_banner()
 
-        html = self._build_html(boxscore, linescore, away_name, home_name)
+        html = self._build_html(
+            boxscore, linescore, away_name, home_name,
+            game_info_list=self._box_score_data.get('game_info', []),
+            officials=self._box_score_data.get('officials', []),
+            game_datetime=game.get('game_datetime', ''),
+        )
         self._content_browser.setHtml(html)
         self._content_browser.verticalScrollBar().setValue(0)
+        QtCore.QTimer.singleShot(50, self._auto_size_window)
 
-    def _build_html(self, boxscore, linescore, away_name, home_name):
+    def _auto_size_window(self):
+        """Resize window to fit content on first render; skip if user has manually resized."""
+        # Respect user's manual resize after first open
+        if self._user_resized:
+            return
+
+        # Use the screen the window is actually on
+        screen = QtWidgets.QApplication.screenAt(self.geometry().center())
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+
+        # Fixed chrome heights: title row + banner + sep + close row + margins
+        _tw = self._ticker_widget
+        banner_h = (_tw.ticker_height if (_tw and hasattr(_tw, 'ticker_height')) else 56) + 14
+        chrome_h = 60 + banner_h + 8 + 8 + 50 + 32  # title + banner + sep + close + margins
+        max_content_h = avail.height() - chrome_h - 40  # 40 px breathing room
+
+        # Ask the document how tall it wants to be at current width
+        doc = self._content_browser.document()
+        doc.setTextWidth(self._content_browser.viewport().width())
+        doc_h = int(doc.size().height()) + 20
+        content_h = min(doc_h, max_content_h)
+
+        target_h = chrome_h + content_h
+        target_h = max(self.minimumHeight(), min(target_h, avail.height() - 40))
+
+        # Keep current width (already reasonable from __init__), cap at screen
+        target_w = min(self.width(), avail.width() - 40)
+        target_w = max(target_w, self.minimumWidth())
+
+        self.resize(target_w, target_h)
+
+        # Re-position: centered horizontally, just below ticker, on the ticker's screen
+        x = avail.left() + (avail.width() - target_w) // 2
+        if _tw is not None:
+            y = _tw.geometry().bottom() + 10
+        else:
+            y = self.y()
+        y = min(y, avail.bottom() - target_h - 10)
+        y = max(y, avail.top())
+        self.move(x, y)
+
+        # Mark as auto-sized; next resize by user will set _user_resized=True
+        self._user_resized = False
+
+    def _build_html(self, boxscore, linescore, away_name, home_name,
+                    game_info_list=None, officials=None, game_datetime=''):
         """Assemble the full HTML for a box score display."""
         css = """
         <style>
         body { background:#111; color:#e0e0e0; font-family:'Courier New',monospace;
                font-size:12px; margin:8px; }
         table { border-collapse:collapse; }
+        /* ── centring wrapper (unused – kept for fallback) ── */
+        .center-wrap { max-width:900px; }
         /* ── line score ── */
         .ls { width:100%; margin-bottom:6px; }
         .ls th { color:#666; text-align:center; padding:3px 6px; font-size:11px;
@@ -6689,13 +6850,23 @@ class BoxScoreWindow(QtWidgets.QWidget):
         .win  { color:#00FF44; }
         .loss { color:#FF4444; }
         .save { color:#FFD700; }
-        /* ── two-column layout ── */
-        .two { width:100%; }
-        .two td.col { vertical-align:top; padding:0 8px 0 0; width:50%; }
-        .two td.col:last-child { padding:0 0 0 8px; border-left:1px solid #333; }
-        /* ── section headers ── */
-        .sh { color:#00FF44; font-weight:bold; font-size:13px;
-              margin-top:10px; padding-bottom:2px; border-bottom:1px solid #333; }
+        /* ── main two-column layout table ── */
+        .layout { width:100%; border-collapse:collapse; }
+        /* section header cells — aligned on the same row */
+        .sh-cell { color:#00FF44; font-weight:bold; font-size:13px;
+                   padding:8px 4px 3px; border-bottom:1px solid #444;
+                   width:50%; vertical-align:bottom; }
+        .sh-cell.div { border-left:1px solid #333; padding-left:10px; }
+        /* sub-section header cells (Batting / Baserunning / Fielding) */
+        .sub-sh-cell { color:#CCCCCC; font-weight:bold; font-size:12px;
+                       padding:6px 4px 1px; border-bottom:1px solid #222;
+                       vertical-align:bottom; }
+        .sub-sh-cell.div { border-left:1px solid #333; padding-left:10px; }
+        /* stat and notes content cells */
+        .stat-col { vertical-align:top; padding:2px 4px 0 0; }
+        .stat-col.div { border-left:1px solid #333; padding-left:10px; }
+        .notes-col { vertical-align:top; padding:0 4px 4px 0; }
+        .notes-col.div { border-left:1px solid #333; padding-left:10px; }
         /* ── stats tables ── */
         .st { width:100%; margin-top:4px; }
         .st th { color:#666; text-align:right; padding:2px 4px; font-size:11px;
@@ -6709,49 +6880,184 @@ class BoxScoreWindow(QtWidgets.QWidget):
         .pos { color:#666; font-size:10px; }
         .sub { color:#bbb; }
         /* ── notes ── */
-        .notes { color:#999; font-size:11px; padding:4px 0; line-height:1.7; }
-        .nl { color:#666; }
+        .notes { color:#ccc; font-size:11px; padding:3px 0 2px; line-height:1.65; }
+        .notes b { color:#e0e0e0; }
+        /* ── game info section ── */
+        .gi { color:#999; font-size:11px; padding:4px 0; line-height:1.3; }
+        .gi b { color:#CCCCCC; }
+        .gi-header { color:#00FF44; font-weight:bold; font-size:13px;
+                     padding:8px 4px 3px; border-bottom:1px solid #444;
+                     display:block; margin-bottom:4px; }
         hr.d { border:none; border-top:1px solid #2a2a2a; margin:8px 0; }
+        .sep-row td { padding:0; }
         </style>
         """
 
-        parts = [css, '<body>']
+        parts = [css, '<body><table align="center" cellpadding="0" cellspacing="0" width="900"><tr><td width="900">']
         parts.append(self._build_linescore_html(linescore, away_name, home_name))
         parts.append(self._build_decisions_html(boxscore))
 
         away_data = boxscore.get('away', {})
         home_data = boxscore.get('home', {})
 
-        parts.append('<table class="two"><tr>')
+        # ── Two-column aligned layout ──────────────────────────────────────────
+        parts.append('<table class="layout" cellpadding="0" cellspacing="0">')
 
-        # Away column
-        parts.append('<td class="col">')
-        parts.append(f'<div class="sh">{away_name} HITTING</div>')
+        # BATTING section — headers on same row
+        parts.append('<tr>')
+        parts.append(f'<td class="sh-cell">{away_name} BATTING</td>')
+        parts.append(f'<td class="sh-cell div">{home_name} BATTING</td>')
+        parts.append('</tr>')
+
+        # Batting stat tables
+        parts.append('<tr>')
+        parts.append('<td class="stat-col">')
         parts.append(self._build_batting_table_html(away_data))
-        parts.append(self._build_notes_html(away_data, 'BATTING'))
-        parts.append(self._build_notes_html(away_data, 'BASERUNNING'))
-        parts.append(self._build_notes_html(away_data, 'FIELDING'))
-        parts.append('<hr class="d">')
-        parts.append(f'<div class="sh">{away_name} PITCHING</div>')
-        parts.append(self._build_pitching_table_html(away_data))
-        parts.append(self._build_notes_html(away_data, 'PITCHING'))
         parts.append('</td>')
-
-        # Home column
-        parts.append('<td class="col">')
-        parts.append(f'<div class="sh">{home_name} HITTING</div>')
+        parts.append('<td class="stat-col div">')
         parts.append(self._build_batting_table_html(home_data))
-        parts.append(self._build_notes_html(home_data, 'BATTING'))
-        parts.append(self._build_notes_html(home_data, 'BASERUNNING'))
-        parts.append(self._build_notes_html(home_data, 'FIELDING'))
-        parts.append('<hr class="d">')
-        parts.append(f'<div class="sh">{home_name} PITCHING</div>')
-        parts.append(self._build_pitching_table_html(home_data))
-        parts.append(self._build_notes_html(home_data, 'PITCHING'))
         parts.append('</td>')
+        parts.append('</tr>')
 
-        parts.append('</tr></table>')
-        parts.append('</body>')
+        # Note sub-sections: Batting / Baserunning / Fielding — headers aligned
+        for section in ('BATTING', 'BASERUNNING', 'FIELDING'):
+            away_items = self._get_notes_items(away_data, section)
+            home_items = self._get_notes_items(home_data, section)
+            if away_items or home_items:
+                label = section.title()
+                parts.append('<tr>')
+                parts.append(f'<td class="sub-sh-cell">{label}</td>')
+                parts.append(f'<td class="sub-sh-cell div">{label}</td>')
+                parts.append('</tr>')
+                parts.append('<tr>')
+                parts.append('<td class="notes-col">')
+                parts.append(self._build_notes_from_items(away_items))
+                parts.append('</td>')
+                parts.append('<td class="notes-col div">')
+                parts.append(self._build_notes_from_items(home_items))
+                parts.append('</td>')
+                parts.append('</tr>')
+
+        # Separator
+        parts.append('<tr class="sep-row"><td colspan="2"><hr class="d"></td></tr>')
+
+        # PITCHING section — headers on same row
+        parts.append('<tr>')
+        parts.append(f'<td class="sh-cell">{away_name} PITCHING</td>')
+        parts.append(f'<td class="sh-cell div">{home_name} PITCHING</td>')
+        parts.append('</tr>')
+
+        # Pitching stat tables
+        parts.append('<tr>')
+        parts.append('<td class="stat-col">')
+        parts.append(self._build_pitching_table_html(away_data))
+        parts.append('</td>')
+        parts.append('<td class="stat-col div">')
+        parts.append(self._build_pitching_table_html(home_data))
+        parts.append('</td>')
+        parts.append('</tr>')
+
+        parts.append('</table>')
+
+        # ── Full-width Game Information section ───────────────────────────────
+        game_info_html = self._build_game_info_html(
+            game_info_list or [], officials or [], game_datetime
+        )
+        if game_info_html:
+            parts.append('<hr class="d">')
+            parts.append(game_info_html)
+
+        parts.append('</td></tr></table></body>')
+        return ''.join(parts)
+
+    def _get_notes_items(self, team_data, section_title):
+        """Return list of (label, value) tuples for a named section in team info."""
+        info = team_data.get('info', [])
+        if not info:
+            return []
+        target = section_title.upper()
+        in_section = False
+        items = []
+        for entry in info:
+            title = (entry.get('title') or '').strip().upper()
+            label = (entry.get('label') or '').strip()
+            value = (entry.get('value') or '').strip()
+            if title == target:
+                in_section = True
+                continue
+            elif title and in_section:
+                break  # next section started
+            if in_section and label and value:
+                items.append((label, value))
+        return items
+
+    def _build_notes_from_items(self, items):
+        """Build HTML from a list of (label, value) tuples."""
+        if not items:
+            return '<div class="notes">&nbsp;</div>'
+        parts = ['<div class="notes">']
+        for label, value in items:
+            parts.append(f'<b>{label}</b> {value}<br>')
+        parts.append('</div>')
+        return ''.join(parts)
+
+    def _build_game_info_html(self, game_info_list, officials, game_datetime=''):
+        """Build the full-width game information section at the bottom."""
+        # Collect display items
+        rows = []
+        has_umpires = False
+        for item in game_info_list:
+            label = (item.get('label') or '').strip()
+            value = (item.get('value') or '').strip()
+            if not label or not value:
+                continue
+            if label.lower() == 'umpires':
+                has_umpires = True
+            rows.append((label, value))
+
+        # Build umpires line from officials if not already in info
+        if officials and not has_umpires:
+            type_abbr = {
+                'Home Plate': 'HP', 'First Base': '1B',
+                'Second Base': '2B', 'Third Base': '3B',
+                'Left Field': 'LF', 'Right Field': 'RF',
+            }
+            ump_parts = []
+            for off in officials:
+                name = off.get('official', {}).get('fullName', '')
+                ump_type = off.get('officialType', '')
+                abbr = type_abbr.get(ump_type, ump_type)
+                if name:
+                    ump_parts.append(f'{abbr}: {name}')
+            if ump_parts:
+                rows.append(('Umpires', '.  '.join(ump_parts) + '.'))
+
+        # Add formatted game date at the very end
+        if game_datetime:
+            try:
+                dt = datetime.datetime.fromisoformat(
+                    game_datetime.replace('Z', '+00:00')
+                )
+                date_str = dt.strftime('%B %-d, %Y')
+            except Exception:
+                try:
+                    date_str = game_datetime[:10]
+                except Exception:
+                    date_str = ''
+            if date_str:
+                rows.append(('', date_str))
+
+        if not rows:
+            return ''
+
+        parts = ['<div class="gi-header">GAME INFORMATION</div>']
+        parts.append('<div class="gi">')
+        for label, value in rows:
+            if label:
+                parts.append(f'<b>{label}:</b> {value}<br>')
+            else:
+                parts.append(f'{value}<br>')
+        parts.append('</div>')
         return ''.join(parts)
 
     def _build_linescore_html(self, linescore, away_name, home_name):
@@ -6897,6 +7203,9 @@ class BoxScoreWindow(QtWidgets.QWidget):
             if ab == '' and h == '' and r == '':
                 continue
 
+            # Season stats (AVG/OBP/SLG are season averages, not per-game)
+            ss = player.get('seasonStats', {}).get('batting', {})
+
             name_cell = (
                 f'&nbsp;&nbsp;<span class="sub">{name}</span>'
                 if is_sub else name
@@ -6911,9 +7220,9 @@ class BoxScoreWindow(QtWidgets.QWidget):
                 f'<td>{fv(stats.get("homeRuns",""))}</td>'
                 f'<td>{fv(stats.get("baseOnBalls",""))}</td>'
                 f'<td>{fv(stats.get("strikeOuts",""))}</td>'
-                f'<td>{fv(stats.get("avg",""))}</td>'
-                f'<td>{fv(stats.get("obp",""))}</td>'
-                f'<td>{fv(stats.get("slg",""))}</td>'
+                f'<td>{fv(ss.get("avg",""))}</td>'
+                f'<td>{fv(ss.get("obp",""))}</td>'
+                f'<td>{fv(ss.get("slg",""))}</td>'
             )
             parts.append('</tr>')
 
@@ -6963,6 +7272,9 @@ class BoxScoreWindow(QtWidgets.QWidget):
             st = ps.get('strikes', '')
             pc_st = f'{pc}-{st}' if pc != '' and st != '' else fv(pc)
 
+            # ERA is a season stat — read from seasonStats, not game stats
+            ss_p = player.get('seasonStats', {}).get('pitching', {})
+
             parts.append('<tr>')
             parts.append(f'<td class="lc">{name}</td>')
             parts.append(
@@ -6974,7 +7286,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
                 f'<td>{fv(ps.get("strikeOuts",""))}</td>'
                 f'<td>{fv(ps.get("homeRuns",""))}</td>'
                 f'<td>{pc_st}</td>'
-                f'<td>{fv(ps.get("era",""))}</td>'
+                f'<td>{fv(ss_p.get("era",""))}</td>'
             )
             parts.append('</tr>')
 
@@ -7032,7 +7344,6 @@ class BoxScoreWindow(QtWidgets.QWidget):
             '<body style="background:#111;color:#888;font-family:monospace;'
             'padding:40px;text-align:center;">No box score data available</body>'
         )
-        self._game_info_lbl.setText("No game selected")
 
     def _show_error(self):
         """Show error message."""
@@ -7045,33 +7356,102 @@ class BoxScoreWindow(QtWidgets.QWidget):
         """Handle window close event."""
         if self._refresh_timer:
             self._refresh_timer.stop()
+        if hasattr(self, '_banner_timer') and self._banner_timer:
+            self._banner_timer.stop()
         if self._worker is not None and self._worker.isRunning():
             self._worker.quit()
             self._worker.wait()
         event.accept()
 
     def paintEvent(self, event):
-        """Draw solid dark background with border (required with WA_TranslucentBackground)."""
+        """Draw frameless rounded dark background with white border and scanlines."""
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         rect = self.rect()
-        painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 240)))
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 255)))
         painter.setPen(QtGui.QPen(QtGui.QColor('#FFFFFF'), 1.5))
         painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
-        # Scanlines for LED aesthetic
         scan = QtGui.QColor(0, 0, 0, 35)
         for y in range(0, rect.height(), 2):
             painter.fillRect(0, y, rect.width(), 1, scan)
         painter.end()
 
+    # ── Resize / drag helpers ────────────────────────────────────────────────
+
+    _RESIZE_MARGIN = 8  # px from edge that activates resize cursor
+
+    def _edge_hit(self, pos):
+        m = self._RESIZE_MARGIN
+        r = self.rect()
+        return (
+            pos.x() < m,
+            pos.y() < m,
+            pos.x() > r.width()  - m,
+            pos.y() > r.height() - m,
+        )
+
+    @staticmethod
+    def _cursor_for_edge(left, top, right, bottom):
+        if (left and top) or (right and bottom):
+            return QtCore.Qt.SizeFDiagCursor
+        if (right and top) or (left and bottom):
+            return QtCore.Qt.SizeBDiagCursor
+        if left or right:
+            return QtCore.Qt.SizeHorCursor
+        if top or bottom:
+            return QtCore.Qt.SizeVerCursor
+        return QtCore.Qt.ArrowCursor
+
     def mousePressEvent(self, event):
-        """Allow dragging the box score window."""
         if event.button() == QtCore.Qt.LeftButton:
-            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            left, top, right, bottom = self._edge_hit(event.pos())
+            if any((left, top, right, bottom)):
+                self._resize_dir   = (left, top, right, bottom)
+                self._resize_geom  = self.frameGeometry()
+                self._resize_start = event.globalPos()
+                self._drag_pos     = None
+            else:
+                self._resize_dir = None
+                self._drag_pos   = event.globalPos() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event):
-        if event.buttons() & QtCore.Qt.LeftButton and hasattr(self, '_drag_pos'):
-            self.move(event.globalPos() - self._drag_pos)
+        if event.buttons() & QtCore.Qt.LeftButton:
+            if self._resize_dir and any(self._resize_dir):
+                left, top, right, bottom = self._resize_dir
+                delta = event.globalPos() - self._resize_start
+                geo   = QtCore.QRect(self._resize_geom)
+                min_w = self.minimumWidth()
+                min_h = self.minimumHeight()
+                if left:
+                    new_l = geo.left() + delta.x()
+                    if geo.right() - new_l >= min_w:
+                        geo.setLeft(new_l)
+                if right:
+                    new_r = geo.right() + delta.x()
+                    if new_r - geo.left() >= min_w:
+                        geo.setRight(new_r)
+                if top:
+                    new_t = geo.top() + delta.y()
+                    if geo.bottom() - new_t >= min_h:
+                        geo.setTop(new_t)
+                if bottom:
+                    new_b = geo.bottom() + delta.y()
+                    if new_b - geo.top() >= min_h:
+                        geo.setBottom(new_b)
+                self.setGeometry(geo)
+            elif self._drag_pos is not None:
+                self.move(event.globalPos() - self._drag_pos)
+        else:
+            # Hover — update cursor to hint which edge/corner can be dragged
+            left, top, right, bottom = self._edge_hit(event.pos())
+            self.setCursor(self._cursor_for_edge(left, top, right, bottom))
+
+    def mouseReleaseEvent(self, event):
+        self._resize_dir   = None
+        self._resize_geom  = None
+        self._resize_start = None
+        self._drag_pos     = None
+        self.setCursor(QtCore.Qt.ArrowCursor)
 
 
 class BoxScoreDataWorker(QtCore.QThread):
@@ -7099,7 +7479,25 @@ class BoxScoreDataWorker(QtCore.QThread):
             except Exception as ls_err:
                 print(f"[BoxScore] Linescore fetch failed: {ls_err}")
                 linescore_data = {}
-            payload = json.dumps({'boxscore': box_data, 'linescore': linescore_data})
+            # Fetch raw boxscore for game-level info (weather, umpires, ABS challenges, etc.)
+            game_info_list = []
+            officials = []
+            try:
+                raw_url = f"https://statsapi.mlb.com/api/v1/game/{self.game_id}/boxscore"
+                raw_resp = requests.get(raw_url, timeout=10)
+                raw_resp.raise_for_status()
+                raw_box = raw_resp.json()
+                game_info_list = raw_box.get('info', [])
+                officials = raw_box.get('officials', [])
+                print(f"[BoxScore] Game info items: {len(game_info_list)}, officials: {len(officials)}")
+            except Exception as raw_err:
+                print(f"[BoxScore] Raw boxscore fetch failed: {raw_err}")
+            payload = json.dumps({
+                'boxscore': box_data,
+                'linescore': linescore_data,
+                'game_info': game_info_list,
+                'officials': officials,
+            })
             self.data_fetched.emit(payload)
         except Exception as e:
             print(f"[BoxScore] Error fetching box score for game {self.game_id}: {e}")
@@ -8710,6 +9108,23 @@ def main():
             window._standings_win.activateWindow()
 
     standings_action.triggered.connect(open_standings)
+
+    tv_action = tray_menu.addAction("TV/Radio Today...")
+    def _tray_open_tv():
+        window._open_tv_schedule()
+    tv_action.triggered.connect(_tray_open_tv)
+
+    box_score_action = tray_menu.addAction("Box Scores...")
+    def _tray_open_box_scores():
+        if not hasattr(window, '_box_score_win') or \
+                window._box_score_win is None or \
+                not window._box_score_win.isVisible():
+            window._box_score_win = BoxScoreWindow(ticker_widget=window)
+            window._box_score_win.show()
+        else:
+            window._box_score_win.raise_()
+            window._box_score_win.activateWindow()
+    box_score_action.triggered.connect(_tray_open_box_scores)
 
     tray_menu.addSeparator()
 
