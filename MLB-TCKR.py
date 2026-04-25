@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 import warnings
 warnings.filterwarnings(
