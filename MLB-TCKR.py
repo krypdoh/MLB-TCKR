@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0425.1751
+Date: 2026.0426.0034
 License: GNU AGPLv3
 
 Description:
@@ -6775,6 +6775,8 @@ class BoxScoreWindow(QtWidgets.QWidget):
             game_info_list=self._box_score_data.get('game_info', []),
             officials=self._box_score_data.get('officials', []),
             game_datetime=game.get('game_datetime', ''),
+            decisions=self._box_score_data.get('decisions', {}),
+            player_notes=self._box_score_data.get('player_notes', {}),
         )
         self._content_browser.setHtml(html)
         self._content_browser.verticalScrollBar().setValue(0)
@@ -6827,7 +6829,8 @@ class BoxScoreWindow(QtWidgets.QWidget):
         self._user_resized = False
 
     def _build_html(self, boxscore, linescore, away_name, home_name,
-                    game_info_list=None, officials=None, game_datetime=''):
+                    game_info_list=None, officials=None, game_datetime='',
+                    decisions=None, player_notes=None):
         """Assemble the full HTML for a box score display."""
         css = """
         <style>
@@ -6882,6 +6885,15 @@ class BoxScoreWindow(QtWidgets.QWidget):
         /* ── notes ── */
         .notes { color:#ccc; font-size:11px; padding:3px 0 2px; line-height:1.65; }
         .notes b { color:#e0e0e0; }
+        /* ── pitcher decision badges ── */
+        .win-dec  { color:#39ff14; font-size:10px; }
+        .loss-dec { color:#ff5555; font-size:10px; }
+        .save-dec { color:#f5d131; font-size:10px; }
+        .hold-dec { color:#8FBCE6; font-size:10px; }
+        .bsv-dec  { color:#FFA550; font-size:10px; }
+        /* ── substitution footnote notes ── */
+        .sub-notes { color:#ccc; font-size:11px; padding:2px 0 4px; line-height:1.65; }
+        .sub-notes .fn { color:#888; }
         /* ── game info section ── */
         .gi { color:#999; font-size:11px; padding:4px 0; line-height:1.3; }
         .gi b { color:#CCCCCC; }
@@ -6910,12 +6922,13 @@ class BoxScoreWindow(QtWidgets.QWidget):
         parts.append('</tr>')
 
         # Batting stat tables
+        _pnotes = player_notes or {}
         parts.append('<tr>')
         parts.append('<td class="stat-col">')
-        parts.append(self._build_batting_table_html(away_data))
+        parts.append(self._build_batting_table_html(away_data, _pnotes))
         parts.append('</td>')
         parts.append('<td class="stat-col div">')
-        parts.append(self._build_batting_table_html(home_data))
+        parts.append(self._build_batting_table_html(home_data, _pnotes))
         parts.append('</td>')
         parts.append('</tr>')
 
@@ -6938,6 +6951,19 @@ class BoxScoreWindow(QtWidgets.QWidget):
                 parts.append('</td>')
                 parts.append('</tr>')
 
+        # Substitution footnote notes (a-Singled for..., 1-Ran for..., etc.)
+        away_sub_notes = self._build_substitution_notes_html(away_data)
+        home_sub_notes = self._build_substitution_notes_html(home_data)
+        if away_sub_notes or home_sub_notes:
+            parts.append('<tr>')
+            parts.append('<td class="notes-col">')
+            parts.append(away_sub_notes or '')
+            parts.append('</td>')
+            parts.append('<td class="notes-col div">')
+            parts.append(home_sub_notes or '')
+            parts.append('</td>')
+            parts.append('</tr>')
+
         # Separator
         parts.append('<tr class="sep-row"><td colspan="2"><hr class="d"></td></tr>')
 
@@ -6947,15 +6973,36 @@ class BoxScoreWindow(QtWidgets.QWidget):
         parts.append(f'<td class="sh-cell div">{home_name} PITCHING</td>')
         parts.append('</tr>')
 
-        # Pitching stat tables
+        # Pitching stat tables — decisions sourced from the full game feed
+        # (same endpoint the ticker uses); passed in via the decisions= parameter.
+        _decs = decisions or {}
         parts.append('<tr>')
         parts.append('<td class="stat-col">')
-        parts.append(self._build_pitching_table_html(away_data))
+        parts.append(self._build_pitching_table_html(away_data, _decs))
         parts.append('</td>')
         parts.append('<td class="stat-col div">')
-        parts.append(self._build_pitching_table_html(home_data))
+        parts.append(self._build_pitching_table_html(home_data, _decs))
         parts.append('</td>')
         parts.append('</tr>')
+
+        # Note sub-sections: Pitching (WP / IBB / etc. when present)
+        for section in ('PITCHING',):
+            away_items = self._get_notes_items(away_data, section)
+            home_items = self._get_notes_items(home_data, section)
+            if away_items or home_items:
+                label = section.title()
+                parts.append('<tr>')
+                parts.append(f'<td class="sub-sh-cell">{label}</td>')
+                parts.append(f'<td class="sub-sh-cell div">{label}</td>')
+                parts.append('</tr>')
+                parts.append('<tr>')
+                parts.append('<td class="notes-col">')
+                parts.append(self._build_notes_from_items(away_items))
+                parts.append('</td>')
+                parts.append('<td class="notes-col div">')
+                parts.append(self._build_notes_from_items(home_items))
+                parts.append('</td>')
+                parts.append('</tr>')
 
         parts.append('</table>')
 
@@ -7000,6 +7047,29 @@ class BoxScoreWindow(QtWidgets.QWidget):
             parts.append(f'<b>{label}</b> {value}<br>')
         parts.append('</div>')
         return ''.join(parts)
+
+    def _build_substitution_notes_html(self, team_data):
+        """Render the team's substitution footnotes (a-Singled for..., 1-Ran for...)."""
+        raw_notes = team_data.get('note', [])
+        if not raw_notes:
+            return ''
+        lines = []
+        for entry in raw_notes:
+            if isinstance(entry, dict):
+                # Possible shapes: {'label':'a','value':'Singled for...'} or {'title':'','value':'a-Singled...'}
+                label = (entry.get('label') or '').strip()
+                value = (entry.get('value') or '').strip()
+                if label and value:
+                    lines.append(f'<span class="fn">{label}-</span>{value}')
+                elif value:
+                    lines.append(value)
+            elif isinstance(entry, str):
+                text = entry.strip()
+                if text:
+                    lines.append(text)
+        if not lines:
+            return ''
+        return '<div class="sub-notes">' + '<br>'.join(lines) + '</div>'
 
     def _build_game_info_html(self, game_info_list, officials, game_datetime=''):
         """Build the full-width game information section at the bottom."""
@@ -7164,8 +7234,12 @@ class BoxScoreWindow(QtWidgets.QWidget):
             return ''
         return '<div class="dec">' + '&nbsp;&nbsp;&nbsp;'.join(items) + '</div>'
 
-    def _build_batting_table_html(self, team_data):
-        """Build the HTML hitting stats table for one team."""
+    def _build_batting_table_html(self, team_data, player_notes=None):
+        """Build the HTML hitting stats table for one team.
+
+        player_notes: dict of {IDxxxxx: 'a'/'b'/'1'...} from the raw boxscore
+                      endpoint (not the game feed); used for substitution letter prefixes.
+        """
         batters = team_data.get('batters', [])
         players = team_data.get('players', {})
         ts = team_data.get('teamStats', {}).get('batting', {})
@@ -7174,6 +7248,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
             return '<p style="color:#666">No batting data</p>'
 
         cols = ['AB', 'R', 'H', 'RBI', 'HR', 'BB', 'K', 'AVG', 'OBP', 'SLG']
+        _notes = player_notes or {}
 
         def fv(v):
             return str(v) if v not in ('', None) else '-'
@@ -7184,7 +7259,8 @@ class BoxScoreWindow(QtWidgets.QWidget):
         parts.append('</tr>')
 
         for pid in batters:
-            player = players.get(f'ID{pid}', {})
+            pid_key = f'ID{pid}'
+            player = players.get(pid_key, {})
             if not player:
                 continue
             name = player.get('person', {}).get('fullName', f'#{pid}')
@@ -7206,10 +7282,21 @@ class BoxScoreWindow(QtWidgets.QWidget):
             # Season stats (AVG/OBP/SLG are season averages, not per-game)
             ss = player.get('seasonStats', {}).get('batting', {})
 
-            name_cell = (
-                f'&nbsp;&nbsp;<span class="sub">{name}</span>'
-                if is_sub else name
-            )
+            # Footnote letter from raw boxscore (e.g. 'a', 'b', '1', '2')
+            # Take only the first character in case either source returns full text.
+            _raw_note = (_notes.get(pid_key) or player.get('note', '') or '').strip()
+            fn = _raw_note[0] if _raw_note else ''
+            if fn:
+                fn_html = f'<span class="fn-note" style="color:#888;font-size:10px;">{fn}-</span>'
+                if is_sub:
+                    name_cell = f'&nbsp;&nbsp;{fn_html}<span class="sub">{name}</span>'
+                else:
+                    name_cell = f'{fn_html}{name}'
+            else:
+                name_cell = (
+                    f'&nbsp;&nbsp;<span class="sub">{name}</span>'
+                    if is_sub else name
+                )
             pos_span = f'<span class="pos">&nbsp;{pos}</span>' if pos else ''
 
             parts.append('<tr>')
@@ -7241,7 +7328,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         parts.append('</table>')
         return ''.join(parts)
 
-    def _build_pitching_table_html(self, team_data):
+    def _build_pitching_table_html(self, team_data, decisions=None):
         """Build the HTML pitching stats table for one team."""
         pitchers = team_data.get('pitchers', [])
         players = team_data.get('players', {})
@@ -7255,6 +7342,23 @@ class BoxScoreWindow(QtWidgets.QWidget):
         def fv(v):
             return str(v) if v not in ('', None) else '-'
 
+        # Build decision lookup: player_id → ('W'|'L'|'SV', css_class)
+        # Keys normalised to int to guard against string/int mismatches after
+        # JSON round-trip or differing API endpoint types.
+        dec_map: dict = {}
+        if decisions:
+            winner = decisions.get('winner') or {}
+            loser  = decisions.get('loser')  or {}
+            save   = decisions.get('save')   or {}
+            try:
+                if winner.get('id'):
+                    dec_map[int(winner['id'])] = ('W', 'win-dec')
+                if loser.get('id'):
+                    dec_map[int(loser['id'])] = ('L', 'loss-dec')
+                if save.get('id'):
+                    dec_map[int(save['id'])] = ('SV', 'save-dec')
+            except (TypeError, ValueError):
+                pass
         parts = ['<table class="st"><tr><th class="lc">PITCHERS</th>']
         for c in cols:
             parts.append(f'<th>{c}</th>')
@@ -7275,8 +7379,38 @@ class BoxScoreWindow(QtWidgets.QWidget):
             # ERA is a season stat — read from seasonStats, not game stats
             ss_p = player.get('seasonStats', {}).get('pitching', {})
 
+            # Determine decision/role badge
+            role_html = ''
+            try:
+                dec = dec_map.get(int(pid))
+            except (TypeError, ValueError):
+                dec = None
+            if dec:
+                role, css = dec
+                if role in ('W', 'L'):
+                    w  = ss_p.get('wins',   '')
+                    lo = ss_p.get('losses', '')
+                    rec = f'{w}-{lo}' if w != '' else ''
+                    badge = f'({role}, {rec})' if rec else f'({role})'
+                elif role == 'SV':
+                    sv = ss_p.get('saves', '')
+                    badge = f'(SV, {sv})' if sv != '' else '(SV)'
+                else:
+                    badge = f'({role})'
+                role_html = f' <span class="{css}">{badge}</span>'
+            else:
+                # Holds and blown saves from per-game stats
+                game_holds  = int(ps.get('holds', 0)      or 0)
+                game_bsv    = int(ps.get('blownSaves', 0) or 0)
+                if game_holds > 0:
+                    szn_holds = ss_p.get('holds', game_holds)
+                    role_html = f' <span class="hold-dec">(H, {szn_holds})</span>'
+                elif game_bsv > 0:
+                    szn_bsv = ss_p.get('blownSaves', game_bsv)
+                    role_html = f' <span class="bsv-dec">(BSV, {szn_bsv})</span>'
+
             parts.append('<tr>')
-            parts.append(f'<td class="lc">{name}</td>')
+            parts.append(f'<td class="lc">{name}{role_html}</td>')
             parts.append(
                 f'<td>{fv(ps.get("inningsPitched",""))}</td>'
                 f'<td>{fv(ps.get("hits",""))}</td>'
@@ -7467,6 +7601,25 @@ class BoxScoreDataWorker(QtCore.QThread):
         """Fetch structured box score + linescore data using statsapi."""
         try:
             box_data = statsapi.boxscore_data(self.game_id)
+            # Fetch the full game feed for decisions (same call the ticker uses).
+            # statsapi.boxscore_data() uses a fields filter that omits liveData.decisions,
+            # and the /boxscore endpoint doesn't reliably include them either.
+            raw_decisions = {}
+            raw_player_notes: dict = {}
+            try:
+                game_feed = statsapi.get('game', {'gamePk': self.game_id})
+                live_data = game_feed.get('liveData', {})
+                raw_decisions = live_data.get('decisions', {})
+                # Player substitution footnote letters live in liveData.boxscore.teams.{side}.players.{ID}.note
+                for _t in ('home', 'away'):
+                    _players = (live_data.get('boxscore', {})
+                                .get('teams', {}).get(_t, {}).get('players', {}))
+                    for _pid_str, _pd in _players.items():
+                        _note = (_pd.get('note') or '').strip()
+                        if _note:
+                            raw_player_notes[_pid_str] = _note[0]
+            except Exception as feed_err:
+                print(f"[BoxScore] Game feed fetch failed: {feed_err}")
             # Fetch linescore directly from the MLB Stats API for reliable structure
             try:
                 ls_url = (
@@ -7475,7 +7628,6 @@ class BoxScoreDataWorker(QtCore.QThread):
                 ls_resp = requests.get(ls_url, timeout=10)
                 ls_resp.raise_for_status()
                 linescore_data = ls_resp.json()
-                print(f"[BoxScore] Linescore innings: {len(linescore_data.get('innings', []))}")
             except Exception as ls_err:
                 print(f"[BoxScore] Linescore fetch failed: {ls_err}")
                 linescore_data = {}
@@ -7489,7 +7641,9 @@ class BoxScoreDataWorker(QtCore.QThread):
                 raw_box = raw_resp.json()
                 game_info_list = raw_box.get('info', [])
                 officials = raw_box.get('officials', [])
-                print(f"[BoxScore] Game info items: {len(game_info_list)}, officials: {len(officials)}")
+                # If game feed decisions came back empty, try raw boxscore as fallback
+                if not raw_decisions:
+                    raw_decisions = raw_box.get('decisions', {})
             except Exception as raw_err:
                 print(f"[BoxScore] Raw boxscore fetch failed: {raw_err}")
             payload = json.dumps({
@@ -7497,6 +7651,8 @@ class BoxScoreDataWorker(QtCore.QThread):
                 'linescore': linescore_data,
                 'game_info': game_info_list,
                 'officials': officials,
+                'decisions': raw_decisions,
+                'player_notes': raw_player_notes,
             })
             self.data_fetched.emit(payload)
         except Exception as e:

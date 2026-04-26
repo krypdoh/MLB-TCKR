@@ -1,4 +1,4 @@
-Version 1.5.0 (2026-04-25)
+Version 1.5.0 (2026-04-26)
 --------------------------
 NEW FEATURES:
 - Box Scores dialog — full MLB.com-style box score for any game in the ticker
@@ -53,6 +53,20 @@ BUG FIXES:
   player.seasonStats.batting, not player.stats.batting (per-game object); fixed
 - ERA always showed "–" — season ERA stored under player.seasonStats.pitching,
   not player.stats.pitching; fixed
+- Substitution footnote letters (a–, b–, 1–, etc.) were not appearing next to
+  player names in the batting table — root cause was that both statsapi.boxscore_data()
+  and the raw /boxscore endpoint omit the per-player note field; fixed by fetching the
+  full game feed via statsapi.get('game', {gamePk}) and reading note letters from
+  liveData.boxscore.teams.{side}.players.{ID}.note (the same source the ticker banner
+  already uses), then threading them through the BoxScoreDataWorker payload to the
+  batting table renderer
+- Pitcher W / L / SV decisions were not displayed in the pitching table — root cause
+  was an endpoint mismatch: statsapi.boxscore_data() uses a fields filter that strips
+  liveData.decisions, and the raw /boxscore endpoint also returned empty decisions;
+  fixed by reading decisions from liveData.decisions in the same full game feed fetch
+  (statsapi.get('game', {gamePk})) that the ticker banner already uses successfully;
+  player ID lookups normalised to int to prevent string/int type mismatches after
+  JSON round-trip
 
 ------------------------------------------------------------------------------
 
