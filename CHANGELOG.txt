@@ -39,8 +39,23 @@ IMPROVEMENTS:
   (read from seasonStats.pitching instead of game-level stats)
 - Tray icon menu now includes "TV/Radio Today…" and "Box Scores…" entries, matching
   the options available in the right-click context menu
+- All box score HTML font sizes increased a further 1 px (body 13 px, section /
+  sub-section headers 14 px, stat-column headers 12 px, notes / position labels 11–12 px)
+- BATTING / BASERUNNING / FIELDING sub-section header cells now match the style of
+  the PITCHING and GAME INFORMATION headers: green (#00FF44), 14 px bold, #444 bottom
+  border — previously they used an unstyled plain-text appearance
+- Substitution footnotes repositioned: now appear directly below the TEAM totals row
+  and above the BATTING / BASERUNNING / FIELDING sub-section headers; a 6 px spacer
+  row separates the TEAM totals from the footnotes for visual clarity
 
 BUG FIXES:
+- Notes sections (BATTING / BASERUNNING / FIELDING) were blank — `_get_notes_items()`
+  was reading flat `label` / `value` keys directly from top-level `info` entries, but
+  the MLB Stats API nests those fields inside a `fieldList` array within each section
+  object; fixed by iterating `entry['fieldList']` instead of the top-level entry
+- `NameError: name 'Batting' is not defined` on close — the close button signal was
+  accidentally wired to the bare name `Batting` instead of `lambda: self.close()`;
+  fixed by restoring the correct lambda connection
 - Inning run totals were blank — root cause was statsapi.get('linescore') returning
   an empty structure; fixed by calling the MLB Stats API endpoint directly
   (https://statsapi.mlb.com/api/v1/game/{gamePk}/linescore) via requests.get()

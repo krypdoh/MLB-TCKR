@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0426.0110
+Date: 2026.0426.0919
 License: GNU AGPLv3
 
 Description:
@@ -6565,7 +6565,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
             "QPushButton:hover { background:#3a3a3a; color:#ffffff; }"
             "QPushButton:pressed { background:#111; }"
         )
-        close_btn.clicked.connect(lambda: self.close())
+        close_btn.clicked.connect(lambda: self.close()) # type: ignore
         close_row.addWidget(close_btn)
         # Resize grip in bottom-right corner
         _grip = QtWidgets.QSizeGrip(self)
@@ -6835,13 +6835,13 @@ class BoxScoreWindow(QtWidgets.QWidget):
         css = """
         <style>
         body { background:#111; color:#e0e0e0; font-family:'Courier New',monospace;
-               font-size:12px; margin:8px; }
+               font-size:13px; margin:8px; }
         table { border-collapse:collapse; }
         /* ── centring wrapper (unused – kept for fallback) ── */
         .center-wrap { max-width:900px; }
         /* ── line score ── */
         .ls { width:100%; margin-bottom:6px; }
-        .ls th { color:#666; text-align:center; padding:3px 6px; font-size:11px;
+        .ls th { color:#666; text-align:center; padding:3px 6px; font-size:12px;
                  border-bottom:1px solid #333; }
         .ls td { text-align:center; padding:3px 6px; }
         .ls .tn { text-align:left; color:#FFD700; font-weight:bold;
@@ -6849,20 +6849,20 @@ class BoxScoreWindow(QtWidgets.QWidget):
         .ls .rhe { color:#00FF44; font-weight:bold; }
         .ls .inn0 { color:#555; }
         /* ── decisions ── */
-        .dec { margin:4px 0 8px; font-size:12px; }
+        .dec { margin:4px 0 8px; font-size:13px; }
         .win  { color:#00FF44; }
         .loss { color:#FF4444; }
         .save { color:#FFD700; }
         /* ── main two-column layout table ── */
         .layout { width:100%; border-collapse:collapse; }
         /* section header cells — aligned on the same row */
-        .sh-cell { color:#00FF44; font-weight:bold; font-size:13px;
+        .sh-cell { color:#00FF44; font-weight:bold; font-size:14px;
                    padding:8px 4px 3px; border-bottom:1px solid #444;
                    width:50%; vertical-align:bottom; }
         .sh-cell.div { border-left:1px solid #333; padding-left:10px; }
         /* sub-section header cells (Batting / Baserunning / Fielding) */
-        .sub-sh-cell { color:#CCCCCC; font-weight:bold; font-size:12px;
-                       padding:6px 4px 1px; border-bottom:1px solid #222;
+        .sub-sh-cell { color:#00FF44; font-weight:bold; font-size:14px;
+                       padding:6px 4px 1px; border-bottom:1px solid #444;
                        vertical-align:bottom; }
         .sub-sh-cell.div { border-left:1px solid #333; padding-left:10px; }
         /* stat and notes content cells */
@@ -6872,32 +6872,32 @@ class BoxScoreWindow(QtWidgets.QWidget):
         .notes-col.div { border-left:1px solid #333; padding-left:10px; }
         /* ── stats tables ── */
         .st { width:100%; margin-top:4px; }
-        .st th { color:#666; text-align:right; padding:2px 4px; font-size:11px;
+        .st th { color:#666; text-align:right; padding:2px 4px; font-size:12px;
                  border-bottom:1px solid #2a2a2a; white-space:nowrap; }
         .st th.lc { text-align:left; }
-        .st td { padding:2px 4px; text-align:right; font-size:11px;
+        .st td { padding:2px 4px; text-align:right; font-size:12px;
                  color:#ccc; white-space:nowrap; }
         .st td.lc { text-align:left; color:#e0e0e0; }
         .st tr:nth-child(even) { background:#181818; }
         .st tr.tot { color:#888; border-top:1px solid #2a2a2a; }
-        .pos { color:#666; font-size:10px; }
+        .pos { color:#666; font-size:11px; }
         .sub { color:#bbb; }
         /* ── notes ── */
-        .notes { color:#ccc; font-size:11px; padding:3px 0 2px; line-height:1.65; }
+        .notes { color:#ccc; font-size:12px; padding:3px 0 2px; line-height:1.65; }
         .notes b { color:#e0e0e0; }
         /* ── pitcher decision badges ── */
-        .win-dec  { color:#39ff14; font-size:10px; }
-        .loss-dec { color:#ff5555; font-size:10px; }
-        .save-dec { color:#f5d131; font-size:10px; }
-        .hold-dec { color:#8FBCE6; font-size:10px; }
-        .bsv-dec  { color:#FFA550; font-size:10px; }
+        .win-dec  { color:#39ff14; font-size:11px; }
+        .loss-dec { color:#ff5555; font-size:11px; }
+        .save-dec { color:#f5d131; font-size:11px; }
+        .hold-dec { color:#8FBCE6; font-size:11px; }
+        .bsv-dec  { color:#FFA550; font-size:11px; }
         /* ── substitution footnote notes ── */
-        .sub-notes { color:#ccc; font-size:11px; padding:2px 0 4px; line-height:1.65; }
+        .sub-notes { color:#ccc; font-size:12px; padding:2px 0 4px; line-height:1.65; }
         .sub-notes .fn { color:#888; }
         /* ── game info section ── */
-        .gi { color:#999; font-size:11px; padding:4px 0; line-height:1.3; }
+        .gi { color:#999; font-size:12px; padding:4px 0; line-height:1.3; }
         .gi b { color:#CCCCCC; }
-        .gi-header { color:#00FF44; font-weight:bold; font-size:13px;
+        .gi-header { color:#00FF44; font-weight:bold; font-size:14px;
                      padding:8px 4px 3px; border-bottom:1px solid #444;
                      display:block; margin-bottom:4px; }
         hr.d { border:none; border-top:1px solid #2a2a2a; margin:8px 0; }
@@ -6932,6 +6932,23 @@ class BoxScoreWindow(QtWidgets.QWidget):
         parts.append('</td>')
         parts.append('</tr>')
 
+        # Blank spacer row after TEAM totals
+        parts.append('<tr><td colspan="2" style="height:6px;"></td></tr>')
+
+        # Substitution footnote notes (a-Singled for..., 1-Ran for..., etc.)
+        # Placed directly below TEAM totals, above Batting/Baserunning/Fielding notes.
+        away_sub_notes = self._build_substitution_notes_html(away_data)
+        home_sub_notes = self._build_substitution_notes_html(home_data)
+        if away_sub_notes or home_sub_notes:
+            parts.append('<tr>')
+            parts.append('<td class="notes-col">')
+            parts.append(away_sub_notes or '')
+            parts.append('</td>')
+            parts.append('<td class="notes-col div">')
+            parts.append(home_sub_notes or '')
+            parts.append('</td>')
+            parts.append('</tr>')
+
         # Note sub-sections: Batting / Baserunning / Fielding — headers aligned
         for section in ('BATTING', 'BASERUNNING', 'FIELDING'):
             away_items = self._get_notes_items(away_data, section)
@@ -6950,19 +6967,6 @@ class BoxScoreWindow(QtWidgets.QWidget):
                 parts.append(self._build_notes_from_items(home_items))
                 parts.append('</td>')
                 parts.append('</tr>')
-
-        # Substitution footnote notes (a-Singled for..., 1-Ran for..., etc.)
-        away_sub_notes = self._build_substitution_notes_html(away_data)
-        home_sub_notes = self._build_substitution_notes_html(home_data)
-        if away_sub_notes or home_sub_notes:
-            parts.append('<tr>')
-            parts.append('<td class="notes-col">')
-            parts.append(away_sub_notes or '')
-            parts.append('</td>')
-            parts.append('<td class="notes-col div">')
-            parts.append(home_sub_notes or '')
-            parts.append('</td>')
-            parts.append('</tr>')
 
         # Separator
         parts.append('<tr class="sep-row"><td colspan="2"><hr class="d"></td></tr>')
@@ -7006,6 +7010,12 @@ class BoxScoreWindow(QtWidgets.QWidget):
 
         parts.append('</table>')
 
+        # ── Full-width Pitching notes (WP, IBB, HBP, Pitches-strikes, etc.) ──
+        pitching_notes_html = self._build_game_pitching_notes_html(game_info_list or [])
+        if pitching_notes_html:
+            parts.append('<hr class="d">')
+            parts.append(pitching_notes_html)
+
         # ── Full-width Game Information section ───────────────────────────────
         game_info_html = self._build_game_info_html(
             game_info_list or [], officials or [], game_datetime
@@ -7018,25 +7028,26 @@ class BoxScoreWindow(QtWidgets.QWidget):
         return ''.join(parts)
 
     def _get_notes_items(self, team_data, section_title):
-        """Return list of (label, value) tuples for a named section in team info."""
+        """Return list of (label, value) tuples for a named section in team info.
+
+        The statsapi boxscore_data() structure is:
+          info = [{'title': 'BATTING', 'fieldList': [{'label': '2B', 'value': '...'}, ...]}, ...]
+        """
         info = team_data.get('info', [])
         if not info:
             return []
         target = section_title.upper()
-        in_section = False
-        items = []
         for entry in info:
             title = (entry.get('title') or '').strip().upper()
-            label = (entry.get('label') or '').strip()
-            value = (entry.get('value') or '').strip()
             if title == target:
-                in_section = True
-                continue
-            elif title and in_section:
-                break  # next section started
-            if in_section and label and value:
-                items.append((label, value))
-        return items
+                items = []
+                for field in entry.get('fieldList', []):
+                    label = (field.get('label') or '').strip()
+                    value = (field.get('value') or '').strip()
+                    if label and value:
+                        items.append((label, value))
+                return items
+        return []
 
     def _build_notes_from_items(self, items):
         """Build HTML from a list of (label, value) tuples."""
@@ -7071,9 +7082,45 @@ class BoxScoreWindow(QtWidgets.QWidget):
             return ''
         return '<div class="sub-notes">' + '<br>'.join(lines) + '</div>'
 
+    @staticmethod
+    def _is_pitching_info_label(label: str) -> bool:
+        """Return True if this game_info label belongs in the Pitching notes section."""
+        lc = label.lower().strip()
+        _exact = frozenset({'wp', 'balk', 'balks', 'ibb', 'hbp', 'ejections',
+                            'disengagement violations', 'disengagement violation'})
+        if lc in _exact:
+            return True
+        _starts = (
+            'pitches-strikes', 'pitches/strikes',
+            'groundouts-flyouts', 'ground balls-fly balls',
+            'called strikes', 'first-pitch strikes',
+            'batters faced', 'inherited runners',
+            'game score', 'disengagement',
+        )
+        return any(lc.startswith(s) for s in _starts)
+
+    def _build_game_pitching_notes_html(self, game_info_list):
+        """Build a full-width Pitching notes section from game-level info items."""
+        rows = []
+        for item in game_info_list:
+            label = (item.get('label') or '').strip()
+            value = (item.get('value') or '').strip()
+            if not label or not value:
+                continue
+            if self._is_pitching_info_label(label):
+                rows.append((label, value))
+        if not rows:
+            return ''
+        parts = ['<div class="gi-header">Pitching</div>']
+        parts.append('<div class="gi">')
+        for label, value in rows:
+            parts.append(f'<b>{label}:</b> {value}<br>')
+        parts.append('</div>')
+        return ''.join(parts)
+
     def _build_game_info_html(self, game_info_list, officials, game_datetime=''):
         """Build the full-width game information section at the bottom."""
-        # Collect display items
+        # Collect display items (pitching-specific labels are rendered separately)
         rows = []
         has_umpires = False
         for item in game_info_list:
@@ -7081,6 +7128,8 @@ class BoxScoreWindow(QtWidgets.QWidget):
             value = (item.get('value') or '').strip()
             if not label or not value:
                 continue
+            if self._is_pitching_info_label(label):
+                continue  # shown in Pitching notes section instead
             if label.lower() == 'umpires':
                 has_umpires = True
             rows.append((label, value))
@@ -7120,7 +7169,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         if not rows:
             return ''
 
-        parts = ['<div class="gi-header">GAME INFORMATION</div>']
+        parts = ['<div class="gi-header">Game Information</div>']
         parts.append('<div class="gi">')
         for label, value in rows:
             if label:
@@ -7287,7 +7336,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
             _raw_note = (_notes.get(pid_key) or player.get('note', '') or '').strip()
             fn = _raw_note[0] if _raw_note else ''
             if fn:
-                fn_html = f'<span class="fn-note" style="color:#888;font-size:10px;">{fn}-</span>'
+                fn_html = f'<span class="fn-note" style="color:#888;font-size:11px;">{fn}-</span>'
                 if is_sub:
                     name_cell = f'&nbsp;&nbsp;{fn_html}<span class="sub">{name}</span>'
                 else:
