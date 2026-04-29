@@ -1,3 +1,37 @@
+Version 1.5.1 (2026-04-28)
+--------------------------
+NEW FEATURES:
+- **Show Player Stats / Show Team W-L split**: The single "Show Player Stats (pitcher/batter
+  names, W-L record)" checkbox in Settings → Content has been replaced with two independent
+  checkboxes:
+    · Show Player Stats — controls pitcher/batter names and pitch counts
+    · Show Team W-L Record — controls team Win-Loss records
+  Each can be enabled or disabled independently; disabling both hides all subtext rows
+  and collapses the layout to the single-row (team name centered) mode.
+- Team Name Display Options — Settings → Content now offers a three-option dropdown
+  for how team names appear in the ticker:
+    · Team Name   — nickname only (e.g. "Yankees")
+    · City + Team — full city and team name (e.g. "New York Yankees")
+    · Abbreviation — three-letter city code (e.g. "NYY"); all 30 teams:
+        ARI ATL BAL BOS CHC CWS CIN CLE COL DET
+        HOU KC  LAA LAD MIA MIL MIN NYM NYY OAK
+        PHI PIT SD  SF  SEA STL TB  TEX TOR WSH
+  Replaces the previous "Show Team Cities" checkbox with a single unified control.
+
+BUG FIXES:
+- New windows occasionally opened underneath the ticker bar instead of below it;
+  dragging such a window caused it to snap to the correct position, but the initial
+  placement was wrong — root cause was that ABM_SETPOS updates the Shell's internal
+  work-area record but does not broadcast that change to other processes; the Window
+  Manager caches the work area for CW_USEDEFAULT placement and used the stale
+  (full-screen) value until a drag triggered a live re-read; fixed by broadcasting
+  WM_SETTINGCHANGE (via SendMessageTimeoutW to HWND_BROADCAST) after ABM_ACTIVATE in
+  setup_appbar(), matching the mechanism the Windows Taskbar itself uses; the same
+  broadcast is now also sent in remove_appbar() so the freed space is immediately
+  advertised to all windows when the ticker exits
+
+------------------------------------------------------------------------------
+
 Version 1.5.0 (2026-04-26)
 --------------------------
 NEW FEATURES:

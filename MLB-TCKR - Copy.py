@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0429.0057
+Date: 2026.0428.1622
 License: GNU AGPLv3
 
 Description:
@@ -174,20 +174,6 @@ MLB_ESPN_ABBR = {
     "Rangers":      "tex",
     "Blue Jays":    "tor",
     "Nationals":    "wsh",
-}
-
-# City abbreviations for ticker display (uppercase)
-MLB_CITY_ABBR = {
-    "Diamondbacks": "ARI", "Braves": "ATL", "Orioles": "BAL",
-    "Red Sox": "BOS", "Cubs": "CHC", "White Sox": "CWS",
-    "Reds": "CIN", "Guardians": "CLE", "Rockies": "COL",
-    "Tigers": "DET", "Astros": "HOU", "Royals": "KC",
-    "Angels": "LAA", "Dodgers": "LAD", "Marlins": "MIA",
-    "Brewers": "MIL", "Twins": "MIN", "Mets": "NYM",
-    "Yankees": "NYY", "Athletics": "OAK", "Phillies": "PHI",
-    "Pirates": "PIT", "Padres": "SD", "Giants": "SF",
-    "Mariners": "SEA", "Cardinals": "STL", "Rays": "TB",
-    "Rangers": "TEX", "Blue Jays": "TOR", "Nationals": "WSH",
 }
 
 # AppBar constants
@@ -2451,7 +2437,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._appbar_registered = False
         try:
             shell32 = ctypes.windll.shell32
-            user32  = ctypes.windll.user32
             abd = APPBARDATA()
             abd.cbSize = ctypes.sizeof(APPBARDATA)
             abd.hWnd   = int(self.winId())
@@ -3833,16 +3818,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         away_team_full = game['away_name']
         home_team_full = game['home_name']
         
-        # Use nickname, abbreviation, or full city+name based on settings
-        if self.settings.get('use_city_abbreviations', False):
-            away_team = MLB_CITY_ABBR.get(get_team_nickname(away_team_full), get_team_nickname(away_team_full))
-            home_team = MLB_CITY_ABBR.get(get_team_nickname(home_team_full), get_team_nickname(home_team_full))
-        elif self.settings.get('show_team_cities', False):
-            away_team = away_team_full
-            home_team = home_team_full
-        else:
+        # Use nickname only if show_team_cities is False
+        if not self.settings.get('show_team_cities', True):
             away_team = get_team_nickname(away_team_full)
             home_team = get_team_nickname(home_team_full)
+        else:
+            away_team = away_team_full
+            home_team = home_team_full
         
         # Capitalize team names
         away_team = away_team.upper()
@@ -3898,7 +3880,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         away_record = game.get('away_record', '0-0')
         home_record = game.get('home_record', '0-0')
         show_records = self.settings.get('show_team_records', True)
-        show_wl = self.settings.get('show_team_wl', True)
         _pre_statuses_render = {'Scheduled', 'Preview', 'Pre-Game', 'Warmup',
                                   'Delayed Start', 'Delayed', 'Postponed'}
         _final_statuses_render = {'Final', 'Completed', 'Game Over'}
@@ -3973,8 +3954,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
         away_odds_w = small_metrics.horizontalAdvance(away_odds_text) if away_odds_text else 0
         home_odds_w = small_metrics.horizontalAdvance(home_odds_text) if home_odds_text else 0
         # W-L record width for the side column (used even when no odds are shown)
-        away_record_col_w = small_metrics.horizontalAdvance(away_record_text) if show_wl else 0
-        home_record_col_w = small_metrics.horizontalAdvance(home_record_text) if show_wl else 0
+        away_record_col_w = small_metrics.horizontalAdvance(away_record_text) if show_records else 0
+        home_record_col_w = small_metrics.horizontalAdvance(home_record_text) if show_records else 0
         # Side column width = widest of W-L and odds (whichever is present)
         away_col_w = max(away_record_col_w, away_odds_w)
         home_col_w = max(home_record_col_w, home_odds_w)
@@ -4075,7 +4056,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         detail_y = None
         has_live_detail = bool(away_live_detail or home_live_detail)
         # Calculate record_y (and detail_y for live games) only when show_records is on.
-        if show_records or show_wl:
+        if show_records:
             # Team names are all-caps — their visual bottom is the baseline (text_y),
             # not text_y + metrics.descent(). Using metrics.ascent() as the visual
             # height avoids the large descender gap that pushed rows apart.
@@ -4102,7 +4083,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             _min_text_y = -_br.top() + 1
             text_y   = max(_min_text_y, _block_center_top + metrics.ascent())
             record_y = text_y + _row_gap + small_metrics.ascent()
-            if has_live_detail and show_records:
+            if has_live_detail:
                 # 3-row: recalculate block height with tiny row
                 _tiny_gap = 2
                 _visual_block_h3 = (_visual_block_h
@@ -4144,11 +4125,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 away_name_x = away_col_draw_x + away_col_w + odds_gap
             else:
                 away_col_draw_x = None
-                # Always right-justify name so it sits a fixed distance from the logo
-                away_name_x = x + away_block_width - away_name_width
+                # Right-justify name towards logo; center only when no live detail
+                if has_live_detail:
+                    away_name_x = x + away_block_width - away_name_width
+                else:
+                    away_name_x = x + (away_block_width - away_name_width) // 2
             if away_col_draw_x is not None:
-                # W-L on top (only when both show_records and show_wl are on)
-                if show_wl and show_records:
+                # W-L on top
+                if show_records:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(away_col_draw_x, odds_y, away_record_text)
@@ -4162,16 +4146,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.setFont(self._qfont)
                 painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
-            if record_y is not None:
+            if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                # show_records: full player subtext; show_wl only: W-L under name; both: player subtext (W-L is in side column)
-                _away_row_text = away_detail_text if show_records else (away_record_text if show_wl else '')
-                if _away_row_text:
-                    detail_w = small_metrics.horizontalAdvance(_away_row_text)
-                    away_record_x = x + away_block_width - detail_w
-                    painter.drawText(away_record_x, record_y, _away_row_text)
-                if show_records and away_live_detail and detail_y is not None:
+                # Right-justify player info within away_block (ends near logo)
+                detail_w = small_metrics.horizontalAdvance(away_detail_text)
+                away_record_x = x + away_block_width - detail_w
+                painter.drawText(away_record_x, record_y, away_detail_text)
+                if away_live_detail and detail_y is not None:
                     painter.setFont(self.tiny_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     ald_w = tiny_metrics.horizontalAdvance(away_live_detail)
@@ -4227,14 +4209,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 home_name_x = x + unit_off
                 home_col_draw_x = home_name_x + home_name_width + odds_gap
             else:
+                home_name_x = x + (home_block_width - home_name_width) // 2
                 home_col_draw_x = None
-            # Home name is always flush-left in the home block (closest to logo)
-            home_name_x = x
-            home_col_draw_x = x + home_name_width + odds_gap if home_col_w > 0 else None
             painter.drawText(home_name_x, text_y, home_team)
             if home_col_draw_x is not None:
-                # W-L on top (only when both show_records and show_wl are on)
-                if show_wl and show_records:
+                # W-L on top
+                if show_records:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(home_col_draw_x, odds_y, home_record_text)
@@ -4245,13 +4225,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     painter.setPen(_hc)
                     odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
                     painter.drawText(home_col_draw_x, odds_below_wl_y, home_odds_text)
-            if record_y is not None:
+            if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                _home_row_text = home_detail_text if show_records else (home_record_text if show_wl else '')
-                if _home_row_text:
-                    painter.drawText(x, record_y, _home_row_text)
-                if show_records and home_live_detail and detail_y is not None:
+                # Left-justify player info at start of home_block (near logo)
+                painter.drawText(x, record_y, home_detail_text)
+                if home_live_detail and detail_y is not None:
                     painter.setFont(self.tiny_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(x, detail_y, home_live_detail)
@@ -4272,7 +4251,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 away_col_draw_x = None
                 away_name_x = x + (away_block_width - away_name_width) // 2
             if away_col_draw_x is not None:
-                if show_wl and show_records:
+                if show_records:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(away_col_draw_x, odds_y, away_record_text)
@@ -4285,13 +4264,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.setFont(self._qfont)
                 painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
-            if record_y is not None:
+            if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                _asub_text = (away_subtext if away_subtext else away_record_text) if show_records else (away_record_text if show_wl else '')
-                if _asub_text:
-                    _asub_w = small_metrics.horizontalAdvance(_asub_text)
-                    painter.drawText(x + away_block_width - _asub_w, record_y, _asub_text)
+                _asub_text = away_subtext if away_subtext else away_record_text
+                _asub_w = small_metrics.horizontalAdvance(_asub_text)
+                painter.drawText(x + away_block_width - _asub_w, record_y, _asub_text)
             x += away_block_width + 5
 
             # ── Away logo ────────────────────────────────────────────────────
@@ -4344,13 +4322,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 home_name_x = x + unit_off
                 home_col_draw_x = home_name_x + home_name_width + odds_gap
             else:
+                home_name_x = x + (home_block_width - home_name_width) // 2
                 home_col_draw_x = None
-            # Home name is always flush-left in the home block (closest to logo)
-            home_name_x = x
-            home_col_draw_x = x + home_name_width + odds_gap if home_col_w > 0 else None
             painter.drawText(home_name_x, text_y, home_team)
             if home_col_draw_x is not None:
-                if show_wl and show_records:
+                if show_records:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(home_col_draw_x, odds_y, home_record_text)
@@ -4360,13 +4336,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     painter.setPen(_hc)
                     odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
                     painter.drawText(home_col_draw_x, odds_below_wl_y, home_odds_text)
-            if record_y is not None:
+            if show_records and record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                _hsub_text = (home_subtext if home_subtext else home_record_text) if show_records else (home_record_text if show_wl else '')
-                if _hsub_text:
-                    painter.drawText(x, record_y, _hsub_text)
-
+                _hsub_text = home_subtext if home_subtext else home_record_text
+                painter.drawText(x, record_y, _hsub_text)
+        
         painter.end()
         return pixmap
     
@@ -8542,26 +8517,13 @@ class SettingsDialog(QtWidgets.QDialog):
         # ── 5. Content ──────────────────────────────────────────────────────
         grp_content, form_content = make_form("Content")
 
-        # Team name display — dropdown
-        self.name_display_combo = QtWidgets.QComboBox()
-        self.name_display_combo.addItem("Team Name  (e.g. Yankees)",    "nickname")
-        self.name_display_combo.addItem("City + Team  (e.g. New York Yankees)", "city")
-        self.name_display_combo.addItem("Abbreviation  (e.g. NYY)",     "abbrev")
-        if self.settings.get('use_city_abbreviations', False):
-            self.name_display_combo.setCurrentIndex(2)
-        elif self.settings.get('show_team_cities', False):
-            self.name_display_combo.setCurrentIndex(1)
-        else:
-            self.name_display_combo.setCurrentIndex(0)
-        form_content.addRow("🗺️  Team Name Display:", self.name_display_combo)
-
-        self.records_check = QtWidgets.QCheckBox("")
+        self.records_check = QtWidgets.QCheckBox("Enabled")
         self.records_check.setChecked(self.settings.get('show_team_records', True))
-        form_content.addRow("🧢  Show Player Names / Stats (pitcher, batter, pitch counts):", self.records_check)
+        form_content.addRow("🧢  Show Player Names, Record:", self.records_check)
 
-        self.wl_check = QtWidgets.QCheckBox("")
-        self.wl_check.setChecked(self.settings.get('show_team_wl', True))
-        form_content.addRow("🔢  Show Team W-L Record:", self.wl_check)
+        self.cities_check = QtWidgets.QCheckBox("Enabled")
+        self.cities_check.setChecked(not self.settings.get('show_team_cities', False))
+        form_content.addRow("🗺️  Show Only Team Name:", self.cities_check)
 
         self.live_only_check = QtWidgets.QCheckBox("Enabled")
         self.live_only_check.setChecked(self.settings.get('live_games_only', False))
@@ -9094,7 +9056,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['font_scale_percent'] = self.font_scale_slider.value()
         self.settings['player_info_font'] = self.player_info_font_combo.currentText()
         self.settings['show_team_records'] = self.records_check.isChecked()
-        self.settings['show_team_wl'] = self.wl_check.isChecked()
         self.settings['live_games_only'] = self.live_only_check.isChecked()
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
@@ -9104,9 +9065,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['odds_api_io_key'] = self.odds_api_io_key_edit.text().strip()
         self.settings['odds_refresh_minutes'] = self.odds_refresh_spin.value()
         self.settings['yesterday_cutoff_minutes'] = self.yesterday_cutoff_spin.value()
-        _name_mode = self.name_display_combo.currentData()
-        self.settings['show_team_cities']        = (_name_mode == 'city')
-        self.settings['use_city_abbreviations']  = (_name_mode == 'abbrev')
+        self.settings['show_team_cities'] = not self.cities_check.isChecked()
         self.settings['led_background'] = self.led_bg_check.isChecked()
         self.settings['glass_overlay'] = self.glass_check.isChecked()
         self.settings['background_opacity'] = int(round(self.opacity_slider.value() * 255 / 100))
