@@ -1,3 +1,49 @@
+Version 1.5.2 (2026-04-29)
+--------------------------
+NEW FEATURES:
+- **Auto-hide on full-screen apps**: Ticker now hides itself when a full-screen
+  DirectX/OpenGL application occupies the foreground monitor (same behaviour as
+  the Windows Taskbar).  Checked every 2 seconds via a background QTimer so the
+  main thread is never blocked.  Scroll timer and multimedia timer resolution are
+  released while hidden; both are restored when the full-screen app exits.
+- **Standings keyboard navigation**: The Standings window now accepts keyboard input:
+    · A / N — toggle between AL and NL.
+    · Left / Right arrow — move focus between East / Central / West division columns.
+    · Up / Down arrow — highlight the previous/next team row within the focused column;
+      the selected row receives a subtle gold border so the selection is always visible.
+    · Escape or Q — close the window.
+  Initial nav state (East column, row 0) is set in __init__ and a StrongFocus
+  policy is applied so the window captures key events without requiring a click first.
+- **Games Back (GB) in Standings**: The Standings window now displays a "GB" column
+  showing each team's games behind the division leader. The division leader shows "—".
+- **Mini play-by-play in Box Score**: The bottom of the Box Score window now shows a
+  scrolling feed of the last 3–5 plays (e.g. "Strikeout swinging", "Home run to left",
+  "Groundout: 6-3"). Data sourced from `liveData.plays.allPlays` in the game feed.
+- **Win Probability bar on live game cards**: Live ticker cards now display a slim
+  win-probability bar beneath the scores, filled proportionally to the home team's
+  current win probability. Data sourced from `winProbability` in the MLB Stats API
+  live feed; bar is hidden for scheduled and final games.
+
+IMPROVEMENTS:
+- **CPU / power reduction when ticker is idle**: Windows multimedia timer resolution
+  is now managed adaptively via timeBeginPeriod/timeEndPeriod:
+    · 1 ms resolution raised only when the scroll timer is actively running.
+    · Released back to the OS default when scrolling pauses (P key, context menu,
+      tray toggle), when the mouse hovers over the bar, or when minimized.
+    · Tracked so winmm is called only on actual state changes — no redundant calls.
+- **Minimize stops scroll timer**: Added changeEvent override so the scroll timer
+  stops (and timer resolution releases) on minimize, and restarts on restore.
+
+BUG FIXES:
+- Box Score window: Previous/Next navigation buttons now wrap around correctly
+  (last game → first, first game → previous wraps to last); buttons are always
+  enabled when more than one game is available instead of being disabled at the
+  boundary game; when clicking Previous/Next the data area now clears and displays
+  "Loading" until the new data is fetched and displayed.
+  
+
+------------------------------------------------------------------------------
+
 Version 1.5.1 (2026-04-28)
 --------------------------
 NEW FEATURES:

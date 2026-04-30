@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0429.0057
+Date: 2026.0429.2224
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 import warnings
 warnings.filterwarnings(
@@ -2257,6 +2257,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Only register AppBar when 'docked' setting is enabled
         if self.settings.get('docked', True):
             self.setup_appbar()
+
+        # Auto-hide when a full-screen DirectX/OpenGL app is in the foreground
+        # (mirrors what the Windows Taskbar does).  Poll every 2 s via a QTimer
+        # so we never block the main thread.
+        self._ticker_hidden_for_fullscreen = False
+        self._fullscreen_timer = QtCore.QTimer()
+        self._fullscreen_timer.timeout.connect(self._check_fullscreen)
+        self._fullscreen_timer.setInterval(2000)
+        self._fullscreen_timer.start()
 
         # Build intro animation geometry now (window is shown, size is final).
         # Start immediately — data loads in the background while the intro plays.
@@ -4595,6 +4604,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Pause scrolling when mouse enters ticker"""
         self.is_hovered = True
         self.scroll_timer.stop()
+        self._set_timer_resolution(False)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -4602,8 +4612,112 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.is_hovered = False
         if not self.intro_active and not self.scroll_paused:
             self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0  # reset baseline to avoid jump
+            self._set_timer_resolution(True)
             self.scroll_timer.start(self._scroll_timer_interval_ms)
         super().leaveEvent(event)
+
+    def changeEvent(self, event):
+        """Stop scroll timer when window is minimized; restart on restore."""
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.WindowStateChange:
+            if self.isMinimized():
+                self.scroll_timer.stop()
+                self._set_timer_resolution(False)
+                print("[TICKER] Minimized — scroll timer stopped")
+            elif not self.scroll_paused and not self.is_hovered and not self.intro_active:
+                self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                self._set_timer_resolution(True)
+                self.scroll_timer.start(self._scroll_timer_interval_ms)
+                print("[TICKER] Restored — scroll timer restarted")
+
+    def _check_fullscreen(self):
+        """Detect a full-screen DirectX/OpenGL app in the foreground and hide/show the AppBar.
+
+        Uses the same Win32 technique as the Windows Taskbar:
+          • GetForegroundWindow() → get the HWND that has focus
+          • GetWindowRect() on that HWND
+          • MonitorFromWindow() / GetMonitorInfo() → get the monitor's full rect
+          • If the window rect exactly covers (or exceeds) the monitor rect and is
+            NOT our own HWND → it is full-screen → hide ourselves
+          • Once the full-screen window is gone → show ourselves again
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            user32 = ctypes.windll.user32
+            fg_hwnd = user32.GetForegroundWindow()
+            our_hwnd = int(self.winId())
+            # Ignore ourselves and the desktop (WorkerW / Progman)
+            if fg_hwnd == 0 or fg_hwnd == our_hwnd:
+                return
+
+            # Get foreground window rect
+            fg_rect = wintypes.RECT()
+            user32.GetWindowRect(fg_hwnd, ctypes.byref(fg_rect))
+            fw = fg_rect.right  - fg_rect.left
+            fh = fg_rect.bottom - fg_rect.top
+            if fw <= 0 or fh <= 0:
+                return
+
+            # Get the monitor that the foreground window is on
+            class _MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ('cbSize',    ctypes.c_uint32),
+                    ('rcMonitor', wintypes.RECT),
+                    ('rcWork',    wintypes.RECT),
+                    ('dwFlags',   ctypes.c_uint32),
+                ]
+            MONITOR_DEFAULTTONEAREST = 0x00000002
+            hmon = user32.MonitorFromWindow(fg_hwnd, MONITOR_DEFAULTTONEAREST)
+            mi = _MONITORINFO()
+            mi.cbSize = ctypes.sizeof(_MONITORINFO)
+            user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+            mw = mi.rcMonitor.right  - mi.rcMonitor.left
+            mh = mi.rcMonitor.bottom - mi.rcMonitor.top
+
+            # Heuristic: the window covers the full monitor surface
+            is_fullscreen = (fw >= mw and fh >= mh)
+
+            if is_fullscreen and not self._ticker_hidden_for_fullscreen:
+                self._ticker_hidden_for_fullscreen = True
+                self.hide()
+                self._set_timer_resolution(False)
+                self.scroll_timer.stop()
+                print("[TICKER] Full-screen app detected — ticker hidden")
+            elif not is_fullscreen and self._ticker_hidden_for_fullscreen:
+                self._ticker_hidden_for_fullscreen = False
+                self.show()
+                if not self.scroll_paused and not self.is_hovered and not self.intro_active:
+                    self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                    self._set_timer_resolution(True)
+                    self.scroll_timer.start(self._scroll_timer_interval_ms)
+                print("[TICKER] Full-screen app gone — ticker restored")
+        except Exception as _e:
+            print(f"[TICKER] _check_fullscreen error: {_e}")
+
+    def _set_timer_resolution(self, high: bool):
+        """Set Windows multimedia timer resolution.
+
+        high=True  → 1 ms resolution (timeBeginPeriod(1)) for smooth scrolling.
+        high=False → release the override (timeEndPeriod(1)) to reduce CPU/power
+                     when scrolling is idle (paused, hovered, or minimized).
+
+        Tracks current state so the winmm call is only made when it actually changes.
+        Gracefully no-ops on non-Windows platforms or if winmm is unavailable.
+        """
+        if sys.platform != "win32":
+            return
+        if getattr(self, '_timer_res_high', None) == high:
+            return  # already in the right state
+        try:
+            if high:
+                ctypes.windll.winmm.timeBeginPeriod(1)
+            else:
+                ctypes.windll.winmm.timeEndPeriod(1)
+            self._timer_res_high = high
+            print(f"[TIMER] Timer resolution → {'1 ms (high)' if high else 'default (low)'}")
+        except Exception as _e:
+            print(f"[TIMER] winmm call failed: {_e}")
 
     def apply_live_settings(self):
         """Re-read settings from disk and apply all hotswappable values immediately."""
@@ -4817,10 +4931,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.scroll_paused = not self.scroll_paused
             if self.scroll_paused:
                 self.scroll_timer.stop()
+                self._set_timer_resolution(False)
                 print("[KB] Scroll paused")
             else:
                 if not self.intro_active and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                    self._set_timer_resolution(True)
                     self.scroll_timer.start(self._scroll_timer_interval_ms)
                 print("[KB] Scroll unpaused")
         elif key == 'g':
@@ -5022,9 +5138,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.scroll_paused = not self.scroll_paused
             if self.scroll_paused:
                 self.scroll_timer.stop()
+                self._set_timer_resolution(False)
             else:
                 if not self.intro_active and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                    self._set_timer_resolution(True)
                     self.scroll_timer.start(self._scroll_timer_interval_ms)
         pause_action.triggered.connect(_toggle_pause)
 
@@ -5139,12 +5257,18 @@ def fetch_standings():
                 if sr.get('type') == 'lastTen':
                     last10 = f"{sr.get('wins',0)}-{sr.get('losses',0)}"
                     break
+            gb_raw = tr.get('gamesBack', '-')
+            if gb_raw in (None, '', 0, 0.0, '0.0', '-'):
+                gb = '-'
+            else:
+                gb = str(gb_raw)
             rows[tid] = {
                 'name':    get_team_nickname(tr.get('team', {}).get('name', '')),
                 'wins':    wins,
                 'losses':  losses,
                 'pct':     pct,
                 'last10':  last10,
+                'gb':      gb,
                 'team_id': tid,
                 'full_name': tr.get('team', {}).get('name', ''),
             }
@@ -5243,6 +5367,7 @@ class StandingsWindow(QtWidgets.QWidget):
         self._W_WL   = max(48, int(90  * s))
         self._W_PCT  = max(48, int(90  * s))
         self._W_L10  = max(48, int(90  * s))
+        self._W_GB   = max(40, int(74  * s))
         self._ROW_H  = max(22, int(40  * s))
         # Font pixel sizes
         self._FS_TITLE   = max(28, int(64 * s))
@@ -5269,9 +5394,14 @@ class StandingsWindow(QtWidgets.QWidget):
         self._loading        = False
         self._ticker_widget  = ticker_widget
 
+        # Keyboard navigation state
+        self._nav_div = 0   # 0=East, 1=Central, 2=West
+        self._nav_row = 0   # 0-based team index within division
+
         self._scale = self._compute_scale()
         self._compute_sizes()
         self._build_ui()
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._position_below_ticker()
         self._fetch()
 
@@ -5474,7 +5604,7 @@ class StandingsWindow(QtWidgets.QWidget):
         outer.addLayout(bottom)
 
     def _div_width(self):
-        return self._W_LOGO + self._W_NAME + self._W_WL + self._W_PCT + self._W_L10
+        return self._W_LOGO + self._W_NAME + self._W_WL + self._W_PCT + self._W_L10 + self._W_GB
 
     def _make_col_header(self):
         """Return (widget, [label_refs]) header row matching team row cell widths."""
@@ -5497,7 +5627,8 @@ class StandingsWindow(QtWidgets.QWidget):
         for label, width in [("Team", self._W_NAME),
                               ("W-L",  self._W_WL),
                               ("Pct.", self._W_PCT),
-                              ("L10",  self._W_L10)]:
+                              ("L10",  self._W_L10),
+                              ("GB",   self._W_GB)]:
             lbl = QtWidgets.QLabel(label.upper())
             lbl.setFont(hdr_font)
             lbl.setFixedWidth(width)
@@ -5578,11 +5709,12 @@ class StandingsWindow(QtWidgets.QWidget):
                 name_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
                 hl.addWidget(name_lbl)
 
-                # W-L / Pct. / L10
+                # W-L / Pct. / L10 / GB
                 for val, width in [
                     (f"{team['wins']}-{team['losses']}", self._W_WL),
-                    (team['pct'],   self._W_PCT),
+                    (team['pct'],    self._W_PCT),
                     (team['last10'], self._W_L10),
+                    (team.get('gb', '-'), self._W_GB),
                 ]:
                     lbl = QtWidgets.QLabel(val)
                     lbl.setFont(stat_font)
@@ -5681,6 +5813,82 @@ class StandingsWindow(QtWidgets.QWidget):
     def mouseMoveEvent(self, event):
         if event.buttons() & QtCore.Qt.LeftButton and hasattr(self, '_drag_pos'):
             self.move(event.globalPos() - self._drag_pos)
+
+    def keyPressEvent(self, event):
+        """Keyboard navigation within the Standings window.
+
+        Tab / Right  → toggle league (AL ↔ NL)
+        Escape / Q   → close the window
+        Up / Down    → scroll through team rows within the focused division column
+        Left / Right → move focus between division columns (East / Central / West)
+        """
+        k = event.key()
+        # ── League toggle ────────────────────────────────────────────────────
+        if k in (QtCore.Qt.Key_Tab, QtCore.Qt.Key_Backtab):
+            self._select_league('NL' if self._league == 'AL' else 'AL')
+            return
+        if k == QtCore.Qt.Key_A:
+            self._select_league('AL')
+            return
+        if k == QtCore.Qt.Key_N:
+            self._select_league('NL')
+            return
+        # ── Close ───────────────────────────────────────────────────────────
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Q):
+            self.close()
+            return
+        # ── Division / row navigation ────────────────────────────────────────
+        # Maintain a (div_index, row_index) cursor; highlighted row gets a subtle
+        # gold border so the user can see the selection without blocking the text.
+        if not hasattr(self, '_nav_div'):
+            self._nav_div = 0   # 0=East, 1=Central, 2=West
+            self._nav_row = 0   # 0-based team index within division
+        divs = self._DIVISIONS
+        if k == QtCore.Qt.Key_Right:
+            self._nav_div = min(self._nav_div + 1, len(divs) - 1)
+            self._nav_row = 0
+            self._highlight_nav_row()
+            return
+        if k == QtCore.Qt.Key_Left:
+            self._nav_div = max(self._nav_div - 1, 0)
+            self._nav_row = 0
+            self._highlight_nav_row()
+            return
+        if k == QtCore.Qt.Key_Down:
+            league_data = (self._data or {}).get(self._league, {})
+            teams = league_data.get(divs[self._nav_div], [])
+            self._nav_row = min(self._nav_row + 1, max(0, len(teams) - 1))
+            self._highlight_nav_row()
+            return
+        if k == QtCore.Qt.Key_Up:
+            self._nav_row = max(self._nav_row - 1, 0)
+            self._highlight_nav_row()
+            return
+        super().keyPressEvent(event)
+
+    def _highlight_nav_row(self):
+        """Apply a gold highlight border to the selected team row widget."""
+        divs = self._DIVISIONS
+        league_data = (self._data or {}).get(self._league, {})
+        for di, div in enumerate(divs):
+            col = self._col_widgets.get(div)
+            if col is None:
+                continue
+            teams = league_data.get(div, [])
+            # Col layout: [div_label, hdr_row, hsep, team_row_0, team_row_1, ...]
+            _header_items = 3
+            for ri in range(len(teams)):
+                item = col.itemAt(_header_items + ri)
+                if item is None or item.widget() is None:
+                    continue
+                w = item.widget()
+                if di == self._nav_div and ri == self._nav_row:
+                    w.setStyleSheet(
+                        "background: rgba(255,215,0,18);"
+                        "border: 1px solid #FFD700; border-radius: 3px;"
+                    )
+                else:
+                    w.setStyleSheet("background: transparent;")
 
 # ---------------------------------------------------------------------------
 # TV / Radio schedule fetch and worker
@@ -6684,28 +6892,32 @@ class BoxScoreWindow(QtWidgets.QWidget):
             self._next_btn.setEnabled(False)
     
     def _update_nav_buttons(self):
-        """Update navigation button states."""
-        has_games = len(self._games_list) > 0
-        self._prev_btn.setEnabled(has_games and self._current_game_index > 0)
-        self._next_btn.setEnabled(has_games and self._current_game_index < len(self._games_list) - 1)
+        """Update navigation button states (always enabled when games exist — wrap-around)."""
+        has_games = len(self._games_list) > 1
+        self._prev_btn.setEnabled(has_games)
+        self._next_btn.setEnabled(has_games)
     
     def _go_prev_game(self):
-        """Navigate to previous game, syncing to ticker's current date first."""
-        self._load_games_list()  # pick up current ticker date on explicit navigation
-        if self._current_game_index > 0:
-            self._current_game_index -= 1
-            self._update_nav_buttons()
-            self._update_game_banner()
-            self._fetch_box_score()
+        """Navigate to previous game (wraps from first to last)."""
+        self._load_games_list()
+        if not self._games_list:
+            return
+        self._current_game_index = (self._current_game_index - 1) % len(self._games_list)
+        self._update_nav_buttons()
+        self._update_game_banner()
+        self._show_loading()
+        self._fetch_box_score()
 
     def _go_next_game(self):
-        """Navigate to next game, syncing to ticker's current date first."""
-        self._load_games_list()  # pick up current ticker date on explicit navigation
-        if self._current_game_index < len(self._games_list) - 1:
-            self._current_game_index += 1
-            self._update_nav_buttons()
-            self._update_game_banner()
-            self._fetch_box_score()
+        """Navigate to next game (wraps from last to first)."""
+        self._load_games_list()
+        if not self._games_list:
+            return
+        self._current_game_index = (self._current_game_index + 1) % len(self._games_list)
+        self._update_nav_buttons()
+        self._update_game_banner()
+        self._show_loading()
+        self._fetch_box_score()
 
     def _update_game_banner(self):
         """Re-render the ticker-style live game banner from current game data."""
@@ -6743,6 +6955,13 @@ class BoxScoreWindow(QtWidgets.QWidget):
         # when the user changes the ticker's date.  The list is only refreshed on
         # explicit next/prev navigation or when the window is opened.
         self._update_game_banner()
+
+    def _show_loading(self):
+        """Clear content area and show a Loading... message."""
+        self._content_browser.setHtml(
+            '<body style="background:#111;color:#888;font-family:monospace;'
+            'padding:40px;text-align:center;font-size:16px;">Loading&hellip;</body>'
+        )
 
     def _fetch_box_score(self):
         """Fetch box score data for current game."""
@@ -9338,9 +9557,11 @@ def main():
         window.scroll_paused = not window.scroll_paused
         if window.scroll_paused:
             window.scroll_timer.stop()
+            window._set_timer_resolution(False)
         else:
             if not window.intro_active and not window.is_hovered:
                 window._last_frame_ms = window._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                window._set_timer_resolution(True)
                 window.scroll_timer.start(window._scroll_timer_interval_ms)
     pause_action.triggered.connect(_tray_toggle_pause)
 
