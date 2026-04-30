@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0429.2224
+Date: 2026.0430.0951
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 import warnings
 warnings.filterwarnings(
@@ -64,6 +64,12 @@ import statsapi # type: ignore
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5 import QtSvg
+try:
+    from PyQt5 import QtMultimedia
+    ALERT_SOUND_AVAILABLE = True
+except Exception:
+    QtMultimedia = None  # type: ignore
+    ALERT_SOUND_AVAILABLE = False
 import ctypes
 from ctypes import wintypes
 
@@ -211,13 +217,7 @@ class APPBARDATA(ctypes.Structure):
 
 
 def get_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
+    defaults = {
         "speed": 5,
         "update_interval": 10,
         "ticker_height": 64,
@@ -246,6 +246,7 @@ def get_settings():
         "load_at_startup": False,  # Register in Windows Run key on launch
         "docked": True,  # When True, ticker is docked (not moveable) and registered as AppBar
         "yesterday_cutoff_minutes": 30,  # Show yesterday's finals until N min before first pitch
+        "show_win_probability": True,  # Show win probability bar on live game cards
         "show_moneyline": False,   # Show H2H moneyline odds
         "odds_api_provider": "action-network",  # "action-network", "the-odds-api", or "odds-api-io"
         "odds_api_key": "",        # API key for api.the-odds-api.com
@@ -258,7 +259,24 @@ def get_settings():
         "scoring_alert_vs_team": True,         # Alert when opponent scores against watched team
         "scoring_alert_game_starts": True,     # Alert when a watched team's game begins
         "scoring_alert_game_finishes": True,   # Alert when a watched team's game ends (final)
+        "scoring_alert_sound_for_team_enabled": False,
+        "scoring_alert_sound_vs_team_enabled": False,
+        "scoring_alert_sound_game_starts_enabled": False,
+        "scoring_alert_sound_game_finishes_enabled": False,
+        "scoring_alert_sound_for_team_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
+        "scoring_alert_sound_vs_team_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
+        "scoring_alert_sound_game_starts_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
+        "scoring_alert_sound_game_finishes_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
     }
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                saved = json.load(f)
+            # Merge: saved values win, but any key missing from disk gets its default
+            defaults.update(saved)
+        except Exception:
+            pass
+    return defaults
 
 
 def save_settings(settings):
@@ -586,36 +604,100 @@ def get_team_color(team_name):
     return '#FFFFFF'
 
 
+def _crop_qimage(img):
+    """Trim transparent border from a QImage, returning a cropped QImage.
+
+    Works entirely in CPU memory — no QPixmap/GPU round-trip.  Safe to call
+    from any thread.  Used by _preload_logos_background so the main thread
+    never has to run a crop scan.
+    """
+    ALPHA_THRESHOLD = 12
+    img = img.convertToFormat(QtGui.QImage.Format_ARGB32)
+    w, h = img.width(), img.height()
+    if w == 0 or h == 0:
+        return img
+    bpl = img.bytesPerLine()
+    ptr = img.bits()
+    ptr.setsize(h * bpl)
+    buf = bytes(ptr)
+    min_y = max_y = min_x = max_x = None
+    for y in range(h):
+        row_base = y * bpl
+        row_alphas = buf[row_base + 3 : row_base + w * 4 : 4]
+        if max(row_alphas) <= ALPHA_THRESHOLD:  # C-speed max() over bytes
+            continue
+        if min_y is None:
+            min_y = y
+        max_y = y
+        for x, a in enumerate(row_alphas):
+            if a > ALPHA_THRESHOLD:
+                if min_x is None or x < min_x:
+                    min_x = x
+                break
+        for x in range(len(row_alphas) - 1, -1, -1):
+            if row_alphas[x] > ALPHA_THRESHOLD:
+                if max_x is None or x > max_x:
+                    max_x = x
+                break
+    if min_x is None or min_y is None or max_x is None or max_y is None:
+        return img
+    return img.copy(QtCore.QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+
+
 def _crop_logo_to_content(pixmap):
     """Trim transparent border from a logo pixmap so all logos fill their slot equally.
 
-    Scans the ARGB32 image row/column by row/column from each edge and crops to the
-    tightest rectangle that contains any pixel with alpha > threshold.  The crop is
-    done at native resolution; the caller then scales to the desired display size.
-    Cost is paid once per team per session because get_team_logo caches the result.
+    Delegates to _crop_qimage() so cropping always uses the CPU-only path.
+    Used only for logos that weren't pre-loaded by _preload_logos_background.
     """
+    img = pixmap.toImage()
+    if img.isNull():
+        return pixmap
+    return QtGui.QPixmap.fromImage(_crop_qimage(img))
+
+
+def _crop_logo_to_content_UNUSED(pixmap):
+    # kept for reference — replaced by _crop_qimage + _crop_logo_to_content wrapper
     ALPHA_THRESHOLD = 12  # ignore near-invisible anti-alias fringe
     img = pixmap.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
     w, h = img.width(), img.height()
     if w == 0 or h == 0:
         return pixmap
 
-    def _row_has_content(y):
-        for x in range(w):
-            if ((img.pixel(x, y) >> 24) & 0xFF) > ALPHA_THRESHOLD:
-                return True
-        return False
+    # Fast bulk access — avoids per-pixel img.pixel() calls which are
+    # extremely slow in Python (each is a cross-language function call;
+    # 300×300 logo = 90 000+ calls ≈ seconds of main-thread blocking).
+    # bytesPerLine() may be > w*4 due to alignment padding, so use it as
+    # the row stride rather than assuming w*4.
+    bpl = img.bytesPerLine()
+    ptr = img.bits()
+    ptr.setsize(h * bpl)
+    buf = bytes(ptr)  # single C-speed copy of all pixel data
+    # In ARGB32 (Qt, little-endian) each pixel is 4 bytes: B G R A.
+    # Alpha is at byte offset +3 within each 4-byte group.
 
-    def _col_has_content(x):
-        for y in range(h):
-            if ((img.pixel(x, y) >> 24) & 0xFF) > ALPHA_THRESHOLD:
-                return True
-        return False
-
-    min_y = next((y for y in range(h)       if _row_has_content(y)), None)
-    max_y = next((y for y in range(h-1,-1,-1) if _row_has_content(y)), None)
-    min_x = next((x for x in range(w)       if _col_has_content(x)), None)
-    max_x = next((x for x in range(w-1,-1,-1) if _col_has_content(x)), None)
+    min_y = max_y = min_x = max_x = None
+    for y in range(h):
+        row_base = y * bpl
+        # Extract alpha bytes for this row in one C-speed slice (step=4, offset=3)
+        row_alphas = buf[row_base + 3 : row_base + w * 4 : 4]
+        if not any(a > ALPHA_THRESHOLD for a in row_alphas):
+            continue
+        if min_y is None:
+            min_y = y
+        max_y = y
+        # Leftmost content pixel in this row
+        for x, a in enumerate(row_alphas):
+            if a > ALPHA_THRESHOLD:
+                if min_x is None or x < min_x:
+                    min_x = x
+                break
+        # Rightmost content pixel in this row
+        for x in range(len(row_alphas) - 1, -1, -1):
+            if row_alphas[x] > ALPHA_THRESHOLD:
+                if max_x is None or x > max_x:
+                    max_x = x
+                break
 
     if min_x is None or min_y is None or max_x is None or max_y is None:
         return pixmap  # fully transparent — return unchanged
@@ -723,10 +805,20 @@ def get_team_logo(team_name, size=40):
     # Fast path: use QImage pre-loaded by background thread (avoids disk I/O on main thread)
     _pre_img = TEAM_IMAGE_CACHE.get(normalized_name)
     if _pre_img is not None and not _pre_img.isNull():
+        # Image was pre-cropped off-thread — scale directly and return.
+        # Skipping _crop_logo_to_content avoids the QPixmap.toImage() GPU
+        # read-back that was causing 15-30 s of main-thread stall at startup.
         pixmap = QtGui.QPixmap.fromImage(_pre_img)
-    else:
-        print(f"[LOGO] Loading from disk: {logo_path}")
-        pixmap = QtGui.QPixmap(logo_path)
+        max_w = int(size * 1.5)
+        scaled_logo = pixmap.scaledToHeight(int(size), QtCore.Qt.SmoothTransformation)
+        if scaled_logo.width() > max_w:
+            scaled_logo = pixmap.scaled(max_w, int(size), QtCore.Qt.KeepAspectRatio,
+                                        QtCore.Qt.SmoothTransformation)
+        TEAM_LOGO_CACHE[cache_key] = scaled_logo
+        return scaled_logo
+
+    print(f"[LOGO] Loading from disk: {logo_path}")
+    pixmap = QtGui.QPixmap(logo_path)
     
     if pixmap.isNull():
         print(f"[LOGO] Failed to load pixmap, using fallback")
@@ -807,7 +899,10 @@ def _preload_logos_background(team_names, logo_size):
             if logo_path and os.path.exists(logo_path):
                 img = QtGui.QImage(logo_path)
                 if not img.isNull():
-                    TEAM_IMAGE_CACHE[normalized_name] = img
+                    # Crop transparent padding here in the background so
+                    # get_team_logo() on the main thread can go straight from
+                    # QImage → QPixmap → scale with no GPU read-back cost.
+                    TEAM_IMAGE_CACHE[normalized_name] = _crop_qimage(img)
                     print(f"[LOGO] Pre-loaded: {normalized_name}")
         except Exception as _e:
             print(f"[LOGO] Pre-load error for {team_name}: {_e}")
@@ -1030,9 +1125,14 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
         # Pre-fetch game feeds for live/final games in parallel — eliminates
         # N sequential round-trips when multiple games are in progress.
         _live_final_statuses = {'In Progress', 'Live', 'Final', 'Completed', 'Game Over'}
+        _live_statuses       = {'In Progress', 'Live'}
         _needs_feed = [
             g['game_id'] for g in games
             if g.get('status') in _live_final_statuses and g.get('game_id')
+        ]
+        _needs_wp = [
+            g['game_id'] for g in games
+            if g.get('status') in _live_statuses and g.get('game_id')
         ]
 
         def _fetch_one_feed(gid):
@@ -1042,13 +1142,40 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
                 print(f"[MLB] Pre-fetch failed for game {gid}: {_fe}")
                 return gid, None
 
+        def _fetch_one_wp(gid):
+            """Fetch /api/v1/game/{pk}/winProbability — returns list of completed plays
+            each with top-level homeTeamWinProbability (0-100 scale)."""
+            try:
+                import requests as _req
+                _r = _req.get(
+                    f"https://statsapi.mlb.com/api/v1/game/{gid}/winProbability",
+                    timeout=8,
+                )
+                _data = _r.json()
+                if isinstance(_data, list) and _data:
+                    return gid, _data[-1]  # last completed play has current WP
+            except Exception as _we:
+                print(f"[WP] Fetch failed for game {gid}: {_we}")
+            return gid, None
+
         _pre_fetched_feeds: dict = {}
-        if _needs_feed:
-            with ThreadPoolExecutor(max_workers=min(10, len(_needs_feed))) as _feed_ex:
-                for _gid, _feed in _feed_ex.map(_fetch_one_feed, _needs_feed):
-                    if _feed is not None:
-                        _pre_fetched_feeds[_gid] = _feed
-            print(f"[MLB] Pre-fetched {len(_pre_fetched_feeds)}/{len(_needs_feed)} game feeds in parallel")
+        _pre_fetched_wp:    dict = {}
+        # Submit all fetches together so feeds + WP calls run concurrently.
+        _total = len(_needs_feed) + len(_needs_wp)
+        if _total > 0:
+            with ThreadPoolExecutor(max_workers=min(20, _total)) as _feed_ex:
+                _feed_futures = {_feed_ex.submit(_fetch_one_feed, gid): gid for gid in _needs_feed}
+                _wp_futures   = {_feed_ex.submit(_fetch_one_wp,   gid): gid for gid in _needs_wp}
+                for fut, gid in _feed_futures.items():
+                    _gid, _payload = fut.result()
+                    if _payload is not None:
+                        _pre_fetched_feeds[_gid] = _payload
+                for fut, gid in _wp_futures.items():
+                    _gid, _payload = fut.result()
+                    if _payload is not None:
+                        _pre_fetched_wp[_gid] = _payload
+        print(f"[MLB] Pre-fetched {len(_pre_fetched_feeds)}/{len(_needs_feed)} game feeds, "
+              f"{len(_pre_fetched_wp)}/{len(_needs_wp)} WP entries in parallel")
 
         game_data = []
         
@@ -1231,6 +1358,20 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
                         game_info['last_play_rbi']         = int(_play_result.get('rbi') or 0)
                         game_info['last_play_batter_last'] = batter_last
                         game_info['last_play_index']       = current_play.get('atBatIndex', -1)
+
+                    # Win probability — read from the dedicated /winProbability endpoint
+                    # pre-fetched in parallel above.  The last entry's top-level
+                    # homeTeamWinProbability (0-100 scale) reflects the most recent
+                    # completed at-bat.
+                    _wp_entry = _pre_fetched_wp.get(game_id)
+                    if _wp_entry is not None:
+                        try:
+                            _wp_raw = _wp_entry.get('homeTeamWinProbability')
+                            if _wp_raw is not None:
+                                _wp_val = float(_wp_raw) / 100.0
+                                game_info['win_probability_home'] = max(0.0, min(1.0, _wp_val))
+                        except (TypeError, ValueError):
+                            pass
 
                     print(f"[MLB] Live game data - Outs: {game_info['outs']}, Runners: {game_info['runners']}")
                     if game_info.get('pitcher_name') and game_info.get('batter_name'):
@@ -2039,6 +2180,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._prev_play_indices = {}      # game_id → last atBatIndex that triggered an alert
         self._alerted_game_starts = set()   # game_ids that have already fired a game-start alert
         self._alerted_game_finals = set()   # game_ids that have already fired a game-final alert
+        self._alert_player = None
+        if ALERT_SOUND_AVAILABLE:
+            try:
+                self._alert_player = QtMultimedia.QMediaPlayer(self)
+                self._alert_player.setVolume(100)
+            except Exception as _snd_init_err:
+                self._alert_player = None
+                print(f"[ALERT] Sound init failed: {_snd_init_err}")
+        # Windows MCI handle — used as primary playback path (no plugins needed)
+        self._mci_available = (sys.platform == 'win32')
 
         # Intro pixel-reveal animation state
         self.intro_active = True
@@ -2281,6 +2432,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
             args=(_all_teams, _logo_sz),
             daemon=True,
         ).start()
+        # Pause game-data polling while the intro plays — fetches during the intro
+        # are wasted because build_ticker_pixmap() returns early when intro_active is
+        # True.  The timer is restarted when the intro finishes.
+        self.update_timer.stop()
         self.intro_timer_started = True
         QtCore.QTimer.singleShot(0, self._start_intro)
     
@@ -2429,16 +2584,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # itself does when it resizes.
         WM_SETTINGCHANGE  = 0x001A
         HWND_BROADCAST    = 0xFFFF
-        SMTO_ABORTIFHUNG  = 0x0002
-        user32.SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,          # wParam — unused for this message
-            0,          # lParam — 0 signals a general settings change
-            SMTO_ABORTIFHUNG,
-            5000,       # timeout per window, ms
-            None,
-        )
+        # PostMessageW is fire-and-forget — it queues WM_SETTINGCHANGE to
+        # every top-level window and returns instantly.  SendMessageTimeoutW
+        # was blocking up to 5 s *per window*; with several slow processes
+        # on the desktop that added up to 30 s of frozen startup.
+        # All windows still receive the notification and refresh their
+        # cached work-area when their message queues are next processed.
+        user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0)
 
         print(f"[AppBar] Registered — DPR={dpr}, "
               f"monitor phys=({phys_x},{phys_y},{phys_x+phys_width},{phys_y+phys_height}), "
@@ -2469,15 +2621,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # space has been freed and can expand back into it.
             WM_SETTINGCHANGE = 0x001A
             HWND_BROADCAST   = 0xFFFF
-            SMTO_ABORTIFHUNG = 0x0002
-            user32.SendMessageTimeoutW(
-                HWND_BROADCAST,
-                WM_SETTINGCHANGE,
-                0, 0,
-                SMTO_ABORTIFHUNG,
-                5000,
-                None,
-            )
+            user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0)
             print("[AppBar] Unregistered — desktop space released")
         except Exception as e:
             print(f"[AppBar] Warning: ABM_REMOVE failed: {e}")
@@ -2652,6 +2796,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
           - All games Final / done               → stop; switch to next-day mode
           - Otherwise (scheduled, >2 min away)   → idle: poll every 5 minutes
         """
+        # Never touch the timer while the intro is playing — it was stopped before
+        # the intro started and will be re-armed by update_intro() when it finishes.
+        if self.intro_active:
+            return
         live_statuses  = {'In Progress', 'Live'}
         final_statuses = {'Final', 'Completed', 'Game Over'}
         _pre_statuses_all = {'Scheduled', 'Pre-Game', 'Warmup', 'Preview',
@@ -3044,6 +3192,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 'text':                text,
                 'team_color':          get_team_color(scoring_full or ''),
                 'watched_team_scored': watched_team_scored,
+                'alert_type':          ('for_team' if watched_team_scored else 'vs_team'),
             })
             print(f"[ALERT] Queued: {text}")
 
@@ -3078,6 +3227,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     'text':                text,
                     'team_color':          get_team_color(color_name),
                     'watched_team_scored': False,
+                    'alert_type':          'game_starts',
                 })
                 print(f"[ALERT] Queued (start): {text}")
 
@@ -3131,6 +3281,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     'text':                text,
                     'team_color':          get_team_color(color_name),
                     'watched_team_scored': False,
+                    'alert_type':          'game_finishes',
                 })
                 print(f"[ALERT] Queued (final): {text}")
 
@@ -3145,12 +3296,96 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._last_alert_data = dict(self._current_alert)  # remember for replay
         self._alert_phase = 'in'
         self._alert_phase_start_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        self._play_alert_sound(self._current_alert.get('alert_type'))
         if self._alert_timer is None:
             self._alert_timer = QtCore.QTimer()
             self._alert_timer.setTimerType(QtCore.Qt.PreciseTimer)
             self._alert_timer.timeout.connect(self._tick_alert)
         self._alert_timer.start(self._scroll_timer_interval_ms)
         print(f"[ALERT] Showing: {self._current_alert['text']}")
+
+    def _play_alert_sound(self, alert_type, force=False):
+        """Play alert sound for the given alert type if enabled in settings.
+
+        force=True bypasses the enabled checkbox (used by the debug test key).
+        Uses Windows MCI (winmm) as primary backend — no multimedia plugins needed.
+        Falls back to QMediaPlayer on non-Windows.
+        """
+        if not alert_type:
+            return
+
+        cfg = {
+            'for_team':      ('scoring_alert_sound_for_team_enabled', 'scoring_alert_sound_for_team_file'),
+            'vs_team':       ('scoring_alert_sound_vs_team_enabled', 'scoring_alert_sound_vs_team_file'),
+            'game_starts':   ('scoring_alert_sound_game_starts_enabled', 'scoring_alert_sound_game_starts_file'),
+            'game_finishes': ('scoring_alert_sound_game_finishes_enabled', 'scoring_alert_sound_game_finishes_file'),
+        }
+        keys = cfg.get(alert_type)
+        if not keys:
+            return
+        enabled_key, file_key = keys
+        if not force and not bool(self.settings.get(enabled_key, False)):
+            return
+
+        filename = str(self.settings.get(file_key, '')).strip()
+        if not filename:
+            print(f"[ALERT] No sound file configured for {alert_type} ({file_key} is empty)")
+            return
+
+        candidates = [
+            os.path.join(APPDATA_DIR, filename),
+            os.path.join(APPDATA_DIR, 'MLB-TCKR.sounds', filename),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
+        ]
+        runtime_base = getattr(sys, '_MEIPASS', None)
+        if runtime_base:
+            candidates.append(os.path.join(runtime_base, filename))
+
+        sound_path = next((p for p in candidates if os.path.isfile(p)), None)
+        if not sound_path:
+            print(f"[ALERT] Sound file not found for {alert_type}: {filename}")
+            print(f"[ALERT] Searched: {candidates}")
+            return
+
+        print(f"[ALERT] Playing sound: {sound_path}")
+
+        if getattr(self, '_mci_available', False):
+            # Windows MCI — plays MP3 natively, no extra plugins needed
+            import threading
+            import ctypes
+            def _mci_play(path):
+                try:
+                    wm = ctypes.windll.winmm
+                    alias = 'mlb_alert'
+                    # Close any previous instance
+                    wm.mciSendStringW(f'close {alias}', None, 0, None)
+                    cmd_open = f'open "{path}" type mpegvideo alias {alias}'
+                    ret = wm.mciSendStringW(cmd_open, None, 0, None)
+                    if ret != 0:
+                        print(f'[ALERT] MCI open failed (code {ret}): {path}')
+                        return
+                    wm.mciSendStringW(f'play {alias}', None, 0, None)
+                    # Wait for playback then close (poll every 200 ms)
+                    import time
+                    buf = ctypes.create_unicode_buffer(128)
+                    for _ in range(300):  # max 60 s
+                        time.sleep(0.2)
+                        wm.mciSendStringW(f'status {alias} mode', buf, 127, None)
+                        if buf.value != 'playing':
+                            break
+                    wm.mciSendStringW(f'close {alias}', None, 0, None)
+                except Exception as _mci_err:
+                    print(f'[ALERT] MCI playback error: {_mci_err}')
+            threading.Thread(target=_mci_play, args=(sound_path,), daemon=True).start()
+        elif ALERT_SOUND_AVAILABLE and self._alert_player is not None:
+            try:
+                media = QtMultimedia.QMediaContent(QtCore.QUrl.fromLocalFile(sound_path))
+                self._alert_player.setMedia(media)
+                self._alert_player.play()
+            except Exception as _snd_err:
+                print(f"[ALERT] QMediaPlayer playback failed ({alert_type}): {_snd_err}")
+        else:
+            print("[ALERT] No audio backend available")
 
     def _tick_alert(self):
         """Drive alert phase transitions and schedule repaints."""
@@ -3653,11 +3888,38 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 # Kick off normal scrolling now that intro is finished
                 self.scroll_timer.start(self._scroll_timer_interval_ms)
                 print("[INTRO] Complete — starting ticker scroll from off-screen right")
-                # Start any alerts that were queued while the intro was playing
-                if self._alert_queue and self._current_alert is None:
-                    QtCore.QTimer.singleShot(400, self._start_next_alert)
+                # Defer the heavy pixmap build + timer start to the next event-loop
+                # tick so the scroll timer fires at least one frame before the main
+                # thread is occupied.  The update timer is started inside
+                # _post_intro_setup so its countdown begins *after* the build,
+                # preventing an immediate re-fetch while the ticker is being rendered.
+                QtCore.QTimer.singleShot(0, self._post_intro_setup)
 
         self.update()
+
+    def _post_intro_setup(self):
+        """Called one event-loop tick after the intro completes.
+
+        Deferring the ticker build and update-timer start here lets the scroll
+        timer fire at least one frame before the main thread is occupied,
+        eliminating the visible freeze between intro end and first scroll
+        movement.  Starting the update timer *after* the build means the
+        5-second polling countdown begins once the ticker is ready, preventing
+        an immediate re-fetch during construction."""
+        self.build_ticker_pixmap()
+        # Activate scrolling immediately.  Two things are needed:
+        #   1. _scroll_speed_px_per_ms — stays 0.0 from __init__ until a full
+        #      on_fetch_complete cycle sets it; we mirror that calc here.
+        #   2. scroll_offset — was parked at -self.width() by update_intro so
+        #      the ticker "came in from the right"; reset to 0 so content is
+        #      visible on the very first painted frame after intro.
+        raw_speed = self.settings.get('speed', 2)
+        self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
+        self.scroll_offset = 0.0
+        self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        self._reschedule_update_timer()
+        if self._alert_queue and self._current_alert is None:
+            QtCore.QTimer.singleShot(400, self._start_next_alert)
 
     def _games_fingerprint(self):
         """Return a tuple encoding all data that visually affects the ticker.
@@ -3676,11 +3938,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 g.get('pitcher_pitches'), g.get('pitcher_side'),
                 bool(r.get('first')), bool(r.get('second')), bool(r.get('third')),
                 g.get('away_record'), g.get('home_record'),
+                g.get('win_probability_home'),  # bar redraws when only WP changes
             ))
         return (settings_key, tuple(parts))
 
     def build_ticker_pixmap(self):
         """Build the complete ticker pixmap with all games"""
+        # Don't block the main thread building the ticker while the intro is
+        # playing — it won't be displayed and logo-crop cost can take 30+ s.
+        # A rebuild is triggered explicitly when the intro finishes.
+        if self.intro_active:
+            return
         if not self.games:
             # No games today OR no network data — pick the right message
             if self._no_data_mode:
@@ -4376,16 +4644,70 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 if _hsub_text:
                     painter.drawText(x, record_y, _hsub_text)
 
+        # Win probability bar — 3px strip at the very bottom of live (non-final) cards.
+        # Layout: [X%] [====away====|====home====] [X%]
+        # The coloured bar is inset on each side to make room for the % labels so the
+        # bar never overruns the text above it.  Both bar and labels share the same
+        # bottom pixel so they sit on a common visual baseline.
+        _show_wp = self.settings.get('show_win_probability', True)
+        _wp_home = game.get('win_probability_home') if _show_wp else None
+        if _wp_home is not None:
+            _bar_h = 3
+            _bar_y = self.ticker_height - _bar_h
+            _sep_w = 4           # wide dark separator — visible at any bar height
+            _lbl_gap = 2         # gap between label text and bar edge (px)
+
+            # Measure labels before drawing so we know how much to inset the bar
+            _away_pct_str = f"{round((1.0 - _wp_home) * 100)}%"
+            _home_pct_str = f"{round(_wp_home * 100)}%"
+            painter.setFont(self.tiny_font)
+            _away_lbl_w = tiny_metrics.horizontalAdvance(_away_pct_str)
+            _home_lbl_w = tiny_metrics.horizontalAdvance(_home_pct_str)
+
+            # Bar occupies the space BETWEEN the two labels
+            _bar_x0 = _away_lbl_w + _lbl_gap
+            _bar_x1 = total_width - _home_lbl_w - _lbl_gap
+            _bar_w  = max(0, _bar_x1 - _bar_x0)
+
+            # Baseline chosen so text bottom == bar bottom (same floor pixel).
+            # descent() is how far glyphs extend below the baseline — subtracting it
+            # from the bar's bottom row gives the baseline that lands glyph bottoms
+            # on that same row.
+            _desc   = max(0, tiny_metrics.descent())
+            _pct_y  = _bar_y + _bar_h - _desc  # = ticker_height - _desc
+
+            if _bar_w > 0:
+                _home_w = int(_bar_w * _wp_home)
+                _away_w = _bar_w - _home_w
+                _away_bar = QtGui.QColor(away_color)
+                _away_bar.setAlpha(210)
+                _home_bar = QtGui.QColor(home_color)
+                _home_bar.setAlpha(210)
+                if _away_w > 0:
+                    painter.fillRect(_bar_x0, _bar_y, _away_w, _bar_h, _away_bar)
+                if _home_w > 0:
+                    painter.fillRect(_bar_x0 + _away_w, _bar_y, _home_w, _bar_h, _home_bar)
+                # Wider dark separator so it reads clearly at all bar sizes
+                if 0 < _away_w < _bar_w:
+                    _sep_x = _bar_x0 + _away_w - _sep_w // 2
+                    painter.fillRect(_sep_x, _bar_y, _sep_w, _bar_h, QtGui.QColor(0, 0, 0, 220))
+
+            # % labels — only draw when there's enough card width for both without collision
+            painter.setPen(QtGui.QColor(255, 255, 255, 150))
+            if _away_lbl_w + _lbl_gap * 2 + _home_lbl_w < total_width:
+                painter.drawText(0, _pct_y, _away_pct_str)
+                painter.drawText(total_width - _home_lbl_w, _pct_y, _home_pct_str)
+
         painter.end()
         return pixmap
-    
+
     def update_scroll(self):
         """Trigger a repaint; scroll position is computed at actual render time
         inside paintEvent to avoid timer-callback lag and missed-tick jumps."""
         if not self.ticker_pixmap or self._scroll_max_width == 0:
             return
         self.update()
-    
+
     def paintEvent(self, event):
         """Optimized paint event with cached backgrounds"""
         painter = QtGui.QPainter(self)
@@ -5001,10 +5323,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         team  = random.choice(teams)
         events = [
             ('Judge', 'Home Run', 1),
-            ('Ohtani', 'Home Run', 2),
-            ('Acuna', 'Double', 1),
-            ('Trout', 'Single', 0),
-            ('Betts', 'Home Run', 3),
+            ('Mattingly', 'Home Run', 3),
+            ('Winfield', 'Double', 2),
+            ('Ruth', 'Single', 1),
+            ('Charovkine', 'Home Run', 4),
         ]
         batter, event_str, rbi = random.choice(events)
         rbi_str = f" ({rbi} RBI)" if rbi > 0 else ""
@@ -5013,10 +5335,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
             'text':                text,
             'team_color':          MLB_TEAM_COLORS_ALL[team][0],
             'watched_team_scored': True,
+            'alert_type':          'for_team',
         })
         print(f"[DEBUG] Test alert queued: {text}")
         if self._current_alert is None:
+            # Normal case: start the alert — _start_next_alert plays the sound.
             self._start_next_alert()
+        else:
+            # Alert already in progress; queue will drain on its own but play
+            # the sound immediately so the test gives audible feedback now.
+            self._play_alert_sound('for_team', force=True)
 
     def closeEvent(self, event):
         """Cleanup on close"""
@@ -6725,7 +7053,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         # Position on same screen as ticker BEFORE loading data
         self._position_below_ticker()
         self._load_games_list()
-        self._fetch_box_score()
+        self._fetch_box_score(prefer_index=True)
         
         # Setup auto-refresh for live games
         self._refresh_timer = QtCore.QTimer(self)
@@ -6745,7 +7073,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
             self._current_game_index = max(0, min(game_index, len(self._games_list) - 1))
             self._update_nav_buttons()
             self._update_game_banner()
-            self._fetch_box_score()
+            self._fetch_box_score(prefer_index=True)
 
     def _build_ui(self):
         """Build the main UI layout."""
@@ -6906,7 +7234,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         self._update_nav_buttons()
         self._update_game_banner()
         self._show_loading()
-        self._fetch_box_score()
+        self._fetch_box_score(prefer_index=True)
 
     def _go_next_game(self):
         """Navigate to next game (wraps from last to first)."""
@@ -6917,7 +7245,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         self._update_nav_buttons()
         self._update_game_banner()
         self._show_loading()
-        self._fetch_box_score()
+        self._fetch_box_score(prefer_index=True)
 
     def _update_game_banner(self):
         """Re-render the ticker-style live game banner from current game data."""
@@ -6956,20 +7284,42 @@ class BoxScoreWindow(QtWidgets.QWidget):
         # explicit next/prev navigation or when the window is opened.
         self._update_game_banner()
 
+    def _resolve_displayed_game(self, prefer_index=False):
+        """Return the game dict targeted by the box score window.
+
+        prefer_index=True is used for explicit user navigation. Timer-driven
+        refreshes should keep the view anchored by game_id to avoid index drift
+        when the ticker list changes order or contents.
+        """
+        live_games = getattr(self._ticker_widget, 'games', []) if self._ticker_widget else []
+
+        if prefer_index or self._displayed_game_id is None:
+            if not self._games_list or self._current_game_index >= len(self._games_list):
+                return None
+            return self._games_list[self._current_game_index]
+
+        for g in live_games:
+            if g.get('game_id') == self._displayed_game_id:
+                return g
+
+        if self._games_list and 0 <= self._current_game_index < len(self._games_list):
+            return self._games_list[self._current_game_index]
+        return None
+
     def _show_loading(self):
         """Clear content area and show a Loading... message."""
         self._content_browser.setHtml(
-            '<body style="background:#111;color:#888;font-family:monospace;'
+            f'<body style="background:#111;color:#FFD700;font-family:\'{self._ozone_family}\',monospace;'
             'padding:40px;text-align:center;font-size:16px;">Loading&hellip;</body>'
         )
 
-    def _fetch_box_score(self):
+    def _fetch_box_score(self, prefer_index=False):
         """Fetch box score data for current game."""
-        if not self._games_list or self._current_game_index >= len(self._games_list):
+        game = self._resolve_displayed_game(prefer_index=prefer_index)
+        if not game:
             self._show_no_data()
             return
 
-        game = self._games_list[self._current_game_index]
         game_id = game.get('game_id')
 
         if not game_id:
@@ -7008,13 +7358,10 @@ class BoxScoreWindow(QtWidgets.QWidget):
     
     def _start_refresh_if_live(self):
         """Start auto-refresh timer if game is live."""
-        # Always read fresh from ticker so we pick up status changes
-        live_games = getattr(self._ticker_widget, 'games', []) if self._ticker_widget else []
-        if not live_games or self._current_game_index >= len(live_games):
+        game = self._resolve_displayed_game(prefer_index=False)
+        if not game:
             self._refresh_timer.stop()
             return
-
-        game = live_games[self._current_game_index]
         status = game.get('status', '')
 
         if status in ['In Progress', 'Live']:
@@ -7024,7 +7371,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
     
     def _on_refresh_timer(self):
         """Handle refresh timer for live games."""
-        self._fetch_box_score()
+        self._fetch_box_score(prefer_index=False)
     
     def _render_box_score(self):
         """Render the box score as rich HTML in the content browser."""
@@ -7039,7 +7386,10 @@ class BoxScoreWindow(QtWidgets.QWidget):
             self._show_no_data()
             return
 
-        game = self._games_list[self._current_game_index]
+        game = self._resolve_displayed_game(prefer_index=False)
+        if not game:
+            self._show_no_data()
+            return
         away_name = game.get('away_name', boxscore.get('away', {}).get('team', {}).get('name', 'Away'))
         home_name = game.get('home_name', boxscore.get('home', {}).get('team', {}).get('name', 'Home'))
         away_score = game.get('away_score', 0)
@@ -7062,6 +7412,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
             game_datetime=game.get('game_datetime', ''),
             decisions=self._box_score_data.get('decisions', {}),
             player_notes=self._box_score_data.get('player_notes', {}),
+            recent_plays=self._box_score_data.get('recent_plays', []),
         )
         self._content_browser.setHtml(html)
         self._content_browser.verticalScrollBar().setValue(0)
@@ -7115,7 +7466,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
 
     def _build_html(self, boxscore, linescore, away_name, home_name,
                     game_info_list=None, officials=None, game_datetime='',
-                    decisions=None, player_notes=None):
+                    decisions=None, player_notes=None, recent_plays=None):
         """Assemble the full HTML for a box score display."""
         css = """
         <style>
@@ -7308,6 +7659,18 @@ class BoxScoreWindow(QtWidgets.QWidget):
         if game_info_html:
             parts.append('<hr class="d">')
             parts.append(game_info_html)
+
+        # ── Full-width Recent Plays section ───────────────────────────────────
+        if recent_plays:
+            parts.append('<hr class="d">')
+            parts.append('<div class="gi-header">Recent Plays</div>')
+            parts.append('<div class="gi">')
+            for _rp in recent_plays:
+                _half = _rp.get('half', '')
+                _inn  = _rp.get('inning', '')
+                _desc = _rp.get('description', '')
+                parts.append(f'<b>{_half} {_inn}:</b> {_desc}<br>')
+            parts.append('</div>')
 
         parts.append('</td></tr></table></body>')
         return ''.join(parts)
@@ -7940,6 +8303,7 @@ class BoxScoreDataWorker(QtCore.QThread):
             # and the /boxscore endpoint doesn't reliably include them either.
             raw_decisions = {}
             raw_player_notes: dict = {}
+            raw_recent_plays: list = []
             try:
                 game_feed = statsapi.get('game', {'gamePk': self.game_id})
                 live_data = game_feed.get('liveData', {})
@@ -7952,6 +8316,27 @@ class BoxScoreDataWorker(QtCore.QThread):
                         _note = (_pd.get('note') or '').strip()
                         if _note:
                             raw_player_notes[_pid_str] = _note[0]
+                # Extract last 5 completed plays for play-by-play display
+                try:
+                    _all_plays = live_data.get('plays', {}).get('allPlays', [])
+                    for _play in reversed(_all_plays):
+                        _pa = _play.get('about', {})
+                        _pr = _play.get('result', {})
+                        if not _pa.get('isComplete'):
+                            continue
+                        _desc = (_pr.get('description') or '').strip()
+                        if not _desc:
+                            continue
+                        _half = 'Top' if _pa.get('halfInning') == 'top' else 'Bot'
+                        raw_recent_plays.append({
+                            'inning': _pa.get('inning', ''),
+                            'half': _half,
+                            'description': _desc,
+                        })
+                        if len(raw_recent_plays) >= 5:
+                            break
+                except Exception:
+                    pass
             except Exception as feed_err:
                 print(f"[BoxScore] Game feed fetch failed: {feed_err}")
             # Fetch linescore directly from the MLB Stats API for reliable structure
@@ -7987,6 +8372,7 @@ class BoxScoreDataWorker(QtCore.QThread):
                 'officials': officials,
                 'decisions': raw_decisions,
                 'player_notes': raw_player_notes,
+                'recent_plays': raw_recent_plays,
             })
             self.data_fetched.emit(payload)
         except Exception as e:
@@ -8798,6 +9184,14 @@ class SettingsDialog(QtWidgets.QDialog):
         self.scheduled_check.setChecked(self.settings.get('include_scheduled_games', True))
         form_content.addRow("📆  Include Scheduled Games:", self.scheduled_check)
 
+        self.win_prob_check = QtWidgets.QCheckBox("Enabled")
+        self.win_prob_check.setChecked(self.settings.get('show_win_probability', True))
+        self.win_prob_check.setToolTip(
+            "Show a 3-pixel win probability bar at the bottom of each live game card.\n"
+            "The bar is split by team color: away on the left, home on the right."
+        )
+        form_content.addRow("📊  Show Win Probability Bars:", self.win_prob_check)
+
         # Show Game Moneyline — provider dropdown + per-provider API keys
         ml_row = QtWidgets.QHBoxLayout()
         self.moneyline_check = QtWidgets.QCheckBox("Enabled")
@@ -9122,6 +9516,31 @@ class SettingsDialog(QtWidgets.QDialog):
 
         outer_layout.addWidget(behaviour_group)
 
+        # Sound behaviour group
+        sound_group = QtWidgets.QGroupBox("Alert Sounds")
+        sound_form = QtWidgets.QFormLayout(sound_group)
+        sound_form.setContentsMargins(10, 14, 10, 10)
+        sound_form.setVerticalSpacing(8)
+        sound_form.setHorizontalSpacing(16)
+
+        self.alert_sound_for_team_check = QtWidgets.QCheckBox("Play sound when watched team scores")
+        self.alert_sound_for_team_check.setChecked(bool(self.settings.get('scoring_alert_sound_for_team_enabled', False)))
+        sound_form.addRow(self.alert_sound_for_team_check)
+
+        self.alert_sound_vs_team_check = QtWidgets.QCheckBox("Play sound when opponent scores against watched team")
+        self.alert_sound_vs_team_check.setChecked(bool(self.settings.get('scoring_alert_sound_vs_team_enabled', False)))
+        sound_form.addRow(self.alert_sound_vs_team_check)
+
+        self.alert_sound_game_starts_check = QtWidgets.QCheckBox("Play sound when watched team's game starts")
+        self.alert_sound_game_starts_check.setChecked(bool(self.settings.get('scoring_alert_sound_game_starts_enabled', False)))
+        sound_form.addRow(self.alert_sound_game_starts_check)
+
+        self.alert_sound_game_finishes_check = QtWidgets.QCheckBox("Play sound when watched team's game finishes")
+        self.alert_sound_game_finishes_check.setChecked(bool(self.settings.get('scoring_alert_sound_game_finishes_enabled', False)))
+        sound_form.addRow(self.alert_sound_game_finishes_check)
+
+        outer_layout.addWidget(sound_group)
+
         # Watched teams group
         teams_group = QtWidgets.QGroupBox("Watched Teams")
         teams_layout = QtWidgets.QVBoxLayout(teams_group)
@@ -9317,6 +9736,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['live_games_only'] = self.live_only_check.isChecked()
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
+        self.settings['show_win_probability'] = self.win_prob_check.isChecked()
         self.settings['show_moneyline'] = self.moneyline_check.isChecked()
         self.settings['odds_api_provider'] = self.odds_provider_combo.currentData()
         self.settings['odds_api_key'] = self.odds_api_key_edit.text().strip()
@@ -9366,6 +9786,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['scoring_alert_vs_team']     = self.alert_vs_team_check.isChecked()
         self.settings['scoring_alert_game_starts']   = self.alert_game_starts_check.isChecked()
         self.settings['scoring_alert_game_finishes'] = self.alert_game_finishes_check.isChecked()
+        self.settings['scoring_alert_sound_for_team_enabled'] = self.alert_sound_for_team_check.isChecked()
+        self.settings['scoring_alert_sound_vs_team_enabled'] = self.alert_sound_vs_team_check.isChecked()
+        self.settings['scoring_alert_sound_game_starts_enabled'] = self.alert_sound_game_starts_check.isChecked()
+        self.settings['scoring_alert_sound_game_finishes_enabled'] = self.alert_sound_game_finishes_check.isChecked()
         self.settings['watched_teams'] = [
             team for team, cb in self._watched_team_checks.items() if cb.isChecked()
         ]

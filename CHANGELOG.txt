@@ -1,3 +1,29 @@
+Version 1.5.3 (2026-04-30)
+--------------------------
+NEW FEATURES:
+- **Per-alert sound notifications**: Settings → Alerts now includes a "Play Sound"
+  checkbox for each of the four alert types (Your Team Scores, Opponent Scores,
+  Game Starts, Game Ends/Final). When enabled, an MP3 plays via the Windows MCI
+  audio backend (no multimedia plugins required) each time that alert fires.
+  The sound file path is configurable per-alert type, defaulting to the included
+  "play-ball" organ sting. Files are resolved from the MLB-TCKR AppData folder
+  first, then the application directory.
+
+IMPROVEMENTS:
+- **Settings defaults now applied on upgrade**: get_settings() now merges saved
+  settings with built-in defaults, so any key missing from an existing settings
+  file (e.g. newly added sound file paths) gets its default value automatically.
+  Previously, only users with no settings file at all received defaults.
+
+BUG FIXES:
+- Alert test key (Shift+A) was triggering the alert sound twice — once from the
+  direct _play_alert_sound() call and again from _start_next_alert(). Fixed so
+  the sound plays exactly once per key press: _start_next_alert() handles it when
+  no alert is in progress; the direct call is used only when an alert is already
+  displaying and the new one is queued.
+
+------------------------------------------------------------------------------
+
 Version 1.5.2 (2026-04-29)
 --------------------------
 NEW FEATURES:
