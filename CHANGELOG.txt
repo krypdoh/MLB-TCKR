@@ -12,13 +12,9 @@ BUG FIXES:
 - **Block and logo widths symmetrized**: away/home block widths and logo widths are
   each set to max(away, home) before total_width is calculated, so the left and
   right outer columns are always equal width regardless of team name length.
-- **Home block name alignment fixed**: The home team name was drawn flush-left in
-  its block (closest to the logo), so any extra pixels from block symmetrization
-  fell off the right edge of the card as blank padding, making the win-probability
-  bar appear longer on the home side. Fixed to mirror the away block: home name is
-  now flush-right at the card's right edge with the W-L/odds column to its left.
-  Pitcher stats and record subtext rows are also right-justified at the block edge.
-  The same mirror fix was applied to the scheduled-game (pre-game) home block.
+- **Win Probability Bar symmetry and padding**: The Win Probability Bar now extends equally past both team blocks, with a fixed margin on each side, so it always appears visually balanced regardless of player info width.
+- **Ticker scroll-in animation restored**: On program start, the scrolling ticker now begins off-screen to the right and smoothly scrolls in, instead of abruptly appearing in place. Regression was caused by a scroll_offset reset after the intro; this is now fixed.
+
 
 ------------------------------------------------------------------------------
 

@@ -17,3 +17,9 @@ build/temp.*
 # virtualenv
 venv/
 .env
+
+# dev
+.cursor/
+.kilo/
+.vscode/
+.hintrc

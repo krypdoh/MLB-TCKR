@@ -1,0 +1,33 @@
+MLB-TCKR/
+├── MLB-TCKR.py                # Main application code
+├── MLB-TCKR.spec              # PyInstaller spec file (builds EXE)
+├── MLB-TCKR-console.spec      # (for console build, optional)
+├── setup_mlb_cython.py        # Cython build script
+├── mlb_ticker_utils_cython.pyx# Cython source (for fast scrolling)
+├── mlb_ticker_utils_cython.c  # (generated, deleted after build)
+├── mlb_ticker_utils_cython.cpXXX-win_amd64.pyd # Cython extension (built)
+├── requirements.txt           # Python dependencies
+├── version-mlb-tckr.txt       # Version info (embedded in EXE)
+├── led_board-7.ttf            # Font
+├── SubwayTicker.ttf           # Font
+├── PixelGosub-ZaRz.ttf        # Font
+├── PixelFont7-G02A.ttf        # Font
+├── mlb.ico                    # App icon
+├── mlb-reverse.png            # Tray/taskbar icon
+├── certifi/                   # CA bundle for SSL (auto-included)
+│   └── cacert.pem
+├── espnlogos/
+│   └── png/
+│       └── *.png              # Team logos (bundled as MLB-TCKR.images)
+├── MLB-TCKR.images/           # (optional, project logos)
+│   └── *                      # Any images in this folder
+├── pyi_rth_unicodedata.py     # PyInstaller runtime hook
+├── pyi_rth_mlb_qt.py          # PyInstaller runtime hook
+├── pyi_rth_requests_charset.py# PyInstaller runtime hook
+├── [User AppData]\MLB-TCKR/
+│   ├── MLB-TCKR.Settings.json # User settings (created at runtime)
+│   └── MLB-TCKR.images/       # User-added logos/fonts (optional)
+│       └── *                  # User images/fonts
+├── dist/
+│   ├── MLB-TCKR.exe           # Final bundled EXE (output)
+│   └── MLB-TCKR-console.exe   # (optional, console build)

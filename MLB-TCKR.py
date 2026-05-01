@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0430.2052
+Date: 2026.0501.0747
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.5.3"
+VERSION = "1.5.4"
 
 import warnings
 warnings.filterwarnings(
@@ -3907,15 +3907,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         5-second polling countdown begins once the ticker is ready, preventing
         an immediate re-fetch during construction."""
         self.build_ticker_pixmap()
-        # Activate scrolling immediately.  Two things are needed:
-        #   1. _scroll_speed_px_per_ms — stays 0.0 from __init__ until a full
-        #      on_fetch_complete cycle sets it; we mirror that calc here.
-        #   2. scroll_offset — was parked at -self.width() by update_intro so
-        #      the ticker "came in from the right"; reset to 0 so content is
-        #      visible on the very first painted frame after intro.
+        # Activate scrolling immediately.  _scroll_speed_px_per_ms stays 0.0
+        # from __init__ until a full on_fetch_complete cycle sets it; mirror
+        # that calculation here so the first frame scrolls at the right speed.
+        # scroll_offset was set to -self.width() by update_intro just before
+        # this function was scheduled, so content scrolls in from off-screen
+        # right — DO NOT reset it here or the entry animation is lost.
         raw_speed = self.settings.get('speed', 2)
         self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
-        self.scroll_offset = 0.0
         self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
         self._reschedule_update_timer()
         if self._alert_queue and self._current_alert is None:
@@ -4273,6 +4272,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
         _sym_logo_w = max(away_logo_w, home_logo_w)
         away_logo_w = _sym_logo_w
         home_logo_w = _sym_logo_w
+        # Extend the card by a fixed margin on each side so the Win Probability Bar
+        # visually "wraps" both team names equally even when player-info rows are
+        # the widest element.  The content is shifted right by _card_pad and the
+        # extra pixel columns on both edges are filled by the bar.
+        _card_pad = 6  # px added on each side (12 px total extra card width)
 
         # Calculate width based on game status
         # Unknown statuses (e.g. "Manager challenge") render as live (show scores + diamond)
@@ -4320,7 +4324,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Gaps mirror each other: name(5)logo(15)score(8)diamond+gap(6)score(15)logo(5)name
             total_width = (away_block_width + 5 + away_logo_w + 15 +
                           _away_score_w + 8 + effective_after_diamond +
-                          _home_score_w + 15 + home_logo_w + 5 + home_block_width)
+                          _home_score_w + 15 + home_logo_w + 5 + home_block_width
+                          + 2 * _card_pad)
         else:
             # Scheduled/Delayed/Postponed — identical outer geometry to in-progress;
             # centre element is time/vs instead of score+diamond+score.
@@ -4341,7 +4346,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             center_element_w = max(status_width, _vs_w)
             total_width = (away_block_width + 5 + away_logo_w + 15 +
                           center_element_w + 15 +
-                          home_logo_w + 5 + home_block_width)
+                          home_logo_w + 5 + home_block_width
+                          + 2 * _card_pad)
 
         # Create pixmap at physical resolution so text renders at native DPR
         pixmap = QtGui.QPixmap(int(total_width * self.dpr), int(self.ticker_height * self.dpr))
@@ -4358,7 +4364,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         painter.setRenderHint(QtGui.QPainter.TextAntialiasing, self._text_aa_hint)
         
-        x = 0
+        x = _card_pad  # shift all content right by pad; bar fills both margins
         logo_y = (self.ticker_height - logo_size) // 2 - 3  # logos sit 3px above centre
         # Use actual visual bounding rect so pixel/LED fonts center correctly
         _br = metrics.boundingRect('ABCWMgy0123456789')
@@ -4518,15 +4524,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawPixmap(x, logo_y, home_logo)
             x += home_logo_w + 5  # Mirror: name→logo gap on away side
             
-            # Home team name (colored) — mirrors away block: name flush-RIGHT at
-            # card right edge, W-L col to its left.  This absorbs any extra space
-            # from block symmetrization on the inside (near the logo) instead of
-            # letting it spill off the right edge of the card.
+            # Home team name (colored) — name is flush-LEFT (nearest to logo),
+            # W-L / moneyline col is to its RIGHT. Mirrors the away block:
+            # away has [col][name][→logo] so home has [logo→][name][col].
+            # Extra space from block symmetrization sits at the card's right edge.
             painter.setFont(self._qfont)
             painter.setPen(home_color)
-            home_name_x = x + home_block_width - home_name_width
+            home_name_x = x  # flush left — name immediately follows the logo gap
             if home_col_w > 0:
-                home_col_draw_x = home_name_x - odds_gap - home_col_w
+                home_col_draw_x = x + home_name_width + odds_gap
             else:
                 home_col_draw_x = None
             painter.drawText(home_name_x, text_y, home_team)
@@ -4548,13 +4554,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.setPen(QtGui.QColor('#BDBDBD'))
                 _home_row_text = home_detail_text if show_records else (home_record_text if show_wl else '')
                 if _home_row_text:
-                    _hrw = small_metrics.horizontalAdvance(_home_row_text)
-                    painter.drawText(x + home_block_width - _hrw, record_y, _home_row_text)
+                    painter.drawText(x, record_y, _home_row_text)
                 if show_records and home_live_detail and detail_y is not None:
                     painter.setFont(self.tiny_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
-                    _hld_w = tiny_metrics.horizontalAdvance(home_live_detail)
-                    painter.drawText(x + home_block_width - _hld_w, detail_y, home_live_detail)
+                    painter.drawText(x, detail_y, home_live_detail)
 
         else:
             # Scheduled/Delayed/Postponed — drawing mirrors in-progress exactly;
@@ -4635,12 +4639,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawPixmap(x, logo_y, _home_logo_pix)
             x += home_logo_w + 5
 
-            # ── Home name block — mirrors away: name flush-RIGHT, col to its left ──
+            # ── Home name block — name flush-LEFT (nearest logo), col to its RIGHT ──
             painter.setFont(self._qfont)
             painter.setPen(home_color)
-            home_name_x = x + home_block_width - home_name_width
+            home_name_x = x  # flush left — name immediately follows the logo gap
             if home_col_w > 0:
-                home_col_draw_x = home_name_x - odds_gap - home_col_w
+                home_col_draw_x = x + home_name_width + odds_gap
             else:
                 home_col_draw_x = None
             painter.drawText(home_name_x, text_y, home_team)
@@ -4660,8 +4664,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.setPen(QtGui.QColor('#BDBDBD'))
                 _hsub_text = (home_subtext if home_subtext else home_record_text) if show_records else (home_record_text if show_wl else '')
                 if _hsub_text:
-                    _hsub_w = small_metrics.horizontalAdvance(_hsub_text)
-                    painter.drawText(x + home_block_width - _hsub_w, record_y, _hsub_text)
+                    painter.drawText(x, record_y, _hsub_text)
 
         # Win probability bar — strip at the very bottom of live (non-final) cards.
         # The bar spans the FULL card width edge-to-edge.  % labels are drawn ON TOP
