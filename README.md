@@ -490,7 +490,7 @@ You should have received a copy of the GNU Affero General Public License along w
 **Paul R. Charovkine**
 
 - Program: MLB-TCKR
-- Version: 1.5.3
+- Version: 1.5.4
 - Date: 2026.04.30
 
 ---
