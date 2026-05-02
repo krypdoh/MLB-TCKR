@@ -1,3 +1,60 @@
+Version 1.5.6 (2026-05-02)
+--------------------------
+IMPROVEMENTS:
+- **Win Probability Bar layout refinement**: Adjusted bar geometry and spacing so
+  the Win Probability Bar remains visually centered and balanced across compact,
+  normal, and tall ticker heights.
+
+BUG FIXES:
+- **Win Probability Bar alignment edge cases**: Fixed layout drift that could occur
+  on certain DPI/font-scale combinations, causing slight left/right imbalance.
+- **Label/bar coexistence logic cleanup**: Improved `%` label visibility behavior
+  so text display no longer interferes with bar positioning in constrained heights.
+- **General layout stability fixes**: Applied additional small rendering and spacing
+  fixes to keep live game cards consistent during resize and first-draw updates.
+
+------------------------------------------------------------------------------
+
+Version 1.5.5 (2026-05-01)
+--------------------------
+NEW FEATURES:
+- **Anonymous telemetry (opt-in)**: MLB-TCKR now optionally reports anonymous
+  usage events to help improve the app. No personal data is collected — only
+  session duration, screen geometry, DPI, and which settings were changed.
+  Telemetry is disabled by default and can be enabled or disabled at any time
+  in Settings → Admin. A persistent random install ID (UUID) is generated
+  locally and never linked to any identity.
+  Events captured: app_run_started, app_run_ended, appbar_registered, settings_saved.
+
+IMPROVEMENTS:
+- **Settings dialog widened**: The Settings dialog is now wider to reduce
+  label truncation and improve readability across all tabs.
+- **Alerts tab repositioned**: The Alerts tab now appears between General and
+  Team Colors for a more logical settings flow.
+- **WP symmetry debug logging**: A new "Debug WP Symmetry" toggle in the Admin
+  tab prints detailed win-probability bar layout measurements to the console,
+  useful for diagnosing rendering issues on non-standard DPI configurations.
+
+BUG FIXES:
+- **Fetch-lock watchdog**: A stale fetch lock could prevent score data from
+  refreshing after a network timeout or unexpected error. A watchdog timer now
+  detects and force-clears any lock held longer than 45 seconds, ensuring the
+  ticker continues updating normally.
+- **Win Probability bar scales with compact heights**: At smaller ticker heights,
+  the win-probability strip now scales down proportionally instead of staying too
+  thick, preventing lower content rows from being pushed out of view.
+- **% label fit logic tied to bar height**: Win-probability `%` labels now render
+  only when the current bar height can contain the text. If space is insufficient,
+  labels are intentionally hidden so bar geometry always takes priority.
+- **Tall-height `%` labels restored**: At large ticker heights, the bar now grows
+  just enough to accommodate the existing `%` label font size, fixing cases where
+  labels disappeared because font scaling outpaced a previously fixed bar height.
+- **Subtler default bar thickness**: The default win-probability bar is now tuned
+  to be about 20% thinner while still guaranteeing `%` text fit when shown, making
+  the visual treatment less heavy without clipping.
+
+------------------------------------------------------------------------------
+
 Version 1.5.4 (2026-04-30)
 --------------------------
 BUG FIXES:

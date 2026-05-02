@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.5.6"
+VERSION = "1.5.5"
 
 import warnings
 warnings.filterwarnings(
@@ -4243,12 +4243,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Calculate total width needed
         game_pixmaps = []
-
-        # Target visual gap between rendered game-name bounds.  Using visual edges
-        # keeps perceived spacing consistent even when card internals have variable
-        # transparent margins (short names, logo width differences, etc.).
-        _visual_gap = max(0, int(round(self.ticker_height * 1.50)))
-        _trailing_gap = max(0, int(round(self.ticker_height * 1.0)))
+        total_width = logo_segment_w
+        spacing = 82
 
         _settings_key = (
             self.settings.get('show_team_records', True),
@@ -4274,34 +4270,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 pixmap = self.build_game_pixmap(game)
                 self._game_pixmap_cache[game_id] = (game_fp, pixmap)
             game_pixmaps.append(pixmap)
-
-        # Collect visual edges stored by build_game_pixmap.
-        # info tuple: (tile_width, visual_left, visual_right)
-        _card_infos = []
-        for pm in game_pixmaps:
-            tw = int(pm.width() / self.dpr)
-            vl = getattr(pm, '_visual_left', 0)
-            vr = getattr(pm, '_visual_right', tw)
-            vl = max(0, min(vl, tw))
-            vr = max(vl, min(vr, tw))
-            _card_infos.append((tw, vl, vr))
-
-        def _inter_gap(info_a, info_b):
-            # Convert desired visual gap into raw edge-to-edge tile spacing.
-            right_slack = info_a[0] - info_a[2]
-            left_slack = info_b[1]
-            # Keep visual spacing constant by allowing negative raw gaps.
-            # Negative means adjacent tiles overlap only in transparent margins.
-            return _visual_gap - right_slack - left_slack
-
-        # Compute total scroll-period width.
-        total_width = logo_segment_w
-        for i, (tw, _vl, _vr) in enumerate(_card_infos):
-            total_width += tw
-            if i < len(_card_infos) - 1:
-                total_width += _inter_gap(_card_infos[i], _card_infos[i + 1])
-            else:
-                total_width += _trailing_gap  # gap from last card to logo repeat
+            # pixmap.width() is physical pixels; divide by dpr to get logical width
+            total_width += int(pixmap.width() / self.dpr) + spacing
 
         # Build the tile list for one period instead of pre-baking everything
         # into a single giant pixmap (which exceeds GPU texture limits at high DPR
@@ -4316,15 +4286,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
             x_offset += logo_segment_w
 
         game_x_ranges = []
-        for i, (tw, _vl, _vr) in enumerate(_card_infos):
+        for pixmap in game_pixmaps:
             tile_start = x_offset
-            tiles.append((x_offset, 0, game_pixmaps[i]))
-            game_x_ranges.append((tile_start, tile_start + tw))
-            x_offset += tw
-            if i < len(_card_infos) - 1:
-                x_offset += _inter_gap(_card_infos[i], _card_infos[i + 1])
-            else:
-                x_offset += _trailing_gap
+            tile_w = int(pixmap.width() / self.dpr)
+            tiles.append((x_offset, 0, pixmap))
+            game_x_ranges.append((tile_start, tile_start + tile_w))
+            x_offset += tile_w + spacing
 
         self._ticker_tiles = tiles
         self._ticker_game_x_ranges = game_x_ranges
@@ -4381,15 +4348,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
         MLB_LOGO_CACHE[cache_key] = None  # cache the miss so we don't re-scan
         return None
     
-    def build_game_pixmap(self, game, force_show_player_info=False):
-        """Build pixmap for a single game.
-        
-        Args:
-            game: Game dict with scores, teams, etc.
-            force_show_player_info: If True, always display player/pitcher names and stats
-                                   regardless of show_team_records setting. Used by box score
-                                   window to always show player info.
-        """
+    def build_game_pixmap(self, game):
+        """Build pixmap for a single game"""
         status = game['status']
         away_team_full = game['away_name']
         home_team_full = game['home_name']
@@ -4458,27 +4418,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
         
         away_record = game.get('away_record', '0-0')
         home_record = game.get('home_record', '0-0')
-        # If force_show_player_info is True (e.g., box score window), always show
-        # player/pitcher names and stats regardless of the setting
-        show_records = force_show_player_info or self.settings.get('show_team_records', True)
+        show_records = self.settings.get('show_team_records', True)
         show_wl = self.settings.get('show_team_wl', True)
         _show_wp_setting = self.settings.get('show_win_probability', True)
         _wp_home = game.get('win_probability_home')
-        _game_is_final = status in ['Final', 'Completed', 'Game Over']
-        # For final games, override WP to 100% for the winning team so the bar
-        # renders as a solid winner-color strip, keeping all cards visually consistent.
-        if _show_wp_setting and _game_is_final:
-            _final_away = game.get('away_score', 0)
-            _final_home = game.get('home_score', 0)
-            _wp_home = 1.0 if _final_home > _final_away else 0.0
         _wp_visible = _show_wp_setting and (_wp_home is not None)
         # Compact mode for short bars: keep only core rows above the WP strip.
         _compact_wp_layout = _wp_visible and self.ticker_height <= 64
         if _compact_wp_layout:
-            # In compact mode on ticker, hide records/WL — but still show in box score
-            if not force_show_player_info:
-                show_records = False
-                show_wl = False
+            show_records = False
+            show_wl = False
         _pre_statuses_render = {'Scheduled', 'Preview', 'Pre-Game', 'Warmup',
                                   'Delayed Start', 'Delayed', 'Postponed'}
         _final_statuses_render = {'Final', 'Completed', 'Game Over'}
@@ -4514,7 +4463,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Win-prob bar height: keep it visually subtle (thinner than before).
         # Never grow the bar to fit text; hide % labels if they do not fit.
         _base_bar_h_raw = 9 if self.ticker_height >= 56 else max(2, self.ticker_height // 7)
-        _bar_h = max(2, int(round(_base_bar_h_raw * 0.6)) - 1)
+        _bar_h = max(2, int(round(_base_bar_h_raw * 0.6)))
 
         # Live stats detail (pitcher/batter) — for live games and any unknown status
         is_live = (status in ('In Progress', 'Live') or
@@ -4529,19 +4478,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
             away_live_detail = ''
             home_live_detail = ''
 
-        # If player info is hidden for ticker cards, do not let live-detail text
-        # reserve any width; otherwise live games become much wider than finals.
-        if not show_records:
-            away_live_detail = ''
-            home_live_detail = ''
-
-        # Reserve space at the TOP of the card for the WP bar strip.
-        # Content renders in the area below it (_content_y0 … ticker_height).
-        _bar_clearance = 1
-        _bar_top_margin = 2  # Space from top edge of ticker to the top of WP bar
-        _bar_reserve_px = (_bar_top_margin + _bar_h + _bar_clearance) if _wp_visible else 0
+        # Keep a conservative safety gap above the bar so descenders/details
+        # never get visually covered by the strip.
+        _bar_clearance = 2
+        _bar_reserve_px = (_bar_h + _bar_clearance) if _wp_visible else 0
         _content_h = max(1, self.ticker_height - _bar_reserve_px)
-        _content_y0 = _bar_reserve_px  # y-offset: content starts below the top bar
         
         # Get team colors (use full name for color lookup)
         away_color = QtGui.QColor(get_team_color(away_team_full))
@@ -4562,6 +4503,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Moneyline odds — look up from cache, format as +/- string
         # Never show odds on completed/final games (stale cache carries over to next day)
+        _game_is_final = status in ['Final', 'Completed', 'Game Over']
         show_moneyline = (self.settings.get('show_moneyline', False)
                   and not _game_is_final
                   and not _compact_wp_layout)
@@ -4698,7 +4640,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.TextAntialiasing, self._text_aa_hint)
         # Ensure card content never draws into the reserved win-probability strip zone.
         if _wp_visible and _bar_reserve_px > 0:
-            painter.setClipRect(0, _bar_reserve_px, total_width, self.ticker_height - _bar_reserve_px)
+            painter.setClipRect(0, 0, total_width, self.ticker_height - _bar_reserve_px)
         
         x = _card_pad  # shift all content right by pad; bar fills both margins
 
@@ -4787,14 +4729,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
             _small_cap = -small_metrics.boundingRect('0123456789').top()
         odds_y = text_y - _main_cap + _small_cap
 
-        # Shift all pre-computed content y-values below the top WP bar strip.
-        text_y  += _content_y0
-        record_y = (record_y  + _content_y0) if record_y  is not None else None
-        detail_y = (detail_y  + _content_y0) if detail_y  is not None else None
-        logo_y  += _content_y0
-        time_y  += _content_y0
-        odds_y  += _content_y0
-
         if status not in _pre_statuses_render:
             # Away team name (colored) — W-L record floats to the left, top-aligned;
             # moneyline odds appear below the W-L when present.
@@ -4809,7 +4743,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 away_col_draw_x = None
                 # Always right-justify name so it sits a fixed distance from the logo
                 away_name_x = x + away_block_width - away_name_width
-            _wp_name_left = away_name_x  # capture for WP bar left edge
             if away_col_draw_x is not None:
                 # W-L on top (only when both show_records and show_wl are on)
                 if show_wl and show_records:
@@ -4859,12 +4792,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 _fl_w  = _vs_fm_p.horizontalAdvance(final_label)
                 _fl_br = _vs_fm_p.boundingRect(final_label)
                 _fl_x  = x + (effective_after_diamond - _fl_w) // 2
-                _fl_y  = (_content_h - _fl_br.height()) // 2 - _fl_br.top() + _content_y0
+                _fl_y  = (_content_h - _fl_br.height()) // 2 - _fl_br.top()
                 painter.setFont(self.vs_font)
                 painter.setPen(QtGui.QColor('#FFD700'))
                 painter.drawText(_fl_x, _fl_y, final_label)
             else:
-                diamond_y = (_content_h - int(diamond_pixmap.height() / self.dpr)) // 2 + _content_y0
+                diamond_y = (_content_h - int(diamond_pixmap.height() / self.dpr)) // 2
                 painter.drawPixmap(x, diamond_y, diamond_pixmap)
             x += effective_after_diamond
 
@@ -4886,7 +4819,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.setFont(self._qfont)
             painter.setPen(home_color)
             home_name_x = x  # flush left — name immediately follows the logo gap
-            _wp_name_right = home_name_x + home_name_width  # capture for WP bar right edge
             if home_col_w > 0:
                 home_col_draw_x = x + home_name_width + odds_gap
             else:
@@ -4930,9 +4862,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 away_name_x = away_col_draw_x + away_col_w + odds_gap
             else:
                 away_col_draw_x = None
-                # Right-justify name so it sits at a fixed distance from the logo
-                # (same positioning as live games for consistent inter-card spacing)
-                away_name_x = x + away_block_width - away_name_width
+                away_name_x = x + (away_block_width - away_name_width) // 2
             if away_col_draw_x is not None:
                 if show_wl and show_records:
                     painter.setFont(self.small_font)
@@ -4983,7 +4913,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             time_x = x + (center_element_w - time_w) // 2
             time_br = time_metrics.boundingRect(status_text)
             vs_br = _vs_fm.boundingRect('vs')
-            time_above_y = (_content_h - time_br.height() - vs_br.height() - 3) // 2 - time_br.top() + _content_y0
+            time_above_y = (_content_h - time_br.height() - vs_br.height() - 3) // 2 - time_br.top()
             painter.drawText(time_x, time_above_y, status_text)
 
             painter.setFont(self.vs_font)
@@ -5024,12 +4954,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 if _hsub_text:
                     painter.drawText(x, record_y, _hsub_text)
 
-        # Win probability bar — thin strip at the TOP of live cards (with 2px margin from edge).
-        # Width is constrained to span only from the left edge of the away team name
-        # to the right edge of the home team name, so it never bleeds into padding.
+        # Win probability bar — strip at the very bottom of live (non-final) cards.
+        # The bar spans the FULL card width edge-to-edge.  % labels are drawn ON TOP
+        # of the bar at the left and right edges so they can never collide with content
+        # above.  drawText baseline = ticker_height so glyph bottoms sit on the last
+        # pixel row of the card, matching the bar's bottom edge exactly.
         if _wp_visible:
             painter.setClipping(False)
-            _bar_y = _bar_top_margin
+            _bar_y = self.ticker_height - _bar_h
             _sep_w = 4
 
             _away_pct_str = f"{round((1.0 - _wp_home) * 100)}%"
@@ -5038,12 +4970,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
             _away_lbl_w = tiny_metrics.horizontalAdvance(_away_pct_str)
             _home_lbl_w = tiny_metrics.horizontalAdvance(_home_pct_str)
 
-            # Bar spans exactly from the actual draw-time left edge of the away team
-            # name to the right edge of the home team name.  Using captured pixel
-            # positions is robust against any side-column offset or block symmetrization.
-            _bar_x = _wp_name_left
-            _bar_right = _wp_name_right
-            _bar_w = max(1, _bar_right - _bar_x)
+            # Normalize edge overlap so left/right extension appears symmetric.
+            # Keep the *smaller* side overlap and inset only the side that exceeds it.
+            _left_overlap = _card_pad + _away_outer_slack
+            _right_overlap = _card_pad + _home_outer_slack
+            _target_overlap = min(_left_overlap, _right_overlap)
+            _bar_left_inset = max(0, _left_overlap - _target_overlap)
+            _bar_right_inset = max(0, _right_overlap - _target_overlap)
+            if self.settings.get('debug_wp_symmetry', False): print(f"[WP-SYM] game={away_team}@{home_team} L={_left_overlap}px R={_right_overlap}px target={_target_overlap}px insetL={_bar_left_inset}px insetR={_bar_right_inset}px")
+            _bar_x = _bar_left_inset
+            _bar_w = max(1, total_width - _bar_left_inset - _bar_right_inset)
 
             _home_w = int(_bar_w * _wp_home)
             _away_w = _bar_w - _home_w
@@ -5055,30 +4991,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.fillRect(_bar_x, _bar_y, _away_w, _bar_h, _away_bar)
             if _home_w > 0:
                 painter.fillRect(_bar_x + _away_w, _bar_y, _home_w, _bar_h, _home_bar)
-            # Separator and % labels only for live games (not final — bar is solid)
-            if not is_final:
-                if 0 < _away_w < _bar_w:
-                    painter.fillRect(_bar_x + _away_w - _sep_w // 2, _bar_y, _sep_w, _bar_h,
-                                      QtGui.QColor(0, 0, 0, 220))
+            if 0 < _away_w < _bar_w:
+                painter.fillRect(_bar_x + _away_w - _sep_w // 2, _bar_y, _sep_w, _bar_h,
+                                  QtGui.QColor(0, 0, 0, 220))
 
-                # Labels drawn ON the bar only when the bar is tall enough to fit them.
-                # Skip entirely if the text height exceeds the bar height — bar takes priority.
-                _tbr = tiny_metrics.tightBoundingRect(_away_pct_str)
-                _actual_descent = max(0, _tbr.bottom())
-                _text_total_h = tiny_metrics.ascent() + _actual_descent
-                if _text_total_h <= _bar_h:
-                    _lbl_y = _bar_h - 1 - _actual_descent
-                    painter.setPen(QtGui.QColor(255, 255, 255, 220))
-                    if _away_lbl_w + 4 + _home_lbl_w < _bar_w:
-                        painter.drawText(_bar_x + 2, _lbl_y, _away_pct_str)
-                        painter.drawText(_bar_x + _bar_w - _home_lbl_w - 2, _lbl_y, _home_pct_str)
-
-        # Store visual name edges so ticker assembly can compute consistent
-        # inter-card gaps from the actual left/right name bounds.
-        _away_name_right = away_name_x + away_name_width
-        _home_name_right = home_name_x + home_name_width
-        pixmap._visual_left = min(away_name_x, home_name_x)
-        pixmap._visual_right = max(_away_name_right, _home_name_right)
+            # Labels drawn ON the bar only when the bar is tall enough to fit them.
+            # Skip entirely if the text height exceeds the bar height — bar takes priority.
+            _tbr = tiny_metrics.tightBoundingRect(_away_pct_str)
+            _actual_descent = max(0, _tbr.bottom())
+            _text_total_h = tiny_metrics.ascent() + _actual_descent
+            if _text_total_h <= _bar_h:
+                _lbl_y = _bar_y + _bar_h - 1 - _actual_descent
+                painter.setPen(QtGui.QColor(255, 255, 255, 220))
+                if _away_lbl_w + 4 + _home_lbl_w < _bar_w:
+                    painter.drawText(_bar_x + 2, _lbl_y, _away_pct_str)
+                    painter.drawText(_bar_x + _bar_w - _home_lbl_w - 2, _lbl_y, _home_pct_str)
 
         painter.end()
         return pixmap
@@ -7655,8 +7582,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
             self._banner_lbl.clear()
             return
         try:
-            # Always show player info in box score window, regardless of ticker settings
-            pixmap = tw.build_game_pixmap(game, force_show_player_info=True)
+            pixmap = tw.build_game_pixmap(game)
             self._banner_lbl.setPixmap(pixmap)
         except Exception as e:
             print(f"[BoxScore] Banner render error: {e}")
