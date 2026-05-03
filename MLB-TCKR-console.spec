@@ -91,6 +91,8 @@ _datas = [
     ('mlb-reverse.png',  '.'),
     # Certifi CA bundle for requests/SSL
     (certifi.where(), 'certifi'),
+    # Play ball sound effect
+    ('play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3', '.'),
 ]
 
 # Include any extra .ttf / .otf fonts sitting in the project directory
