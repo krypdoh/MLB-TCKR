@@ -275,6 +275,8 @@ def get_settings():
         "scoring_alert_sound_vs_team_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
         "scoring_alert_sound_game_starts_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
         "scoring_alert_sound_game_finishes_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
+        # Force bundled fonts on hosts with incomplete system font sets (for example Wine).
+        "force_bundled_fonts": False,
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -591,6 +593,101 @@ def register_all_font_files():
 _CUSTOM_FONT_FAMILY  = None
 _RECORD_FONT_FAMILY  = None
 _OZONE_FONT_FAMILY   = None
+_WINE_DETECTED_CACHE = None
+_QT_PREV_MESSAGE_HANDLER = None
+
+
+def _is_running_under_wine():
+    """Return True when running on Wine (Windows Python hosted by Wine)."""
+    global _WINE_DETECTED_CACHE
+    if _WINE_DETECTED_CACHE is not None:
+        return _WINE_DETECTED_CACHE
+    try:
+        if sys.platform != "win32":
+            _WINE_DETECTED_CACHE = False
+            return _WINE_DETECTED_CACHE
+        ntdll = ctypes.WinDLL("ntdll")
+        _WINE_DETECTED_CACHE = bool(getattr(ntdll, "wine_get_version", None))
+    except Exception:
+        _WINE_DETECTED_CACHE = False
+    return _WINE_DETECTED_CACHE
+
+
+def _resolve_font_family(preferred, bundled_first=False, fallback_chain=None):
+    """Resolve a usable Qt font family with deterministic fallback order."""
+    try:
+        families = set(QtGui.QFontDatabase().families())
+    except Exception:
+        families = set()
+
+    ordered = []
+
+    def _push(name):
+        if not name or not isinstance(name, str):
+            return
+        n = name.strip()
+        if not n:
+            return
+        if n not in ordered:
+            ordered.append(n)
+
+    if bundled_first:
+        _push(load_ozone_font())
+        _push(load_custom_font())
+        _push(load_record_font_family())
+        _push(preferred)
+    else:
+        _push(preferred)
+        _push(load_record_font_family())
+        _push(load_ozone_font())
+        _push(load_custom_font())
+
+    for f in (fallback_chain or []):
+        _push(f)
+
+    for fam in ordered:
+        if fam in families:
+            return fam
+
+    try:
+        return QtWidgets.QApplication.font().family() or "Arial"
+    except Exception:
+        return "Arial"
+
+
+def _install_qt_font_warning_filter():
+    """Suppress only noisy qt.qpa.fonts enumerate-family warnings."""
+    global _QT_PREV_MESSAGE_HANDLER
+    if _QT_PREV_MESSAGE_HANDLER is not None:
+        return
+
+    def _qt_message_handler(msg_type, context, message):
+        try:
+            category = str(getattr(context, 'category', '') or '')
+            text = str(message or '')
+            if (
+                msg_type == QtCore.QtWarningMsg
+                and category == 'qt.qpa.fonts'
+                and 'Unable to enumerate family' in text
+            ):
+                return
+        except Exception:
+            pass
+
+        if _QT_PREV_MESSAGE_HANDLER:
+            try:
+                _QT_PREV_MESSAGE_HANDLER(msg_type, context, message)
+                return
+            except Exception:
+                pass
+
+        try:
+            sys.stderr.write(f"{message}\n")
+        except Exception:
+            pass
+
+    _QT_PREV_MESSAGE_HANDLER = QtCore.qInstallMessageHandler(_qt_message_handler)
+    print("[FONT] Installed Qt warning filter (qt.qpa.fonts enumerate-family noise suppressed)")
 
 
 def load_custom_font():
@@ -2406,21 +2503,26 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Load custom LED board font
         self.font_family = load_custom_font()
+        self._force_bundled_fonts = bool(self.settings.get('force_bundled_fonts', False)) or _is_running_under_wine()
         
         # Font (use setting or fallback to loaded font)
         preferred_font = self.settings.get('font', 'LED Board-7')
-        if preferred_font == 'LED Board-7':
-            font_to_use = self.font_family
-        else:
-            font_to_use = preferred_font
+        requested_main_font = self.font_family if preferred_font == 'LED Board-7' else preferred_font
+        font_to_use = _resolve_font_family(
+            requested_main_font,
+            bundled_first=self._force_bundled_fonts,
+            fallback_chain=[self.font_family, 'Arial'],
+        )
 
-        print(f"[FONT] Active ticker font: '{font_to_use}'")
+        print(f"[FONT] Active ticker font: '{font_to_use}' (bundled-first={self._force_bundled_fonts})")
         font_scale = self.settings.get('font_scale_percent', 120) / 100.0
         # Player info font: user-selectable (W-L records, pitcher/batter names, pitch count)
-        player_info_font = self.settings.get('player_info_font', 'Gotham Black')
-        # Fallback to record_font_family if selected font is not available, then to ticker font
-        if player_info_font not in QtGui.QFontDatabase().families():
-            player_info_font = load_record_font_family() or font_to_use
+        requested_player_font = self.settings.get('player_info_font', 'Gotham Black')
+        player_info_font = _resolve_font_family(
+            requested_player_font,
+            bundled_first=self._force_bundled_fonts,
+            fallback_chain=[load_record_font_family(), font_to_use, self.font_family, 'Arial'],
+        )
         self._qfont = QtGui.QFont(font_to_use)
         self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
         # Check if the font was resolved correctly (not falling back to system font)
@@ -5472,12 +5574,20 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Rebuild fonts (size/family may have changed)
         font_scale = self.settings.get('font_scale_percent', 120) / 100.0
         preferred_font = self.settings.get('font', 'LED Board-7')
-        font_to_use = self.font_family if preferred_font == 'LED Board-7' else preferred_font
+        self._force_bundled_fonts = bool(self.settings.get('force_bundled_fonts', False)) or _is_running_under_wine()
+        requested_main_font = self.font_family if preferred_font == 'LED Board-7' else preferred_font
+        font_to_use = _resolve_font_family(
+            requested_main_font,
+            bundled_first=self._force_bundled_fonts,
+            fallback_chain=[self.font_family, 'Arial'],
+        )
         # Player info font: user-selectable (W-L records, pitcher/batter names, pitch count)
-        player_info_font = self.settings.get('player_info_font', 'Gotham Black')
-        # Fallback to record_font_family if selected font is not available, then to ticker font
-        if player_info_font not in QtGui.QFontDatabase().families():
-            player_info_font = load_record_font_family() or font_to_use
+        requested_player_font = self.settings.get('player_info_font', 'Gotham Black')
+        player_info_font = _resolve_font_family(
+            requested_player_font,
+            bundled_first=self._force_bundled_fonts,
+            fallback_chain=[load_record_font_family(), font_to_use, self.font_family, 'Arial'],
+        )
         self._qfont = QtGui.QFont(font_to_use)
         self._qfont.setPixelSize(max(12, int(self.ticker_height * 0.40 * font_scale)))
         # Check if the font was resolved correctly (not falling back to system font)
@@ -11025,6 +11135,7 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    _install_qt_font_warning_filter()
 
     # Register ALL font files from app directories so user-chosen fonts work.
     # Must happen after QApplication is created and before any window/dialog.

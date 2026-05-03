@@ -50,7 +50,7 @@ try:
     _raw_datas, _raw_bins, _raw_hidden = _pyi_collect_all('PyQt5')
     _pyqt5_datas    = [(s, d) for s, d in _raw_datas    if _qt_keep(s)]
     _pyqt5_binaries = [(s, d) for s, d in _raw_bins     if _qt_keep(s)]
-    _pyqt5_hidden   = [h      for h    in _raw_hidden    if _qt_keep(h)]
+    _pyqt5_hidden   = [h      for h    in _raw_hidden    if _qt_keep(h) and h != 'sip']
     print(f'[SPEC] collect_all PyQt5: '
           f'{len(_pyqt5_binaries)} bins, {len(_pyqt5_datas)} datas, '
           f'{len(_pyqt5_hidden)} hidden')
@@ -64,6 +64,7 @@ except Exception as _e:
 _spec_dir = os.path.dirname(os.path.abspath(SPEC))
 _appdata_mlb_dir = os.path.join(os.environ.get('APPDATA', ''), 'MLB-TCKR')
 _appdata_images_dir = os.path.join(_appdata_mlb_dir, 'MLB-TCKR.images')
+_pyd_abi_tag = f'cp{sys.version_info.major}{sys.version_info.minor}-win_amd64.pyd'
 _pyd_pattern = os.path.join(
     _spec_dir,
     f'mlb_ticker_utils_cython.cp{sys.version_info.major}{sys.version_info.minor}-win_amd64.pyd'
@@ -165,7 +166,6 @@ a = Analysis(
         'urllib3.util.retry',
         'certifi',
         'charset_normalizer',
-        'charset_normalizer.md__mypyc',
         'charset_normalizer.md',
         'charset_normalizer.models',
         'charset_normalizer.cd',
@@ -262,13 +262,13 @@ exe = EXE(
         'Qt5Network.dll', 'Qt5PrintSupport.dll',
         # Python extension modules (.pyd) MUST NOT be UPX-compressed –
         # UPX corrupts their import tables, causing ImportError at runtime.
-        'QtWidgets.cp314-win_amd64.pyd',
-        'QtCore.cp314-win_amd64.pyd',
-        'QtGui.cp314-win_amd64.pyd',
-        'QtNetwork.cp314-win_amd64.pyd',
-        'QtPrintSupport.cp314-win_amd64.pyd',
-        'sip.cp314-win_amd64.pyd',
-        'mlb_ticker_utils_cython.cp314-win_amd64.pyd',
+        f'QtWidgets.{_pyd_abi_tag}',
+        f'QtCore.{_pyd_abi_tag}',
+        f'QtGui.{_pyd_abi_tag}',
+        f'QtNetwork.{_pyd_abi_tag}',
+        f'QtPrintSupport.{_pyd_abi_tag}',
+        f'sip.{_pyd_abi_tag}',
+        f'mlb_ticker_utils_cython.{_pyd_abi_tag}',
     ],
     runtime_tmpdir=None,
     console=False,            # No console window – pure GUI app

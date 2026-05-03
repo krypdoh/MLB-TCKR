@@ -22,6 +22,13 @@ IMPROVEMENTS:
   color treatment for improved legibility and consistency with the Box Score UI.
 - **Team-name fit improvements**: Expanded name column sizing and removed forced
   truncation so longer names display correctly.
+- **Wine-aware font fallback strategy**: Added bundled-first font resolution when
+  running under Wine (or when explicitly enabled), with deterministic fallback
+  ordering across Ozone / LED / Gotham / system families.
+- **Runtime font guardrails**: Main ticker and player-info fonts now resolve via
+  a shared availability check in both initial startup and live settings-apply
+  paths, preventing missing-family selections from degrading into random fallback
+  behavior on hosts with incomplete font catalogs.
 
 BUG FIXES:
 - **Box Score render regression**: Fixed undefined helper call by restoring box
@@ -30,6 +37,12 @@ BUG FIXES:
   connection that caused parser/diagnostic cascades in the main script.
 - **Ticker away-team spacing**: Fixed intermittent gap between away team name
   and away logo by stabilizing right-side alignment logic.
+- **Qt font warning noise under Wine**: Added a targeted Qt message filter to
+  suppress only repetitive `qt.qpa.fonts` "Unable to enumerate family ..."
+  warnings while preserving all other Qt diagnostics.
+- **Cross-platform font selection stability**: Fixed edge cases where user-
+  selected fonts could be unavailable at runtime, causing unintended fallback
+  differences between native Windows and Linux/Wine environments.
 
 ------------------------------------------------------------------------------
 
