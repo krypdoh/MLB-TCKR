@@ -4,7 +4,7 @@
 
 A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen — just like the tickers you see on sports networks and in sports bars.
 
-![Version](https://img.shields.io/badge/version-1.5.6-blue) 
+![Version](https://img.shields.io/badge/version-1.6-blue) 
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
 
@@ -18,6 +18,9 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 **Multi-game view with team colors, logos, and real-time score data:**
 ![MLB-TCKR multi-game](docs/mlb1.png)
 
+**Fullscreen Box Scores / Scorecard view:**
+![MLB-TCKR fullscreen box score](docs/fullscreen_boxscore.png)
+
 ---
 
 ## Features
@@ -27,6 +30,9 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Runners on base** displayed as bright green diamonds
 - **Outs count** shown as bright red circles
 - **Inning indicator** with Top/Bottom format (T5, B5) or Final (F)
+- **Scorecard / Scoreboard window** with team cards, matchup context, and quick game scanning
+- **Detailed Box Scores window** with inning-by-inning lines, batting/pitching details, and game info
+- **Win Probability Bars** shown on live game cards (toggleable in Settings)
 - **Team logos** for all 30 MLB teams
 - **Official team colors** with custom override support
 - **Pitcher info** for live and pre-game: `P: Name ERA W-L` format
@@ -73,7 +79,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Per-team rows**: logo, colored nickname, W-L, Pct., Last 10
 - **Background fetch** — non-blocking, loads while window is open
 - **Draggable**, frameless, always-on-top; auto-centers on screen
-- Access via system tray → **Standings...** or press **S**
+- Access via system tray → **Standings...** or press **L**
 
 ### 📅 Day Navigation
 - **Yesterday / Today / Tomorrow** modes accessible from the tray menu
@@ -88,12 +94,15 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 | Key | Action | Persists? |
 |-----|--------|-----------|
 | `Q` | Quit application | — |
-| `S` | Open Standings window | — |
+| `S` | Open Scoreboard (Scorecard) window | — |
+| `L` | Open Standings window | — |
 | `M` | Open TV / Radio / XM Schedule | — |
+| `B` | Open Box Scores window | — |
 | `.` | Open Settings dialog | — |
 | `P` | Pause / unpause scroll | — |
 | `G` | Refresh game data now | no |
-| `R` | Restart ticker (replay intro animation) | no |
+| `I` | Restart intro animation | no |
+| `R` | Replay last alert | no |
 | `Y` | Switch to Yesterday's games | no |
 | `D` | Pin to Today / return to auto-mode | no |
 | `T` | Switch to Tomorrow's games | no |
@@ -101,6 +110,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 | `+` or `=` | Increase scroll speed by 1 (max 30) | no |
 | `-` | Decrease scroll speed by 1 (min 1) | no |
 | `1` – `4` | Move ticker to that monitor number | no |
+| `Shift + A` | Trigger test scoring alert (debug) | no |
 
 Shortcuts marked **no** are session-only and do not write to the settings file.
 
@@ -204,13 +214,15 @@ This compiles the Cython module and automatically reads the version from `MLB-TC
 Right-click the system tray icon to access:
 - **Refresh Games** — Force immediate data update
 - **Yesterday / Today / Tomorrow** — Switch day view
+- **Scoreboard...** — Open scorecard/scoreboard window
+- **Box Scores...** — Open detailed box score window
 - **Standings...** — Open standings window
 - **TV/Radio Today...** — Open TV / Radio / XM Schedule dialog
 - **Settings** — Open settings dialog
 - **Quit** — Exit the ticker
 
 ### Keyboard Shortcuts
-See the full hotkeys table in the [Keyboard Shortcuts](#️⃣-keyboard-shortcuts) feature section above.
+See the full hotkeys table in the [Keyboard Shortcuts](#-keyboard-shortcuts) feature section above.
 
 ### Settings Dialog
 
@@ -224,6 +236,7 @@ See the full hotkeys table in the [Keyboard Shortcuts](#️⃣-keyboard-shortcut
   - Show Team Cities
   - Include Final Games
   - Include Scheduled Games
+  - Show Win Probability Bars
 - **Visual Effects**:
   - LED-Style Background
   - Glass Overlay Effect
@@ -394,6 +407,7 @@ Odds are fetched from [The Odds API](https://the-odds-api.com) on a configurable
 | `content_opacity` | int (0–255) | Text/icon layer opacity |
 | `monitor_index` | int | Target monitor (0 = primary) |
 | `yesterday_cutoff_minutes` | int | Minutes past midnight to still show yesterday's games |
+| `show_win_probability` | bool | Show/hide live-game win probability bars |
 | `show_moneyline` | bool | Show/hide moneyline odds |
 | `odds_api_key` | string | The Odds API key |
 | `odds_refresh_minutes` | int | How often to refresh odds |
@@ -433,7 +447,7 @@ Case-insensitive lookup is used. If a logo is missing, the ticker falls back to 
 ### Games not updating
 - Check internet connection
 - Verify MLB-StatsAPI is accessible
-- Try manual refresh from the tray menu or press `R`
+- Try manual refresh from the tray menu or press `G`
 
 ### Settings don't save
 - Ensure `%APPDATA%\MLB-TCKR\` is writable
@@ -490,8 +504,8 @@ You should have received a copy of the GNU Affero General Public License along w
 **Paul R. Charovkine**
 
 - Program: MLB-TCKR
-- Version: 1.5.6
-- Date: 2026.05.02
+- Version: 1.6
+- Date: 2026.05.03
 
 ---
 
