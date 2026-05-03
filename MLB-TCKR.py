@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.5.6"
+VERSION = "1.6.0"
 
 import warnings
 warnings.filterwarnings(
@@ -25,8 +25,8 @@ warnings.filterwarnings(
 try:
     import importlib
     _wrapt_requests = importlib.import_module("pip_system_certs.wrapt_requests")
-    _inject_truststore = getattr(_wrapt_requests, "inject_truststore", None)
-    if callable(_inject_truststore):
+    _inject_truststore = getattr(_wrapt_requests, 'inject_into_requests', None)
+    if _inject_truststore:
         _inject_truststore()
         print("[SSL] System certificate store injected into requests")
 except Exception:
@@ -2953,7 +2953,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
     def on_odds_received(self, odds_map):
         """Store the newly-fetched odds and force a ticker rebuild."""
-        self._odds_cache = odds_map
+        # Keep the last known-good odds if a refresh returns empty.
+        # This avoids moneyline disappearing after unrelated settings changes
+        # when an API poll transiently returns no data.
+        if odds_map:
+            self._odds_cache = odds_map
+        elif self._odds_cache:
+            print("[ODDS] Empty odds refresh received — keeping previous cached odds")
+            return
+        else:
+            self._odds_cache = odds_map
         # Invalidate per-game pixmap cache so odds render on next build
         self._game_pixmap_cache.clear()
         self._last_ticker_fp = None
@@ -4169,7 +4178,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Return a tuple encoding all data that visually affects the ticker.
         If it matches the last build's fingerprint the rebuild is skipped entirely."""
         s = self.settings
-        settings_key = (s.get('show_team_records', True), s.get('show_team_cities', False))
+        settings_key = (
+            s.get('show_team_records', True),
+            s.get('show_team_cities', False),
+            s.get('show_team_wl', True),
+            s.get('show_moneyline', False),
+            s.get('show_win_probability', True),
+        )
         parts = []
         for g in self.games:
             r = g.get('runners', {})
@@ -4248,15 +4263,24 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # keeps perceived spacing consistent even when card internals have variable
         # transparent margins (short names, logo width differences, etc.).
         _visual_gap = max(0, int(round(self.ticker_height * 1.50)))
+        # When W-L or Moneyline is visible, reserve extra room between cards so
+        # side-column text does not sit in the inter-card whitespace.
+        if (self.settings.get('show_team_wl', True)
+            or self.settings.get('show_moneyline', False)):
+            _visual_gap += 50
         _trailing_gap = max(0, int(round(self.ticker_height * 1.0)))
 
         _settings_key = (
             self.settings.get('show_team_records', True),
             self.settings.get('show_team_cities', False),
+            self.settings.get('show_team_wl', True),
+            self.settings.get('show_moneyline', False),
+            self.settings.get('show_win_probability', True),
         )
         for game in self.games:
             game_id = game.get('game_id')
             r = game.get('runners', {})
+            away_price, home_price = self._get_game_odds(game.get('away_name'), game.get('home_name'))
             game_fp = (
                 game.get('status'), game.get('away_score'), game.get('home_score'),
                 game.get('current_inning'), game.get('inning_state'), game.get('outs'),
@@ -4265,7 +4289,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 game.get('pitcher_pitches'), game.get('pitcher_side'),
                 bool(r.get('first')), bool(r.get('second')), bool(r.get('third')),
                 game.get('away_record'), game.get('home_record'),
-                game.get('away_name'), game.get('home_name'), _settings_key,
+                game.get('away_name'), game.get('home_name'),
+                away_price, home_price,
+                _settings_key,
             )
             cached_entry = self._game_pixmap_cache.get(game_id)
             if cached_entry is not None and cached_entry[0] == game_fp:
@@ -4562,9 +4588,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Moneyline odds — look up from cache, format as +/- string
         # Never show odds on completed/final games (stale cache carries over to next day)
-        show_moneyline = (self.settings.get('show_moneyline', False)
-                  and not _game_is_final
-                  and not _compact_wp_layout)
+        show_moneyline = (
+            self.settings.get('show_moneyline', False)
+            and not _game_is_final
+        )
         odds_gap = 5  # px between odds text and team name
         away_price, home_price = self._get_game_odds(away_team_full, home_team_full)
         away_odds_text = format_moneyline(away_price) if (show_moneyline and away_price is not None) else ''
@@ -4730,7 +4757,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Decide which rows to include; drop lowest-priority rows first when the
         # block is taller than the available content area.
         has_live_detail = bool(away_live_detail or home_live_detail)
-        _want_row1 = bool(show_records or show_wl)
+        _moneyline_enabled = bool(self.settings.get('show_moneyline', False))
+        _has_moneyline = bool(away_odds_text or home_odds_text)
+        _want_row1 = bool(show_records or show_wl or _moneyline_enabled or _has_moneyline)
         _want_row2 = bool(has_live_detail and show_records)
 
         if _want_row1 and _want_row2:
@@ -4794,6 +4823,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
         logo_y  += _content_y0
         time_y  += _content_y0
         odds_y  += _content_y0
+        # Keep moneyline independent from Show Records: when W-L is visible,
+        # draw moneyline below it; otherwise draw moneyline on the primary small-text line.
+        _odds_draw_y_raw = (
+            odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
+            if show_wl
+            else (record_y if record_y is not None else odds_y)
+        )
+        # Keep odds baseline inside the visible content band even when row-fit logic
+        # drops secondary rows at small ticker heights.
+        _odds_min_y = _content_y0 + small_metrics.ascent()
+        _odds_max_y = self.ticker_height - max(1, small_metrics.descent())
+        _odds_draw_y = max(_odds_min_y, min(_odds_draw_y_raw, _odds_max_y))
 
         if status not in _pre_statuses_render:
             # Away team name (colored) — W-L record floats to the left, top-aligned;
@@ -4801,18 +4842,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.setFont(self._qfont)
             painter.setPen(away_color)
             if away_col_w > 0:
-                away_top_w = away_col_w + odds_gap + away_name_width
-                unit_off = (away_block_width - away_top_w) // 2
-                away_col_draw_x = x + unit_off
-                away_name_x = away_col_draw_x + away_col_w + odds_gap
+                # Keep away name hard-right against the logo side; place side column to its left.
+                away_name_x = x + away_block_width - away_name_width
+                away_col_draw_x = away_name_x - odds_gap - away_col_w
             else:
                 away_col_draw_x = None
                 # Always right-justify name so it sits a fixed distance from the logo
                 away_name_x = x + away_block_width - away_name_width
             _wp_name_left = away_name_x  # capture for WP bar left edge
             if away_col_draw_x is not None:
-                # W-L on top (only when both show_records and show_wl are on)
-                if show_wl and show_records:
+                # W-L top line (independent from Show Records)
+                if show_wl:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(away_col_draw_x, odds_y, away_record_text)
@@ -4821,16 +4861,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
                     painter.setFont(self.small_font)
                     painter.setPen(_ac)
-                    odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(away_col_draw_x, odds_below_wl_y, away_odds_text)
+                    painter.drawText(away_col_draw_x, _odds_draw_y, away_odds_text)
                 painter.setFont(self._qfont)
                 painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
             if record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                # show_records: full player subtext; show_wl only: W-L under name; both: player subtext (W-L is in side column)
-                _away_row_text = away_detail_text if show_records else (away_record_text if show_wl else '')
+                # Row under team name is for player/subtext only; W-L is rendered in the side column.
+                _away_row_text = away_detail_text if show_records else ''
                 if _away_row_text:
                     detail_w = small_metrics.horizontalAdvance(_away_row_text)
                     away_record_x = x + away_block_width - detail_w
@@ -4893,8 +4932,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 home_col_draw_x = None
             painter.drawText(home_name_x, text_y, home_team)
             if home_col_draw_x is not None:
-                # W-L on top (only when both show_records and show_wl are on)
-                if show_wl and show_records:
+                # W-L top line (independent from Show Records)
+                if show_wl:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(home_col_draw_x, odds_y, home_record_text)
@@ -4903,12 +4942,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
                     painter.setFont(self.small_font)
                     painter.setPen(_hc)
-                    odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(home_col_draw_x, odds_below_wl_y, home_odds_text)
+                    painter.drawText(home_col_draw_x, _odds_draw_y, home_odds_text)
             if record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                _home_row_text = home_detail_text if show_records else (home_record_text if show_wl else '')
+                _home_row_text = home_detail_text if show_records else ''
                 if _home_row_text:
                     painter.drawText(x, record_y, _home_row_text)
                 if show_records and home_live_detail and detail_y is not None:
@@ -4924,17 +4962,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.setFont(self._qfont)
             painter.setPen(away_color)
             if away_col_w > 0:
-                away_top_w = away_col_w + odds_gap + away_name_width
-                unit_off = (away_block_width - away_top_w) // 2
-                away_col_draw_x = x + unit_off
-                away_name_x = away_col_draw_x + away_col_w + odds_gap
+                # Same anchoring rule as live cards: away name is right-justified to logo side.
+                away_name_x = x + away_block_width - away_name_width
+                away_col_draw_x = away_name_x - odds_gap - away_col_w
             else:
                 away_col_draw_x = None
                 # Right-justify name so it sits at a fixed distance from the logo
                 # (same positioning as live games for consistent inter-card spacing)
                 away_name_x = x + away_block_width - away_name_width
             if away_col_draw_x is not None:
-                if show_wl and show_records:
+                if show_wl:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(away_col_draw_x, odds_y, away_record_text)
@@ -4942,15 +4979,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     _ac = QtGui.QColor('#00FF44') if (away_price or 0) > 0 else QtGui.QColor('#FF6B6B')
                     painter.setFont(self.small_font)
                     painter.setPen(_ac)
-                    odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(away_col_draw_x, odds_below_wl_y, away_odds_text)
+                    painter.drawText(away_col_draw_x, _odds_draw_y, away_odds_text)
                 painter.setFont(self._qfont)
                 painter.setPen(away_color)
             painter.drawText(away_name_x, text_y, away_team)
             if record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                _asub_text = (away_subtext if away_subtext else away_record_text) if show_records else (away_record_text if show_wl else '')
+                _asub_text = (away_subtext if away_subtext else away_record_text) if show_records else ''
                 if _asub_text:
                     _asub_w = small_metrics.horizontalAdvance(_asub_text)
                     painter.drawText(x + away_block_width - _asub_w, record_y, _asub_text)
@@ -5007,7 +5043,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 home_col_draw_x = None
             painter.drawText(home_name_x, text_y, home_team)
             if home_col_draw_x is not None:
-                if show_wl and show_records:
+                if show_wl:
                     painter.setFont(self.small_font)
                     painter.setPen(QtGui.QColor('#BDBDBD'))
                     painter.drawText(home_col_draw_x, odds_y, home_record_text)
@@ -5015,12 +5051,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     _hc = QtGui.QColor('#00FF44') if (home_price or 0) > 0 else QtGui.QColor('#FF6B6B')
                     painter.setFont(self.small_font)
                     painter.setPen(_hc)
-                    odds_below_wl_y = odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
-                    painter.drawText(home_col_draw_x, odds_below_wl_y, home_odds_text)
+                    painter.drawText(home_col_draw_x, _odds_draw_y, home_odds_text)
             if record_y is not None:
                 painter.setFont(self.small_font)
                 painter.setPen(QtGui.QColor('#BDBDBD'))
-                _hsub_text = (home_subtext if home_subtext else home_record_text) if show_records else (home_record_text if show_wl else '')
+                _hsub_text = (home_subtext if home_subtext else home_record_text) if show_records else ''
                 if _hsub_text:
                     painter.drawText(x, record_y, _hsub_text)
 
@@ -5500,15 +5535,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Always update interval in case the user changed it
         _odds_interval_ms = max(1, self.settings.get('odds_refresh_minutes', 15)) * 60 * 1000
         self.odds_timer.setInterval(_odds_interval_ms)
-        if show_ml and _apply_key:
+        _provider_ready = (_apply_provider == 'action-network') or bool(_apply_key)
+        if show_ml and _provider_ready:
             if not self.odds_timer.isActive():
                 self.odds_timer.start()
             self.start_odds_fetch()   # immediate refresh when settings change
         else:
             self.odds_timer.stop()
-            if not show_ml:
-                # Clear cached odds so disabled moneyline doesn't render stale data
-                self._odds_cache = {}
+            # Keep cached odds when disabled so re-enabling Moneyline can render
+            # immediately even if the next API refresh is delayed or returns empty.
 
         # Background cache must be invalidated so opacity/LED/glass changes redraw
         self.cached_background = None
@@ -5574,7 +5609,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def keyPressEvent(self, event):
         """Keyboard shortcuts (active when ticker window has focus).
         Q          = quit app entirely
-        S          = standings window
+        S          = scoreboard window
+        L          = league standings window
         M          = Media: TV & Radio Info window
         B          = Box Scores window
         .          = settings dialog
@@ -5623,7 +5659,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if key == 'q':
             QtWidgets.QApplication.instance().quit()
         elif key == 's':
-            if not hasattr(self, '_standings_win') or not self._standings_win.isVisible():
+            if not hasattr(self, '_scoreboard_win') or self._scoreboard_win is None or not self._scoreboard_win.isVisible():
+                self._scoreboard_win = ScoreboardWindow(ticker_widget=self)
+                self._scoreboard_win.show()
+            else:
+                self._scoreboard_win.raise_()
+                self._scoreboard_win.activateWindow()
+        elif key == 'l':
+            if not hasattr(self, '_standings_win') or self._standings_win is None or not self._standings_win.isVisible():
                 self._standings_win = StandingsWindow(ticker_widget=self)
                 self._standings_win.show()
             else:
@@ -5859,7 +5902,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         menu.addSeparator()
 
-        standings_action = menu.addAction("Standings...")
+        scoreboard_action = menu.addAction("Scoreboard...")
+        def _open_scoreboard():
+            if not hasattr(self, '_scoreboard_win') or \
+                    self._scoreboard_win is None or \
+                    not self._scoreboard_win.isVisible():
+                self._scoreboard_win = ScoreboardWindow(ticker_widget=self)
+                self._scoreboard_win.show()
+            else:
+                self._scoreboard_win.raise_()
+                self._scoreboard_win.activateWindow()
+        scoreboard_action.triggered.connect(_open_scoreboard)
+
+        standings_action = menu.addAction("League Standings...")
         def _open_standings():
             if not hasattr(self, '_standings_win') or \
                     self._standings_win is None or \
@@ -7380,6 +7435,611 @@ class TVScheduleWindow(QtWidgets.QWidget):
         self.setCursor(QtCore.Qt.ArrowCursor)
 
     def closeEvent(self, event):
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait()
+        event.accept()
+
+
+# ---------------------------------------------------------------------------
+# Scoreboard worker thread
+# ---------------------------------------------------------------------------
+
+class _ScoreboardWorker(QtCore.QThread):
+    """Fetch all today's games (schedule) + their linescores in parallel.
+
+    Emits a tuple (games_list, linescore_map) where:
+      games_list   — list of basic game dicts (same shape as ticker's game list)
+      linescore_map — {game_id: linescore_dict}
+    """
+    done = QtCore.pyqtSignal(object)   # (games_list, linescore_map)
+
+    def __init__(self, date_str):
+        super().__init__()
+        self._date_str = date_str   # 'YYYY-MM-DD'
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # ── 1. Fetch schedule (lightweight — no game feeds) ──────────────
+        games_list = []
+        try:
+            data = statsapi.get('schedule', {
+                'sportId': 1,
+                'date': self._date_str,
+                'hydrate': 'team',
+            })
+            for date_block in data.get('dates', []):
+                for g in date_block.get('games', []):
+                    teams   = g.get('teams', {})
+                    away    = teams.get('away', {})
+                    home    = teams.get('home', {})
+                    status  = g.get('status', {})
+                    game_id = g.get('gamePk')
+                    games_list.append({
+                        'game_id':       game_id,
+                        'away_name':     away.get('team', {}).get('name', '?'),
+                        'home_name':     home.get('team', {}).get('name', '?'),
+                        'away_score':    away.get('score', 0),
+                        'home_score':    home.get('score', 0),
+                        'status':        status.get('abstractGameState', ''),
+                        'detailed_state': status.get('detailedState', ''),
+                        'current_inning': g.get('linescore', {}).get('currentInning', ''),
+                        'inning_state':  g.get('linescore', {}).get('inningHalf', ''),
+                        'game_datetime': g.get('gameDate', ''),
+                    })
+        except Exception as e:
+            print(f"[Scoreboard] Schedule fetch failed: {e}")
+
+        # ── 2. Fetch linescores in parallel for all games ─────────────────
+        linescore_map = {}
+
+        def fetch_ls(gid):
+            try:
+                url  = f"https://statsapi.mlb.com/api/v1/game/{gid}/linescore"
+                resp = requests.get(url, timeout=8)
+                resp.raise_for_status()
+                return gid, resp.json()
+            except Exception as e:
+                print(f"[Scoreboard] Linescore fetch failed for {gid}: {e}")
+                return gid, {}
+
+        ids = [g['game_id'] for g in games_list if g.get('game_id')]
+        if ids:
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                futs = {ex.submit(fetch_ls, gid): gid for gid in ids}
+                for f in as_completed(futs):
+                    try:
+                        gid, ls = f.result()
+                        linescore_map[gid] = ls
+                    except Exception:
+                        pass
+
+        self.done.emit((games_list, linescore_map))
+
+
+# ---------------------------------------------------------------------------
+# Scoreboard window
+# ---------------------------------------------------------------------------
+
+class ScoreboardWindow(QtWidgets.QWidget):
+    """Scoreboard window showing MLB line scores for all games in a 2-column layout.
+
+    Each game card displays the status (inning, game time, or Final) above
+    a line-score table with per-inning runs and R/H/E totals.
+    Shows all games for the day (including pre-game/scheduled).
+    Supports edge/corner resizing like BoxScoreWindow.
+    """
+
+    _LIVE_STATUSES  = {'In Progress', 'Live', 'Manager Challenge', 'Delay', 'Suspended'}
+    _FINAL_STATUSES = {'Final', 'Completed', 'Game Over'}
+    _RESIZE_MARGIN  = 8
+
+    def __init__(self, ticker_widget=None, parent=None):
+        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setWindowTitle("MLB Scoreboard")
+        self.setMouseTracking(True)
+
+        self._ticker_widget  = ticker_widget
+        self._games_list     = []
+        self._linescore_data = {}   # game_id -> linescore dict
+        self._worker         = None
+        self._refresh_timer  = None
+        self._drag_pos       = None
+        self._resize_dir     = None
+        self._resize_geom    = None
+        self._resize_start   = None
+        self._user_resized   = False
+        self._did_initial_place = False
+        self._did_initial_load = False
+
+        self._ozone_family  = load_ozone_font() or load_custom_font()
+        self._record_family = load_record_font_family() or self._ozone_family
+        # Match the BoxScore content's base typeface exactly.
+        self._scoreboard_font_family = 'Courier New'
+
+        self._build_ui()
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self._fetch()
+
+        # Auto-refresh every 30 s
+        self._refresh_timer = QtCore.QTimer(self)
+        self._refresh_timer.timeout.connect(self._fetch)
+        self._refresh_timer.start(30_000)
+
+    # ------------------------------------------------------------------
+    # Data helpers
+    # ------------------------------------------------------------------
+
+    def _fetch_date(self):
+        """Return the scoreboard date aligned with ticker's day view override."""
+        tw = self._ticker_widget
+        today = datetime.datetime.now().date()
+        if tw is not None:
+            override = getattr(tw, '_date_view_override', None)
+            if override == 'yesterday':
+                return (today - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+            if override == 'tomorrow':
+                return (today + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        return today.strftime('%Y-%m-%d')
+
+    def _fetch(self):
+        if self._worker and self._worker.isRunning():
+            return
+        if not self._did_initial_load:
+            self._loading_lbl.show()
+        self._worker = _ScoreboardWorker(self._fetch_date())
+        self._worker.done.connect(self._on_data)
+        self._worker.start()
+
+    def _on_data(self, payload):
+        games_list, linescore_map = payload
+        self._games_list = games_list or []
+        self._linescore_data = linescore_map
+
+        # Poll faster while games are live; relax when slate is pre/final.
+        if self._refresh_timer is not None:
+            has_live = False
+            for g in self._games_list:
+                gid = g.get('game_id')
+                ls = self._linescore_data.get(gid, {}) if gid is not None else {}
+                if g.get('status') in self._LIVE_STATUSES or bool(ls.get('isLive')):
+                    has_live = True
+                    break
+            # Tighter live polling so inning/line score changes feel near real-time.
+            next_ms = 5_000 if has_live else 20_000
+            if self._refresh_timer.interval() != next_ms:
+                self._refresh_timer.setInterval(next_ms)
+
+        self._did_initial_load = True
+        self._loading_lbl.hide()
+        self._populate()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(20, 16, 20, 16)
+        outer.setSpacing(8)
+
+        # Title
+        title_font = QtGui.QFont(self._ozone_family)
+        title_font.setPixelSize(36)
+        title_lbl = QtWidgets.QLabel("MLB SCOREBOARD")
+        title_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        title_lbl.setFont(title_font)
+        title_lbl.setStyleSheet("color: #FFFFFF; padding: 4px 0;")
+        outer.addWidget(title_lbl)
+
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        sep.setStyleSheet("background: #444; max-height:1px;")
+        outer.addWidget(sep)
+
+        # Loading / status label
+        self._loading_lbl = QtWidgets.QLabel("Loading…")
+        loading_font = QtGui.QFont(self._ozone_family)
+        loading_font.setPixelSize(24)
+        self._loading_lbl.setFont(loading_font)
+        self._loading_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self._loading_lbl.setStyleSheet("color: #888; padding: 20px;")
+        outer.addWidget(self._loading_lbl)
+
+        # Scroll area containing the 2-column card grid
+        self._scroll = QtWidgets.QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: transparent; }"
+            "QScrollBar:vertical { background:#1a1a1a; width:6px; border-radius:3px; }"
+            "QScrollBar::handle:vertical { background:#444; border-radius:3px; min-height:20px; }"
+            "QScrollBar:horizontal { height:0px; }"
+        )
+        self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        self._cards_container = QtWidgets.QWidget()
+        self._cards_container.setStyleSheet("background: transparent;")
+        self._cards_layout = QtWidgets.QGridLayout(self._cards_container)
+        self._cards_layout.setContentsMargins(0, 4, 0, 4)
+        self._cards_layout.setHorizontalSpacing(14)
+        self._cards_layout.setVerticalSpacing(10)
+
+        self.setMinimumSize(870, 340)
+
+        self._scroll.setWidget(self._cards_container)
+        outer.addWidget(self._scroll)
+
+        # Close button
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.addStretch()
+        close_font = QtGui.QFont(self._ozone_family)
+        close_font.setPixelSize(18)
+        close_btn = QtWidgets.QPushButton("✕  Close")
+        close_btn.setFont(close_font)
+        close_btn.setFixedSize(140, 40)
+        close_btn.setStyleSheet(
+            "QPushButton { background:#2a2a2a; color:#ccc; border:1px solid #555; border-radius:6px; }"
+            "QPushButton:hover { background:#3a3a3a; color:#fff; }"
+            "QPushButton:pressed { background:#111; }"
+        )
+        close_btn.clicked.connect(self.close)
+        bottom.addWidget(close_btn)
+
+        grip = QtWidgets.QSizeGrip(self)
+        grip.setStyleSheet("background:transparent;")
+        bottom.addWidget(grip, 0, QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight)
+        outer.addLayout(bottom)
+
+    # ------------------------------------------------------------------
+    # Card building
+    # ------------------------------------------------------------------
+
+    def _make_status_text(self, game, linescore=None):
+        """Return (display_text, color_hex) for the status header above the line score."""
+        status = game.get('status', '')
+        detailed = game.get('detailed_state', '') or status
+        ls = linescore or {}
+
+        if detailed in self._FINAL_STATUSES or status == 'F' or bool(ls.get('isFinal')):
+            return 'Final', '#AAAAAA'
+
+        if status in self._LIVE_STATUSES or status == 'I' or bool(ls.get('isLive')):
+            state = ls.get('inningHalf') or game.get('inning_state', '')
+            inning = ls.get('currentInning') or game.get('current_inning', '')
+            if isinstance(state, str):
+                s = state.lower()
+                if 'top' in s:
+                    half = 'Top'
+                elif 'bot' in s:
+                    half = 'Bottom'
+                elif 'mid' in s:
+                    half = 'Mid'
+                elif 'end' in s:
+                    half = 'End'
+                else:
+                    half = state[:1].upper() + state[1:]
+            else:
+                half = 'Live'
+            if inning:
+                return f'{half} {inning}', '#00B3FF'
+            return 'Live', '#00B3FF'
+
+        # Scheduled / pre-game — show local start time
+        t = format_game_time_local(game.get('game_datetime'))
+        return t.upper(), '#FFD700'
+
+    def _build_game_card(self, game, linescore):
+        """Build a single game-card widget showing the line score."""
+        # Cell dimensions
+        ROW_H  = 20
+        NAME_W = 180
+        INN_W  = 19
+        RHE_W  = 24
+        CARD_PAD_H = 10
+        CARD_PAD_V = 8
+
+        innings  = linescore.get('innings', [])
+        totals   = linescore.get('teams', {})
+        away_tot = totals.get('away', {})
+        home_tot = totals.get('home', {})
+
+        away_inn: dict = {}
+        home_inn: dict = {}
+        for inn in innings:
+            n = inn.get('num', 0)
+            a = inn.get('away', {})
+            h = inn.get('home', {})
+            away_inn[n] = str(a['runs']) if 'runs' in a else ''
+            home_inn[n] = str(h['runs']) if 'runs' in h else ''
+
+        num_innings = max(9, len(innings))
+
+        hdr_font  = QtGui.QFont(self._scoreboard_font_family)
+        hdr_font.setPixelSize(11)
+        team_font = QtGui.QFont(self._scoreboard_font_family)
+        team_font.setPixelSize(12)
+        team_font.setBold(True)
+        cell_font = QtGui.QFont(self._scoreboard_font_family)
+        cell_font.setPixelSize(12)
+        status_font = QtGui.QFont(self._scoreboard_font_family)
+        status_font.setPixelSize(12)
+
+        # ── Card frame ───────────────────────────────────────────────────────
+        card = QtWidgets.QFrame()
+        card.setObjectName("sbCard")
+        card.setStyleSheet(
+            "QFrame#sbCard { background:#111111; border:1px solid #333333; border-radius:6px; }"
+        )
+
+        vbox = QtWidgets.QVBoxLayout(card)
+        vbox.setContentsMargins(CARD_PAD_H, CARD_PAD_V, CARD_PAD_H, CARD_PAD_V)
+        vbox.setSpacing(3)
+
+        away_name_full = game.get('away_name') or '???'
+        home_name_full = game.get('home_name') or '???'
+        team_name_color = '#FFEA00'
+
+        # ── Status row ───────────────────────────────────────────────────────
+        status_text, status_color = self._make_status_text(game, linescore)
+        status_lbl = QtWidgets.QLabel(status_text)
+        status_lbl.setFont(status_font)
+        status_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        status_lbl.setFixedHeight(20)
+        status_lbl.setStyleSheet(f"color:{status_color};")
+        vbox.addWidget(status_lbl)
+
+        # ── Helper: build one horizontal row ─────────────────────────────────
+        def make_row(name_text, name_color, name_font_,
+                     inn_vals,   # list of (text, color) for innings
+                     rhe_vals):  # list of (text, color) for R/H/E
+            row_w = QtWidgets.QWidget()
+            row_w.setFixedHeight(ROW_H)
+            row_w.setStyleSheet("background:transparent;")
+            hl = QtWidgets.QHBoxLayout(row_w)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(0)
+
+            nl = QtWidgets.QLabel(name_text)
+            nl.setFont(name_font_)
+            nl.setFixedWidth(NAME_W)
+            nl.setFixedHeight(ROW_H)
+            nl.setStyleSheet(f"color:{name_color};")
+            nl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            hl.addWidget(nl)
+
+            for text, color in inn_vals:
+                lbl = QtWidgets.QLabel(text)
+                lbl.setFont(cell_font)
+                lbl.setFixedWidth(INN_W)
+                lbl.setFixedHeight(ROW_H)
+                lbl.setStyleSheet(f"color:{color};")
+                lbl.setAlignment(QtCore.Qt.AlignCenter)
+                hl.addWidget(lbl)
+
+            # Thin divider before R/H/E
+            div = QtWidgets.QFrame()
+            div.setFrameShape(QtWidgets.QFrame.VLine)
+            div.setFixedWidth(1)
+            div.setFixedHeight(ROW_H)
+            div.setStyleSheet("background:#333; max-width:1px;")
+            hl.addWidget(div)
+
+            for text, color in rhe_vals:
+                lbl = QtWidgets.QLabel(text)
+                lbl.setFont(cell_font)
+                lbl.setFixedWidth(RHE_W)
+                lbl.setFixedHeight(ROW_H)
+                lbl.setStyleSheet(f"color:{color};")
+                lbl.setAlignment(QtCore.Qt.AlignCenter)
+                hl.addWidget(lbl)
+
+            return row_w
+
+        # ── Header row ───────────────────────────────────────────────────────
+        hdr_inn  = [(str(i), '#666666') for i in range(1, num_innings + 1)]
+        hdr_rhe  = [('<b>R</b>', '#00FF44'), ('<b>H</b>', '#00FF44'), ('<b>E</b>', '#00FF44')]
+        vbox.addWidget(make_row('', '#666666', hdr_font, hdr_inn, hdr_rhe))
+
+        # ── Away row ─────────────────────────────────────────────────────────
+        away_name_str = away_name_full
+        away_inn_vals = []
+        for i in range(1, num_innings + 1):
+            val = away_inn.get(i, '')
+            color = '#00FF44' if val != '' else '#2a2a2a'
+            away_inn_vals.append((val if val != '' else ' ', color))
+        away_rhe = [
+            (f"<b>{str(away_tot.get('runs',  '')) or '-'}</b>", '#00FF44'),
+            (f"<b>{str(away_tot.get('hits',  '')) or '-'}</b>", '#00FF44'),
+            (f"<b>{str(away_tot.get('errors','')) or '-'}</b>", '#00FF44'),
+        ]
+        vbox.addWidget(make_row(away_name_str, team_name_color, team_font, away_inn_vals, away_rhe))
+
+        # ── Home row ─────────────────────────────────────────────────────────
+        home_name_str = home_name_full
+        home_inn_vals = []
+        for i in range(1, num_innings + 1):
+            val = home_inn.get(i, '')
+            color = '#00FF44' if val != '' else '#2a2a2a'
+            home_inn_vals.append((val if val != '' else ' ', color))
+        home_rhe = [
+            (f"<b>{str(home_tot.get('runs',  '')) or '-'}</b>", '#00FF44'),
+            (f"<b>{str(home_tot.get('hits',  '')) or '-'}</b>", '#00FF44'),
+            (f"<b>{str(home_tot.get('errors','')) or '-'}</b>", '#00FF44'),
+        ]
+        vbox.addWidget(make_row(home_name_str, team_name_color, team_font, home_inn_vals, home_rhe))
+
+        return card
+
+    # ------------------------------------------------------------------
+    # Population
+    # ------------------------------------------------------------------
+
+    def _populate(self):
+        """Rebuild all game cards from current data."""
+        # Clear existing cards
+        while self._cards_layout.count():
+            item = self._cards_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        games = self._games_list
+        if not games:
+            self._loading_lbl.setText("No games today.")
+            self._loading_lbl.show()
+            return
+
+        for idx, game in enumerate(games):
+            gid      = game.get('game_id')
+            linescore = self._linescore_data.get(gid, {})
+            card     = self._build_game_card(game, linescore)
+            self._cards_layout.addWidget(card, idx // 2, idx % 2)
+
+        self._cards_container.adjustSize()
+        QtCore.QTimer.singleShot(0, self._auto_size_and_position)
+
+    # ------------------------------------------------------------------
+    # Window positioning / appearance
+    # ------------------------------------------------------------------
+
+    def _auto_size_and_position(self):
+        """Open large enough to fit all rows (desktop permitting), then place below ticker."""
+        ticker = self._ticker_widget
+        if ticker is not None:
+            _scr = QtWidgets.QApplication.screenAt(ticker.geometry().center())
+            if _scr is None:
+                _scr = QtWidgets.QApplication.primaryScreen()
+        else:
+            _scr = QtWidgets.QApplication.primaryScreen()
+        screen = _scr.availableGeometry()
+
+        # Respect user manual resizing after first display.
+        if not self._user_resized:
+            max_w = int(screen.width() * 0.98)
+            # Use nearly all available vertical space; leave a slim safety margin.
+            max_h = max(self.minimumHeight(), screen.height() - 14)
+
+            # Use real rendered grid size instead of guessed card dimensions.
+            self._cards_container.adjustSize()
+            grid_w = max(0, self._cards_container.sizeHint().width()) + 16
+            grid_h = max(0, self._cards_container.sizeHint().height()) + 8
+            # title + divider + close row + margins
+            chrome_h = 62 + 8 + 60 + 32
+
+            ideal_w = max(960, grid_w)
+            ideal_h = chrome_h + grid_h
+            self.resize(min(ideal_w, max_w), min(max(ideal_h, 360), max_h))
+
+        if not self._did_initial_place:
+            if ticker is not None:
+                tg = ticker.frameGeometry()
+                x  = tg.left() + (tg.width() - self.width()) // 2
+                y  = tg.bottom() + 8
+            else:
+                x = screen.x() + (screen.width()  - self.width())  // 2
+                y = screen.y() + (screen.height() - self.height()) // 2
+
+            x = max(screen.left(), min(x, screen.right()  - self.width()))
+            y = max(screen.top(),  min(y, screen.bottom() - self.height()))
+            self.move(x, y)
+            self._did_initial_place = True
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect()
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 240)))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#FFFFFF'), 1.5))
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
+        scan = QtGui.QColor(0, 0, 0, 35)
+        for yy in range(0, rect.height(), 2):
+            painter.fillRect(0, yy, rect.width(), 1, scan)
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            left, top, right, bottom = self._edge_hit(event.pos())
+            if any((left, top, right, bottom)):
+                self._resize_dir = (left, top, right, bottom)
+                self._resize_geom = self.frameGeometry()
+                self._resize_start = event.globalPos()
+                self._drag_pos = None
+            else:
+                self._resize_dir = None
+                self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & QtCore.Qt.LeftButton:
+            if self._resize_dir and any(self._resize_dir):
+                left, top, right, bottom = self._resize_dir
+                delta = event.globalPos() - self._resize_start
+                geo = QtCore.QRect(self._resize_geom)
+                min_w = self.minimumWidth()
+                min_h = self.minimumHeight()
+
+                if left:
+                    nl = geo.left() + delta.x()
+                    if geo.right() - nl >= min_w:
+                        geo.setLeft(nl)
+                if right:
+                    nr = geo.right() + delta.x()
+                    if nr - geo.left() >= min_w:
+                        geo.setRight(nr)
+                if top:
+                    nt = geo.top() + delta.y()
+                    if geo.bottom() - nt >= min_h:
+                        geo.setTop(nt)
+                if bottom:
+                    nb = geo.bottom() + delta.y()
+                    if nb - geo.top() >= min_h:
+                        geo.setBottom(nb)
+
+                if geo != self.geometry():
+                    self._user_resized = True
+                self.setGeometry(geo)
+            elif self._drag_pos is not None:
+                self.move(event.globalPos() - self._drag_pos)
+        else:
+            left, top, right, bottom = self._edge_hit(event.pos())
+            self.setCursor(self._cursor_for_edge(left, top, right, bottom))
+
+    def mouseReleaseEvent(self, event):
+        self._resize_dir = None
+        self._resize_geom = None
+        self._resize_start = None
+        self._drag_pos = None
+        self.setCursor(QtCore.Qt.ArrowCursor)
+
+    def _edge_hit(self, pos):
+        m = self._RESIZE_MARGIN
+        r = self.rect()
+        return (pos.x() < m, pos.y() < m,
+                pos.x() > r.width() - m, pos.y() > r.height() - m)
+
+    @staticmethod
+    def _cursor_for_edge(left, top, right, bottom):
+        if (left and top) or (right and bottom):
+            return QtCore.Qt.SizeFDiagCursor
+        if (right and top) or (left and bottom):
+            return QtCore.Qt.SizeBDiagCursor
+        if left or right:
+            return QtCore.Qt.SizeHorCursor
+        if top or bottom:
+            return QtCore.Qt.SizeVerCursor
+        return QtCore.Qt.ArrowCursor
+
+    def keyPressEvent(self, event):
+        k = event.key()
+        if k in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Q):
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self._refresh_timer:
+            self._refresh_timer.stop()
         if self._worker and self._worker.isRunning():
             self._worker.quit()
             self._worker.wait()
@@ -10092,12 +10752,13 @@ class SettingsDialog(QtWidgets.QDialog):
             ("T"       , "Show Tomorrow's games"),
             ("M"       , "Open Media: TV & Radio Info window"),
             ("B"       , "Open Box Scores window"),
+            ("S"       , "Open Scoreboard window"),
+            ("L"       , "Open League Standings window"),
             ("I"       , "Restart Intro animation"),
             ("R"       , "Replay last alert"),
             ("G"       , "Refresh / fetch latest game data"),
             ("F"       , "Toggle FPS counter overlay on/off"),
             ("P"       , "Pause / unpause scrolling"),
-            ("S"       , "Open Standings window"),
             ("."       , "Open Settings dialog"),
             ("1 – 4"   , "Move ticker to that monitor number"),
             ("Q"       , "Quit"),
@@ -10489,7 +11150,21 @@ def main():
 
     tray_menu.addSeparator()
 
-    standings_action = tray_menu.addAction("Standings...")
+    scoreboard_tray_action = tray_menu.addAction("Scoreboard...")
+
+    def open_scoreboard():
+        if not hasattr(window, '_scoreboard_win') or \
+                window._scoreboard_win is None or \
+                not window._scoreboard_win.isVisible():
+            window._scoreboard_win = ScoreboardWindow(ticker_widget=window)
+            window._scoreboard_win.show()
+        else:
+            window._scoreboard_win.raise_()
+            window._scoreboard_win.activateWindow()
+
+    scoreboard_tray_action.triggered.connect(open_scoreboard)
+
+    standings_action = tray_menu.addAction("League Standings...")
 
     def open_standings():
         # Share the same standings window with the ticker bar context menu

@@ -1,3 +1,48 @@
+Version 1.6.0 (2026-05-03)
+--------------------------
+NEW FEATURES:
+- **New Scoreboard window**: Added a dedicated MLB Scoreboard popup that shows
+  all games for the selected day in a two-column card layout, including games
+  that have not started yet.
+- **Line-score cards for every game**: Each card displays inning-by-inning runs
+  with R/H/E totals, plus a status header for Live / Final / Scheduled states.
+- **Keyboard + menu integration**: Scoreboard remains available from the ticker
+  hotkey (`S`) and context/tray menu flows.
+
+IMPROVEMENTS:
+- **Smarter scoreboard refresh cadence**: Polling now tightens automatically for
+  live slates and relaxes for non-live slates to improve responsiveness while
+  avoiding unnecessary traffic.
+- **Better first-open sizing**: Scoreboard auto-size now uses rendered content
+  size hints and available screen geometry so the window opens tall/wide enough
+  to show more games by default.
+- **User-resizable scoreboard window**: Frameless edge/corner drag resizing is
+  supported and respects user-resized dimensions after initial placement.
+- **Scoreboard visual tuning**: Updated title/button/status/team typography and
+  color treatment for improved legibility and consistency with the Box Score UI.
+- **Team-name fit improvements**: Expanded name column sizing and removed forced
+  truncation so longer names display correctly.
+
+BUG FIXES:
+- **Box Score render regression**: Fixed undefined helper call by restoring box
+  score HTML rendering path to the correct internal builder.
+- **Box Score worker hookup syntax issue**: Repaired malformed worker signal
+  connection that caused parser/diagnostic cascades in the main script.
+- **Ticker away-team spacing**: Fixed intermittent gap between away team name
+  and away logo by stabilizing right-side alignment logic.
+
+------------------------------------------------------------------------------
+
+Version 1.5.7 (2026-05-03)
+--------------------------
+BUG FIXES:
+- **Moneyline / W-L display settings logic**: Fixed interaction issues between
+  "Show Team W-L Record" and "Show Game Moneyline" so each toggle now works
+  independently. Enabling or disabling W-L no longer hides moneyline, and both
+  values render correctly when both options are enabled.
+
+------------------------------------------------------------------------------
+
 Version 1.5.6 (2026-05-02)
 --------------------------
 IMPROVEMENTS:

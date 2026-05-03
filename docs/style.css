@@ -382,6 +382,10 @@ a {
   padding: 52px 24px;
 }
 
+.features > .hero-actions:first-child {
+  margin-top: -16px;
+}
+
 .features-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
