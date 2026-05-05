@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0504.2207
+Date: 2026.0501.1731
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.1"
+VERSION = "1.6.0"
 
 import warnings
 warnings.filterwarnings(
@@ -2384,8 +2384,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Per-game and ticker-level render caches
         self._game_pixmap_cache = {}  # game_id → (fingerprint_tuple, QPixmap)
         self._last_ticker_fp = None   # overall fingerprint; None forces first build
-        self._ticker_rebuild_queue = []         # [(game, game_id, game_fp)] pending incremental rebuild
-        self._ticker_rebuild_in_progress = False  # True while incremental rebuild is running
         
         # Score change tracking for glow effect
         self._score_change_times = {}  # game_id → {'away': ms_timestamp, 'home': ms_timestamp}
@@ -4381,12 +4379,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.settings.get('show_moneyline', False),
             self.settings.get('show_win_probability', True),
         )
-        # Classify each game: cache-hit, stale (outdated pixmap exists), or missing (no pixmap).
-        # Stale games are rebuilt one-per-event-loop-tick so the main thread is never
-        # stalled for the full cost of all changed games in a single frame.
-        stale_rebuilds = []   # (game, game_id, game_fp) — has a stale pixmap, defer rebuild
-        missing_rebuilds = [] # (game, game_id, game_fp) — no pixmap at all, must build now
-
         for game in self.games:
             game_id = game.get('game_id')
             r = game.get('runners', {})
@@ -4405,42 +4397,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
             )
             cached_entry = self._game_pixmap_cache.get(game_id)
             if cached_entry is not None and cached_entry[0] == game_fp:
-                game_pixmaps.append(cached_entry[1])   # cache hit — fast path
-            elif cached_entry is not None:
-                stale_rebuilds.append((game, game_id, game_fp))
-                game_pixmaps.append(cached_entry[1])   # use stale pixmap for now
+                pixmap = cached_entry[1]
             else:
-                missing_rebuilds.append((game, game_id, game_fp))
-                game_pixmaps.append(None)              # placeholder; filled below
-
-        # Games with no cached pixmap at all must be built synchronously — there is
-        # no existing tile to show while we wait, so we have to pay the cost up-front.
-        for game, game_id, game_fp in missing_rebuilds:
-            pixmap = self.build_game_pixmap(game)
-            self._game_pixmap_cache[game_id] = (game_fp, pixmap)
-            for i, g in enumerate(self.games):
-                if g.get('game_id') == game_id:
-                    game_pixmaps[i] = pixmap
-                    break
-
-        # Games with stale pixmaps: if tiles already exist, defer rebuilding them so
-        # the main thread is never stalled — the current tiles keep scrolling smoothly
-        # while _process_next_ticker_rebuild() updates one card per event-loop tick.
-        if stale_rebuilds and self._ticker_tiles and not self._ticker_rebuild_in_progress:
-            self._ticker_rebuild_queue = list(stale_rebuilds)
-            self._ticker_rebuild_in_progress = True
-            QtCore.QTimer.singleShot(0, self._process_next_ticker_rebuild)
-            return  # Existing tiles continue serving frames during background rebuild
-        elif stale_rebuilds:
-            # No existing tiles (first build) or a rebuild is already running:
-            # build synchronously so tiles are always consistent.
-            for game, game_id, game_fp in stale_rebuilds:
                 pixmap = self.build_game_pixmap(game)
                 self._game_pixmap_cache[game_id] = (game_fp, pixmap)
-                for i, g in enumerate(self.games):
-                    if g.get('game_id') == game_id:
-                        game_pixmaps[i] = pixmap
-                        break
+            game_pixmaps.append(pixmap)
 
         # Collect visual edges stored by build_game_pixmap.
         # info tuple: (tile_width, visual_left, visual_right)
@@ -4518,42 +4479,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # If glowing, invalidate fingerprint after a short delay to force color update
         if has_active_glow:
             QtCore.QTimer.singleShot(100, self._invalidate_glow_cache)
-
-    def _process_next_ticker_rebuild(self):
-        """Process one queued game-card rebuild per event-loop tick.
-
-        Spreads the cost of rebuilding changed game pixmaps across multiple
-        event-loop iterations so scroll-timer callbacks and paintEvents can
-        fire between each rebuild — eliminating the single long main-thread stall
-        that causes visible judder when live data arrives.
-
-        When the queue is exhausted, re-calls build_ticker_pixmap() to atomically
-        assemble fresh tiles from the updated cache.
-        """
-        if not self._ticker_rebuild_queue:
-            self._ticker_rebuild_in_progress = False
-            # All games rebuilt — reassemble tiles with fresh pixmaps.
-            # build_ticker_pixmap() will find all entries cached (no stale), so it
-            # skips straight to tile assembly with no further rebuilds.
-            self.build_ticker_pixmap()
-            self.update()
-            return
-
-        game, game_id, game_fp = self._ticker_rebuild_queue.pop(0)
-
-        # If a synchronous build already updated this game's cache entry (e.g. a new
-        # data poll arrived mid-rebuild), skip this now-stale queue entry so we don't
-        # overwrite the newer pixmap with older data.
-        current_cached = self._game_pixmap_cache.get(game_id)
-        if current_cached is not None and current_cached[0] != game_fp:
-            QtCore.QTimer.singleShot(0, self._process_next_ticker_rebuild)
-            return
-
-        pixmap = self.build_game_pixmap(game)
-        self._game_pixmap_cache[game_id] = (game_fp, pixmap)
-
-        # Yield to the event loop (let scroll timer and paintEvent fire), then continue.
-        QtCore.QTimer.singleShot(0, self._process_next_ticker_rebuild)
 
     def _load_mlb_logo(self, logo_size):
         """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware (cached)."""
@@ -5300,15 +5225,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         inside paintEvent to avoid timer-callback lag and missed-tick jumps."""
         if not self.ticker_pixmap or self._scroll_max_width == 0:
             return
-        # Count scroll-timer ticks as FPS — this reflects actual animation rate and
-        # is immune to DWM/system-triggered repaints inflating the number.
-        _now_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-        self._fps_frame_count += 1
-        _fps_elapsed = _now_ms - self._fps_last_ms
-        if _fps_elapsed >= 1000:
-            self._fps_display = self._fps_frame_count * 1000.0 / _fps_elapsed
-            self._fps_frame_count = 0
-            self._fps_last_ms = _now_ms
         self.update()
 
     def paintEvent(self, event):
@@ -5403,6 +5319,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # nsecsElapsed() gives float-ms precision; elapsed() only returns integer ms
         # which causes ~6% delta error at 16 ms frame intervals.
         render_now_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+        # FPS counter: count actual paintEvent calls = true displayed frame rate
+        self._fps_frame_count += 1
+        _fps_elapsed = render_now_ms - self._fps_last_ms
+        if _fps_elapsed >= 1000:
+            self._fps_display = self._fps_frame_count * 1000.0 / _fps_elapsed
+            self._fps_frame_count = 0
+            self._fps_last_ms = render_now_ms
         if not self.is_hovered and not self.scroll_paused and self._scroll_speed_px_per_ms > 0:
             delta_ms = min(render_now_ms - self._last_frame_ms, 100)
             self.scroll_offset += self._scroll_speed_px_per_ms * delta_ms
@@ -5502,29 +5425,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.drawText(yx, yy, _badge_text)
 
         # FPS overlay — bottom-right corner, bright green, small_font
-        if settings.get('show_fps_overlay', False):
-            _is_paused = self.scroll_paused or self.is_hovered
-            if _is_paused:
-                fps_text = "PAUSED"
-                fps_color = QtGui.QColor('#FFA500')
-            elif self._fps_display > 0:
-                fps_text = f"{self._fps_display:.1f} FPS"
-                fps_color = QtGui.QColor('#00FF44')
-            else:
-                fps_text = None
-                fps_color = None
-            if fps_text:
-                painter.setFont(self.small_font)
-                fm = QtGui.QFontMetrics(self.small_font)
-                tw = fm.horizontalAdvance(fps_text)
-                th = fm.height()
-                margin = 4
-                tx = self.width() - tw - margin
-                ty = self.height() - margin
-                # Subtle dark backing so the text is readable over any content
-                painter.fillRect(tx - 2, ty - th, tw + 4, th + 2, QtGui.QColor(0, 0, 0, 140))
-                painter.setPen(fps_color)
-                painter.drawText(tx, ty, fps_text)
+        if settings.get('show_fps_overlay', False) and self._fps_display > 0:
+            fps_text = f"{self._fps_display:.1f} FPS"
+            painter.setFont(self.small_font)
+            fm = QtGui.QFontMetrics(self.small_font)
+            tw = fm.horizontalAdvance(fps_text)
+            th = fm.height()
+            margin = 4
+            tx = self.width() - tw - margin
+            ty = self.height() - margin
+            # Subtle dark backing so the text is readable over any content
+            painter.fillRect(tx - 2, ty - th, tw + 4, th + 2, QtGui.QColor(0, 0, 0, 140))
+            painter.setPen(QtGui.QColor('#00FF44'))
+            painter.drawText(tx, ty, fps_text)
 
         painter.end()
     
@@ -5533,10 +5446,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.is_hovered = True
         self.scroll_timer.stop()
         self._set_timer_resolution(False)
-        # Reset FPS counter so the last scrolling value doesn't linger as a stale display
-        self._fps_frame_count = 0
-        self._fps_display = 0.0
-        self._fps_last_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -5880,9 +5789,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if self.scroll_paused:
                 self.scroll_timer.stop()
                 self._set_timer_resolution(False)
-                self._fps_frame_count = 0
-                self._fps_display = 0.0
-                self._fps_last_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
                 print("[KB] Scroll paused")
             else:
                 if not self.intro_active and not self.is_hovered:
@@ -6097,9 +6003,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if self.scroll_paused:
                 self.scroll_timer.stop()
                 self._set_timer_resolution(False)
-                self._fps_frame_count = 0
-                self._fps_display = 0.0
-                self._fps_last_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
             else:
                 if not self.intro_active and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
@@ -8287,7 +8190,6 @@ class BoxScoreWindow(QtWidgets.QWidget):
         self._refresh_timer = None
         self._user_resized = False   # becomes True once user manually resizes
         self._displayed_game_id = None  # game_id currently shown; used for live banner lookup
-        self._last_banner_fp = None  # fingerprint of last rendered banner; skip rebuild if unchanged
 
         self._ozone_family = load_ozone_font() or load_custom_font()
         self._record_family = load_record_font_family() or self._ozone_family
@@ -8315,7 +8217,7 @@ class BoxScoreWindow(QtWidgets.QWidget):
         # when the ticker replaces its games list object on each poll cycle.
         self._banner_timer = QtCore.QTimer(self)
         self._banner_timer.timeout.connect(self._refresh_banner_and_nav)
-        self._banner_timer.start(10000)  # 10 s — live data changes at most every 10-20 s from worker
+        self._banner_timer.start(2000)  # 2 s — same cadence as ticker updates
 
     def navigate_to_game(self, game_index):
         """Navigate the already-open window to a specific game by index."""
@@ -8522,21 +8424,6 @@ class BoxScoreWindow(QtWidgets.QWidget):
         if game is None:
             self._banner_lbl.clear()
             return
-        # Skip the expensive build_game_pixmap() call if live game state hasn't changed.
-        # build_game_pixmap() is the primary source of main-thread stalls when the box
-        # score is open; caching by fingerprint eliminates redundant rebuilds.
-        _runners = game.get('runners', {})
-        _new_fp = (
-            game.get('away_score'), game.get('home_score'),
-            game.get('current_inning'), game.get('inning_state'),
-            game.get('outs'), game.get('balls'), game.get('strikes'),
-            game.get('status'),
-            game.get('away_subtext'), game.get('home_subtext'),
-            bool(_runners.get('first')), bool(_runners.get('second')), bool(_runners.get('third')),
-        )
-        if _new_fp == self._last_banner_fp:
-            return
-        self._last_banner_fp = _new_fp
         try:
             # Always show player info in box score window, regardless of ticker settings
             pixmap = tw.build_game_pixmap(game, force_show_player_info=True)
@@ -9809,491 +9696,261 @@ class AboutDialog(QtWidgets.QDialog):
             self.move(event.globalPos() - self._drag_pos)
 
 
-# ── Settings dialog theme — Obsidian Glass ───────────────────────────────────
+# ── Settings dialog dark theme — matches the LED board palette ────────────────
 SETTINGS_DIALOG_QSS = """
-QDialog,
-QMessageBox#settingsMessageBox {
-    background: #0B0C14;
-    color: #ECEDF2;
-    font-family: 'Inter';
+QDialog {
+    background-color: #0f1216;
+    color: #dce0ea;
+    font-family: 'Segoe UI', Arial, sans-serif;
     font-size: 13px;
 }
 
-QWidget {
-    color: #ECEDF2;
+/* ── Tab bar ── */
+QTabWidget::pane {
+    background-color: #0f1216;
+    border: 1px solid #2a3a5e;
+    border-top: none;
+}
+QTabBar {
+    background-color: #0f1216;
+}
+QTabBar::tab {
+    background-color: #0a0d14;
+    color: #8ab4f8;
+    border: 1px solid #2a3a5e;
+    border-bottom: none;
+    padding: 6px 18px;
+    min-width: 90px;
+    margin-right: 2px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}
+QTabBar::tab:selected {
+    background-color: #1a2035;
+    color: #00FF44;
+    border-bottom: 2px solid #00FF44;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #151820;
+    color: #dce0ea;
 }
 
-QLabel {
-    background: transparent;
-    color: #ECEDF2;
+/* ── Group boxes ── */
+QGroupBox {
+    background-color: #151820;
+    border: 1px solid #2a3a5e;
+    border-radius: 4px;
+    margin-top: 10px;
+    padding: 8px 6px 4px 6px;
+    color: #8ab4f8;
+    font-weight: bold;
+    font-size: 12px;
+    letter-spacing: 0.5px;
 }
-
-QLabel[role="eyebrow"] {
-    color: #9298B0;
-}
-
-QLabel[role="title"] {
-    color: #ECEDF2;
-}
-
-QLabel[role="subtitle"] {
-    color: #9298B0;
-}
-
-QLabel[role="meta"] {
-    color: #9298B0;
-}
-
-QLabel[role="warning"] {
-    color: #A5ADFF;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 0px;
-    padding: 12px 14px;
-}
-
-QLabel[role="infoCard"] {
-    color: #ECEDF2;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 0px;
-    padding: 14px 16px;
-}
-
-QLabel[role="statValue"] {
-    color: #8B95FF;
-}
-
-QLabel[role="hotkey"] {
-    color: #ECEDF2;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 0px;
-    padding: 6px 10px;
-}
-
-QLabel[role="hotkeyDesc"] {
-    color: #ECEDF2;
-}
-
-QWidget#settingsRoot {
-    background: transparent;
-}
-
-QFrame[glassPane="true"],
-QGroupBox[glassPane="true"] {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 0px;
-}
-
-QFrame[glassPane="true"][compactPane="true"],
-QGroupBox[glassPane="true"][compactPane="true"] {
-    border-radius: 0px;
-}
-
-QGroupBox[glassPane="true"] {
-    margin-top: 18px;
-    padding: 14px 10px 10px 10px;
-    font-family: 'Inter Tight';
-    font-size: 15px;
-    font-weight: 600;
-    color: #ECEDF2;
-}
-
-QGroupBox[glassPane="true"]::title {
+QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 18px;
-    padding: 0 8px;
-    color: #ECEDF2;
-    background: #13141E;
+    padding: 0 6px;
+    color: #8ab4f8;
+    font-weight: bold;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 1px;
 }
 
-QTabWidget::pane {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 0px;
-    top: 8px;
-}
-
-QTabBar {
+/* ── Generic controls ── */
+QLabel {
+    color: #dce0ea;
     background: transparent;
 }
-
-QTabBar::tab {
-    background: rgba(255, 255, 255, 0.04);
-    color: #9298B0;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 0px;
-    padding: 10px 18px;
-    min-width: 92px;
-    margin-right: 8px;
-    font-family: 'Inter';
-    font-size: 13px;
-    font-weight: 500;
+QLabel#restartNote {
+    color: #FFA500;
+    font-size: 11px;
+    font-style: italic;
 }
 
-QTabBar::tab:selected {
-    background: rgba(255, 255, 255, 0.06);
-    color: #ECEDF2;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-}
-
-QTabBar::tab:hover:!selected {
-    color: #ECEDF2;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-/* QCheckBox: minimal fallback; settings dialog uses _SettingsCheck */
 QCheckBox {
-    color: #ECEDF2;
+    color: #dce0ea;
     spacing: 8px;
     background: transparent;
-    border: none;
-    padding: 2px 0px;
-    margin: 0px;
 }
-QCheckBox:hover, QCheckBox:focus, QCheckBox:pressed {
-    background: transparent;
-    border: none;
-    outline: none;
-}
-QCheckBox:disabled { color: #555566; }
 QCheckBox::indicator {
-    width: 13px; height: 13px;
-    border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.28);
-    background: rgba(255,255,255,0.04);
+    width: 14px;
+    height: 14px;
+    border: 1px solid #4a5a7e;
+    border-radius: 2px;
+    background-color: #0a0d14;
 }
 QCheckBox::indicator:checked {
-    background: #8B95FF;
-    border: 1px solid #8B95FF;
+    background-color: #00FF44;
+    border-color: #00FF44;
+    image: none;
+}
+QCheckBox::indicator:hover {
+    border-color: #8ab4f8;
 }
 
-QSpinBox,
-QLineEdit,
-QComboBox {
-    background: rgba(255, 255, 255, 0.05);
-    color: #ECEDF2;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 0px;
-    padding: 3px 7px;
-    min-height: 0px;
-    max-height: 28px;
-    selection-background-color: #8B95FF;
-    selection-color: #0B0C14;
+QSpinBox, QLineEdit, QComboBox {
+    background-color: #0a0d14;
+    color: #dce0ea;
+    border: 1px solid #2a3a5e;
+    border-radius: 3px;
+    padding: 3px 6px;
+    selection-background-color: #1a2035;
+    selection-color: #00FF44;
 }
-
-QSpinBox:hover,
-QLineEdit:hover,
-QComboBox:hover {
-    border: 1px solid rgba(255, 255, 255, 0.18);
+QSpinBox:hover, QLineEdit:hover, QComboBox:hover {
+    border-color: #4a5a7e;
 }
-
-QSpinBox:focus,
-QLineEdit:focus,
-QComboBox:focus {
-    border: 1px solid rgba(255, 255, 255, 0.20);
+QSpinBox:focus, QLineEdit:focus, QComboBox:focus {
+    border-color: #8ab4f8;
+    outline: none;
 }
-
-QSpinBox::up-button,
-QSpinBox::down-button {
-    background: rgba(255, 255, 255, 0.04);
+QSpinBox::up-button, QSpinBox::down-button {
+    background-color: #1a2035;
     border: none;
-    width: 20px;
+    width: 16px;
 }
-
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background-color: #253050;
+}
 QSpinBox::up-arrow {
     image: none;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-bottom: 5px solid #ECEDF2;
-    width: 0;
-    height: 0;
+    border-bottom: 5px solid #8ab4f8;
+    width: 0; height: 0;
 }
-
 QSpinBox::down-arrow {
     image: none;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid #ECEDF2;
-    width: 0;
-    height: 0;
+    border-top: 5px solid #8ab4f8;
+    width: 0; height: 0;
 }
 
 QComboBox::drop-down {
     border: none;
-    width: 28px;
-    background: transparent;
+    background-color: #1a2035;
+    width: 20px;
 }
-
 QComboBox::down-arrow {
     image: none;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid #ECEDF2;
-    width: 0;
-    height: 0;
+    border-top: 5px solid #8ab4f8;
+    width: 0; height: 0;
 }
-
 QComboBox QAbstractItemView {
-    background: #13141E;
-    color: #ECEDF2;
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 0px;
-    padding: 6px;
-    selection-background-color: rgba(255, 255, 255, 0.10);
-    selection-color: #ECEDF2;
+    background-color: #0a0d14;
+    color: #dce0ea;
+    border: 1px solid #2a3a5e;
+    selection-background-color: #1a2035;
+    selection-color: #00FF44;
     outline: none;
 }
 
+/* ── Slider (Team Font Size) ── */
 QSlider::groove:horizontal {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    height: 6px;
-    border-radius: 0px;
+    background-color: #0a0d14;
+    border: 1px solid #2a3a5e;
+    height: 5px;
+    border-radius: 2px;
 }
-
 QSlider::sub-page:horizontal {
-    background: #8B95FF;
-    border-radius: 0px;
+    background-color: #00FF44;
+    border-radius: 2px;
 }
-
 QSlider::add-page:horizontal {
-    background: rgba(255, 255, 255, 0.08);
-    border-radius: 0px;
+    background-color: #1a2035;
+    border-radius: 2px;
 }
-
 QSlider::handle:horizontal {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 #9DA6FF, stop:1 #6E7BFF);
-    border: 1px solid rgba(255, 255, 255, 0.20);
+    background-color: #00FF44;
+    border: 2px solid #0a0d14;
     width: 14px;
     height: 14px;
     margin: -5px 0;
-    border-radius: 0px;
+    border-radius: 7px;
 }
-
 QSlider::handle:horizontal:hover {
-    background: #A5ADFF;
+    background-color: #44ffaa;
 }
 
+/* ── Buttons ── */
 QPushButton {
-    background: rgba(255, 255, 255, 0.06);
-    color: #ECEDF2;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 0px;
-    padding: 12px 24px;
-    font-family: 'Inter';
-    font-size: 13px;
-    font-weight: 500;
+    background-color: #1a2035;
+    color: #dce0ea;
+    border: 1px solid #2a3a5e;
+    border-radius: 4px;
+    padding: 5px 14px;
+    font-weight: bold;
 }
-
 QPushButton:hover {
-    border: 1px solid rgba(255, 255, 255, 0.18);
+    background-color: #253050;
+    border-color: #4a5a7e;
+    color: #ffffff;
 }
-
 QPushButton:pressed {
-    background: rgba(255, 255, 255, 0.10);
+    background-color: #0f1626;
+}
+QPushButton:default {
+    border-color: #00FF44;
 }
 
-QPushButton[variant="primary"] {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 #9DA6FF, stop:1 #6E7BFF);
-    color: #0B0C14;
-    border: 1px solid rgba(255, 255, 255, 0.20);
-    font-weight: 600;
-}
-
-QPushButton[variant="secondary"] {
-    background: rgba(255, 255, 255, 0.06);
-    color: #ECEDF2;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-QPushButton[variant="outline"] {
-    background: transparent;
-    color: #ECEDF2;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    padding: 11px 22px;
-}
-
-QPushButton[variant="ghost"] {
-    background: transparent;
-    color: #9298B0;
-    border: none;
-    padding: 11px 6px;
-}
-
-QPushButton#teamSwatchButton {
-    min-width: 28px;
-    max-width: 28px;
-    min-height: 22px;
-    max-height: 22px;
-    padding: 0;
-    border-radius: 0px;
-}
-
-QDialogButtonBox {
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    padding-top: 14px;
-}
-
+/* ── Dialog button box ── */
 QDialogButtonBox QPushButton {
-    min-width: 86px;
+    min-width: 70px;
 }
 
-QScrollArea,
-QScrollArea > QWidget,
+/* ── Scroll area ── */
+QScrollArea {
+    background-color: #0f1216;
+    border: none;
+}
 QScrollArea > QWidget > QWidget {
-    background: transparent;
-    border: none;
+    background-color: #0f1216;
 }
 
+/* ── Scroll bars ── */
 QScrollBar:vertical {
-    background: rgba(255, 255, 255, 0.04);
-    width: 12px;
-    margin: 4px 0 4px 0;
+    background-color: #0a0d14;
+    width: 10px;
+    margin: 0;
     border: none;
 }
-
 QScrollBar::handle:vertical {
-    background: rgba(255, 255, 255, 0.14);
-    border-radius: 0px;
-    min-height: 30px;
+    background-color: #2a3a5e;
+    border-radius: 4px;
+    min-height: 24px;
 }
-
 QScrollBar::handle:vertical:hover {
-    background: rgba(255, 255, 255, 0.20);
+    background-color: #4a5a7e;
 }
-
-QScrollBar::add-line:vertical,
-QScrollBar::sub-line:vertical,
-QScrollBar::add-page:vertical,
-QScrollBar::sub-page:vertical,
-QScrollBar::add-line:horizontal,
-QScrollBar::sub-line:horizontal,
-QScrollBar::add-page:horizontal,
-QScrollBar::sub-page:horizontal {
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0; background: none;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: none;
-    border: none;
 }
-
 QScrollBar:horizontal {
-    background: rgba(255, 255, 255, 0.04);
-    height: 12px;
-    margin: 0 4px 0 4px;
+    background-color: #0a0d14;
+    height: 10px;
+    margin: 0;
     border: none;
 }
-
 QScrollBar::handle:horizontal {
-    background: rgba(255, 255, 255, 0.14);
-    border-radius: 0px;
-    min-width: 30px;
+    background-color: #2a3a5e;
+    border-radius: 4px;
+    min-width: 24px;
 }
-
 QScrollBar::handle:horizontal:hover {
-    background: rgba(255, 255, 255, 0.20);
+    background-color: #4a5a7e;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0; background: none;
 }
 """
-
-
-
-class _SettingsCheck(QtWidgets.QWidget):
-    """Drop-in QCheckBox replacement that draws its own indicator dot,
-    completely bypassing Qt's native style engine.  This eliminates
-    rectangle / pill / hover-highlight rendering artefacts on Windows
-    regardless of which Qt style (native, Fusion, etc.) is active.
-
-    Public API is compatible with QCheckBox:
-      isChecked(), setChecked(bool), toggled(bool), stateChanged(int),
-      setText(str), text(), setToolTip(str), setEnabled(bool)
-    """
-    toggled      = QtCore.pyqtSignal(bool)
-    stateChanged = QtCore.pyqtSignal(int)
-
-    def __init__(self, text: str = "", checked: bool = False, parent=None):
-        super().__init__(parent)
-        self._checked = bool(checked)
-        self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.setSizePolicy(
-            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed
-        )
-        self.setStyleSheet("background: transparent; border: none;")
-
-        lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(0, 2, 4, 2)
-        lay.setSpacing(8)
-
-        # Indicator: a plain QFrame styled inline — no style-engine involvement
-        self._dot = QtWidgets.QFrame()
-        self._dot.setFixedSize(14, 14)
-        self._dot.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        lay.addWidget(self._dot, 0, QtCore.Qt.AlignVCenter)
-
-        # Label: direct stylesheet, never touched by the cascade
-        self._lbl = QtWidgets.QLabel(text)
-        self._lbl.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self._lbl.setStyleSheet("color:#ECEDF2; background:transparent; border:none;")
-        lay.addWidget(self._lbl, 1)
-
-        self._refresh()
-
-    # ── internal ─────────────────────────────────────────────────────────────
-    def _refresh(self):
-        enabled = self.isEnabled()
-        if self._checked:
-            dot_ss = "border-radius:7px; background:#8B95FF; border:1.5px solid #8B95FF;"
-        else:
-            dot_ss = ("border-radius:7px; background:rgba(255,255,255,0.04);"
-                      " border:1.5px solid rgba(255,255,255,0.28);")
-        self._dot.setStyleSheet(dot_ss)
-        lbl_color = "#ECEDF2" if enabled else "#555566"
-        self._lbl.setStyleSheet(
-            f"color:{lbl_color}; background:transparent; border:none;"
-        )
-
-    # ── public API ────────────────────────────────────────────────────────────
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def setChecked(self, checked: bool):
-        checked = bool(checked)
-        if checked == self._checked:
-            return
-        self._checked = checked
-        self._refresh()
-        self.toggled.emit(self._checked)
-        self.stateChanged.emit(2 if self._checked else 0)
-
-    def setText(self, text: str):
-        self._lbl.setText(text)
-
-    def text(self) -> str:
-        return self._lbl.text()
-
-    def setToolTip(self, tip: str):
-        super().setToolTip(tip)
-        self._lbl.setToolTip(tip)
-
-    # ── Qt events ─────────────────────────────────────────────────────────────
-    def mousePressEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton:
-            self.setChecked(not self._checked)
-        super().mousePressEvent(event)
-
-    def keyPressEvent(self, event):
-        if event.key() in (QtCore.Qt.Key_Space, QtCore.Qt.Key_Return):
-            self.setChecked(not self._checked)
-        super().keyPressEvent(event)
-
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        if event.type() == QtCore.QEvent.EnabledChange:
-            self._refresh()
-
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -10302,23 +9959,20 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("MLB-TCKR Settings")
-        self.setMinimumSize(820, 520)
-        self.setObjectName("settingsDialog")
+        self.setMinimumSize(860, 640)
 
         # Load current settings
         self.settings = get_settings()
         
         # Secret admin tab trigger
         self._admin_click_count = 0
-        self._admin_click_timer = QtCore.QTimer(self)
+        self._admin_click_timer = QtCore.QTimer()
         self._admin_click_timer.setSingleShot(True)
         self._admin_click_timer.timeout.connect(lambda: setattr(self, '_admin_click_count', 0))
         self._admin_tab_shown = False
         
         # Create tab widget (instance variable so we can add admin tab later)
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.tabBar().setExpanding(False)
         
         # General settings tab
         general_tab = self.create_general_tab()
@@ -10340,7 +9994,12 @@ class SettingsDialog(QtWidgets.QDialog):
         hotkeys_tab = self.create_hotkeys_tab()
         self.tabs.addTab(hotkeys_tab, "Hotkeys")
         
-        header = self._build_header()
+        # Secret trigger label at top (click 7 times to reveal admin tab)
+        self.secret_label = QtWidgets.QLabel(f"Version: {VERSION}")
+        self.secret_label.setAlignment(QtCore.Qt.AlignRight)
+        self.secret_label.setStyleSheet("color: #555; font-size: 10px; padding: 2px 8px;")
+        self.secret_label.setCursor(QtCore.Qt.PointingHandCursor)
+        self.secret_label.installEventFilter(self)
         
         # Buttons
         button_box = QtWidgets.QDialogButtonBox(
@@ -10350,26 +10009,17 @@ class SettingsDialog(QtWidgets.QDialog):
         apply_btn.clicked.connect(self.apply_settings)
         button_box.accepted.connect(self.save_and_close)
         button_box.rejected.connect(self.reject)
-        self._set_button_variant(button_box.button(QtWidgets.QDialogButtonBox.Ok), "primary")
-        self._set_button_variant(button_box.button(QtWidgets.QDialogButtonBox.Cancel), "outline")
-        self._set_button_variant(apply_btn, "secondary")
         
         # Layout
-        root = QtWidgets.QWidget()
-        root.setObjectName("settingsRoot")
-        layout = QtWidgets.QVBoxLayout(root)
-        layout.setContentsMargins(12, 6, 12, 10)
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
-        layout.addWidget(header)
+        layout.addWidget(self.secret_label)
         layout.addWidget(self.tabs)
         layout.addWidget(button_box)
+        self.setLayout(layout)
 
-        outer_layout = QtWidgets.QVBoxLayout()
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.addWidget(root)
-        self.setLayout(outer_layout)
-
-        # Apply shared glass theme
+        # Apply dark theme
         self.setStyleSheet(SETTINGS_DIALOG_QSS)
 
         # Auto-size to show all General-tab content without scrolling.
@@ -10379,96 +10029,17 @@ class SettingsDialog(QtWidgets.QDialog):
         _content_h = self._general_container.sizeHint().height()
         # Width chrome budget includes tab frame, outer margins, and a little
         # extra room so long right-column controls are not clipped.
-        _chrome_w = 164
+        _chrome_w = 140
 
-        # Height chrome = tab bar/frame + button box + outer spacing (header is now 1 line).
-        _chrome_h = 80
+        # Height chrome = tab bar (~28) + tab frame (~8) + button box (~36)
+        #               + outer layout margins (16) + spacing (6) ≈ 94; use 110 safe.
+        _chrome_h = 110
         _screen = QtWidgets.QApplication.primaryScreen()
         _avail_w = _screen.availableGeometry().width() - 80   # keep desktop margins
         _avail_h = _screen.availableGeometry().height() - 80  # leave room for taskbar/title
-        _target_w = min(max(820, _content_w + _chrome_w), _avail_w)
+        _target_w = min(max(860, _content_w + _chrome_w), _avail_w)
         _target_h = min(_content_h + _chrome_h, _avail_h)
-        self.resize(_target_w, max(520, _target_h))
-
-    def _sync_widget_style(self, widget):
-        widget.style().unpolish(widget)
-        widget.style().polish(widget)
-        widget.update()
-
-    def _set_button_variant(self, button, variant):
-        if button is None:
-            return
-        button.setProperty("variant", variant)
-        self._sync_widget_style(button)
-
-    def _style_glass_panel(self, widget, compact=False):
-        widget.setProperty("glassPane", True)
-        widget.setProperty("compactPane", compact)
-        # NOTE: QGraphicsDropShadowEffect on QGroupBox corrupts child widget
-        # sizeHint/layout geometry in Qt, causing label truncation. Removed.
-        self._sync_widget_style(widget)
-
-    def _make_info_label(self, text, role="infoCard"):
-        label = QtWidgets.QLabel(text)
-        label.setWordWrap(True)
-        label.setProperty("role", role)
-        self._sync_widget_style(label)
-        return label
-
-    def _build_header(self):
-        """Compact single-line header showing only the version number.
-        Click it 10 times within 2 seconds to unlock the Admin panel."""
-        header = QtWidgets.QWidget()
-        layout = QtWidgets.QHBoxLayout(header)
-        layout.setContentsMargins(0, 0, 4, 0)
-        layout.addStretch()
-        self.secret_label = QtWidgets.QLabel(f"v{VERSION}")
-        self.secret_label.setProperty("role", "meta")
-        self.secret_label.setFont(QtGui.QFont("JetBrains Mono", 9))
-        self.secret_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.secret_label.setCursor(QtCore.Qt.PointingHandCursor)
-        self.secret_label.setToolTip("Click 10× to unlock Admin panel")
-        self.secret_label.installEventFilter(self)
-        layout.addWidget(self.secret_label)
-        return header
-
-    def _show_question(self, title, text, default=QtWidgets.QMessageBox.Yes):
-        box = QtWidgets.QMessageBox(self)
-        box.setObjectName("settingsMessageBox")
-        box.setWindowTitle(title)
-        box.setText(text)
-        box.setIcon(QtWidgets.QMessageBox.Question)
-        box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
-        box.setDefaultButton(default)
-        box.setStyleSheet(SETTINGS_DIALOG_QSS)
-        self._set_button_variant(box.button(QtWidgets.QMessageBox.Yes), "primary")
-        self._set_button_variant(box.button(QtWidgets.QMessageBox.No), "outline")
-        return box.exec_()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QtGui.QColor("#0B0C14"))
-        self._paint_aurora(painter)
-
-    def _paint_aurora(self, painter):
-        rect = self.rect()
-        blobs = [
-            (0.14, 0.18, 260, QtGui.QColor(99, 102, 241, 82)),
-            (0.86, 0.14, 240, QtGui.QColor(139, 92, 246, 66)),
-            (0.78, 0.88, 280, QtGui.QColor(59, 130, 246, 56)),
-        ]
-        painter.setPen(QtCore.Qt.NoPen)
-        for x_ratio, y_ratio, radius, color in blobs:
-            center = QtCore.QPointF(rect.width() * x_ratio, rect.height() * y_ratio)
-            gradient = QtGui.QRadialGradient(center, radius)
-            gradient.setColorAt(0.0, color)
-            transparent = QtGui.QColor(color)
-            transparent.setAlpha(0)
-            gradient.setColorAt(1.0, transparent)
-            painter.setBrush(QtGui.QBrush(gradient))
-            painter.drawEllipse(center, radius, radius)
+        self.resize(_target_w, max(640, _target_h))
 
     def eventFilter(self, obj, event):
         """Event filter to detect secret clicks on version label."""
@@ -10477,15 +10048,13 @@ class SettingsDialog(QtWidgets.QDialog):
                 self._admin_click_count += 1
                 self._admin_click_timer.start(2000)  # Reset counter after 2 seconds
                 
-                if self._admin_click_count >= 10 and not self._admin_tab_shown:
+                if self._admin_click_count >= 7 and not self._admin_tab_shown:
                     # Reveal admin tab!
                     self._admin_tab_shown = True
                     admin_tab = self.create_admin_tab()
                     self.tabs.addTab(admin_tab, "Admin")
-                    self.secret_label.setText("Admin ✓")
-                    self.secret_label.setProperty("role", "title")
-                    self.secret_label.setFont(QtGui.QFont("JetBrains Mono", 10, QtGui.QFont.DemiBold))
-                    self._sync_widget_style(self.secret_label)
+                    self.secret_label.setText("Admin Unlocked!")
+                    self.secret_label.setStyleSheet("color: #4CAF50; font-size: 10px; padding: 2px 8px; font-weight: bold;")
                     # Switch to admin tab
                     self.tabs.setCurrentIndex(self.tabs.count() - 1)
                     return True
@@ -10500,11 +10069,10 @@ class SettingsDialog(QtWidgets.QDialog):
         container = QtWidgets.QWidget()
         outer_layout = QtWidgets.QVBoxLayout(container)
         outer_layout.setContentsMargins(8, 8, 8, 8)
-        outer_layout.setSpacing(14)
+        outer_layout.setSpacing(10)
 
         # Admin settings group
         admin_group = QtWidgets.QGroupBox("Advanced Font Settings")
-        self._style_glass_panel(admin_group)
         admin_form = QtWidgets.QFormLayout(admin_group)
         admin_form.setContentsMargins(10, 14, 10, 10)
         admin_form.setVerticalSpacing(7)
@@ -10534,68 +10102,46 @@ class SettingsDialog(QtWidgets.QDialog):
         admin_form.addRow("Player Font Size:", player_font_size_layout)
         
         # Info label
-        info_label = self._make_info_label(
+        info_label = QtWidgets.QLabel(
             "Controls the size of pitcher/batter names, W-L records, and pitch counts.\n"
             "Default is 75%. Changes apply immediately."
         )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #888; font-size: 12px; padding: 8px;")
         admin_form.addRow("", info_label)
-
-        # Team Font Size slider
-        font_slider_row = QtWidgets.QHBoxLayout()
-        self.font_scale_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.font_scale_slider.setRange(80, 200)
-        self.font_scale_slider.setValue(self.settings.get('font_scale_percent', 175))
-        self.font_scale_slider.setTickInterval(10)
-        self.font_scale_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
-        self.font_scale_label = QtWidgets.QLabel(f"{self.font_scale_slider.value()}%")
-        self.font_scale_label.setMinimumWidth(40)
-        self.font_scale_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.font_scale_label.setProperty("role", "statValue")
-        self.font_scale_label.setFont(QtGui.QFont("JetBrains Mono", 11, QtGui.QFont.DemiBold))
-        self._sync_widget_style(self.font_scale_label)
-        self.font_scale_slider.valueChanged.connect(
-            lambda v: self.font_scale_label.setText(f"{v}%")
-        )
-        font_slider_row.addWidget(self.font_scale_slider)
-        font_slider_row.addWidget(self.font_scale_label)
-        admin_form.addRow("Team Font Size:", font_slider_row)
 
         outer_layout.addWidget(admin_group)
 
         # Debug settings group
         debug_group = QtWidgets.QGroupBox("Debug Settings")
-        self._style_glass_panel(debug_group)
         debug_form = QtWidgets.QFormLayout(debug_group)
         debug_form.setContentsMargins(10, 14, 10, 10)
         debug_form.setVerticalSpacing(7)
         debug_form.setHorizontalSpacing(16)
 
-        self.wp_symmetry_debug_check = _SettingsCheck("Enabled")
+        self.wp_symmetry_debug_check = QtWidgets.QCheckBox("Enabled")
         self.wp_symmetry_debug_check.setChecked(self.settings.get('debug_wp_symmetry', False))
         self.wp_symmetry_debug_check.setToolTip(
             "Log win-probability bar overlap/inset values per card to the console\n"
             "for symmetry debugging (verbose; testing use only)."
         )
-        _dbg_row = QtWidgets.QHBoxLayout(); _dbg_row.addWidget(self.wp_symmetry_debug_check); _dbg_row.addStretch()
-        debug_form.addRow("Debug WP Symmetry Logging:", _dbg_row)
+        debug_form.addRow("🧪  Debug WP Symmetry Logging:", self.wp_symmetry_debug_check)
 
         outer_layout.addWidget(debug_group)
 
         # Telemetry settings group
         telemetry_group = QtWidgets.QGroupBox("Telemetry")
-        self._style_glass_panel(telemetry_group)
         telemetry_form = QtWidgets.QFormLayout(telemetry_group)
         telemetry_form.setContentsMargins(10, 14, 10, 10)
         telemetry_form.setVerticalSpacing(7)
         telemetry_form.setHorizontalSpacing(16)
 
-        self.telemetry_enabled_check = _SettingsCheck("Enabled")
+        self.telemetry_enabled_check = QtWidgets.QCheckBox("Enabled")
         self.telemetry_enabled_check.setChecked(self.settings.get('telemetry_enabled', True))
         self.telemetry_enabled_check.setToolTip(
             "Enable anonymous usage telemetry (runs, duration, monitor/ticker dimensions)."
         )
-        _telem_row = QtWidgets.QHBoxLayout(); _telem_row.addWidget(self.telemetry_enabled_check); _telem_row.addStretch()
-        telemetry_form.addRow("Usage Telemetry:", _telem_row)
+        telemetry_form.addRow("📡  Usage Telemetry:", self.telemetry_enabled_check)
 
         self.telemetry_posthog_key_edit = QtWidgets.QLineEdit()
         self.telemetry_posthog_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
@@ -10606,7 +10152,7 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         self.telemetry_posthog_key_edit.setEnabled(self.telemetry_enabled_check.isChecked())
         self.telemetry_enabled_check.toggled.connect(self.telemetry_posthog_key_edit.setEnabled)
-        telemetry_form.addRow("PostHog API Key:", self.telemetry_posthog_key_edit)
+        telemetry_form.addRow("🔑  PostHog API Key:", self.telemetry_posthog_key_edit)
 
         outer_layout.addWidget(telemetry_group)
         outer_layout.addStretch()
@@ -10623,42 +10169,28 @@ class SettingsDialog(QtWidgets.QDialog):
 
         container = QtWidgets.QWidget()
         outer_layout = QtWidgets.QVBoxLayout(container)
-        outer_layout.setContentsMargins(4, 4, 4, 4)
-        outer_layout.setSpacing(8)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(10)
 
         def make_form(group_title):
             """Create a QGroupBox with an inner QFormLayout and return (group, form)."""
             group = QtWidgets.QGroupBox(group_title)
-            self._style_glass_panel(group)
             form = QtWidgets.QFormLayout(group)
-            form.setContentsMargins(8, 8, 8, 6)
-            form.setVerticalSpacing(4)
-            form.setHorizontalSpacing(12)
+            form.setContentsMargins(10, 14, 10, 10)
+            form.setVerticalSpacing(7)
+            form.setHorizontalSpacing(16)
             form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             return group, form
 
         # ── 1. Display ──────────────────────────────────────────────────────
+        # ── 1. Display ──────────────────────────────────────────────────────
         grp_display, form_display = make_form("Display")
 
-        # Height + drag on a single compact row
-        _height_row = QtWidgets.QHBoxLayout()
-        _height_row.setSpacing(10)
         self.height_spin = QtWidgets.QSpinBox()
         self.height_spin.setRange(40, 200)
         self.height_spin.setValue(self.settings.get('ticker_height', 64))
         self.height_spin.setSuffix(" px")
-        self.height_spin.setFixedWidth(90)
-        _height_row.addWidget(self.height_spin)
-        _height_row.addSpacing(12)
-        self.allow_drag_check = _SettingsCheck("Allow Drag")
-        self.allow_drag_check.setChecked(self.settings.get('allow_drag', False))
-        self.allow_drag_check.setToolTip(
-            "When enabled, click and drag the ticker bar to move it anywhere on screen.\n"
-            "Disabled by default to prevent accidental repositioning."
-        )
-        _height_row.addWidget(self.allow_drag_check)
-        _height_row.addStretch()
-        form_display.addRow("Ticker Height:", _height_row)
+        form_display.addRow("Ticker Height:", self.height_spin)
 
         self.monitor_combo = QtWidgets.QComboBox()
         _all_screens = QtWidgets.QApplication.screens()
@@ -10670,63 +10202,53 @@ class SettingsDialog(QtWidgets.QDialog):
         self.monitor_combo.setCurrentIndex(_saved_mon)
         form_display.addRow("Monitor:", self.monitor_combo)
 
-        restart_note = QtWidgets.QLabel("\u26a0 Ticker Height and Monitor changes require a restart.")
+        self.allow_drag_check = QtWidgets.QCheckBox("Allow ticker to be repositioned by dragging")
+        self.allow_drag_check.setChecked(self.settings.get('allow_drag', False))
+        self.allow_drag_check.setToolTip(
+            "When enabled, click and drag the ticker bar to move it anywhere on screen.\n"
+            "Disabled by default to prevent accidental repositioning."
+        )
+        form_display.addRow("Mouse Drag:", self.allow_drag_check)
+
+        restart_note = QtWidgets.QLabel("\u26a0  Ticker Height and Monitor changes require a program restart.")
         restart_note.setObjectName("restartNote")
         restart_note.setWordWrap(True)
-        restart_note.setStyleSheet("color: #6b7090; font-size: 11px; background: transparent; border: none; padding: 0px;")
-        form_display.addRow("", restart_note)
+        restart_note.setStyleSheet("color: #00AAFF;")
+        form_display.addRow(restart_note)
 
         outer_layout.addWidget(grp_display)
 
         # ── 2. Performance ──────────────────────────────────────────────────
-        # All performance controls on a single compact row.
-        grp_perf = QtWidgets.QGroupBox("Performance")
-        self._style_glass_panel(grp_perf)
-        _perf_inner = QtWidgets.QVBoxLayout(grp_perf)
-        _perf_inner.setContentsMargins(8, 8, 8, 6)
-        _perf_inner.setSpacing(0)
+        grp_perf, form_perf = make_form("Performance")
 
-        _perf_row = QtWidgets.QHBoxLayout()
-        _perf_row.setSpacing(6)
-
-        _perf_row.addWidget(QtWidgets.QLabel("Speed:"))
         self.speed_spin = QtWidgets.QSpinBox()
         self.speed_spin.setRange(1, 30)
         self.speed_spin.setValue(self.settings.get('speed', 5))
-        self.speed_spin.setFixedWidth(68)
-        self.speed_spin.setToolTip("Scroll speed (1 = slowest, 30 = fastest)")
-        _perf_row.addWidget(self.speed_spin)
+        self.speed_spin.setToolTip("Scroll speed of the ticker (1 = slowest, 30 = fastest)")
+        form_perf.addRow("Ticker Speed:", self.speed_spin)
 
-        _perf_row.addSpacing(14)
-        _perf_row.addWidget(QtWidgets.QLabel("Update:"))
         self.update_spin = QtWidgets.QSpinBox()
         self.update_spin.setRange(5, 300)
         self.update_spin.setValue(self.settings.get('update_interval', 10))
-        self.update_spin.setSuffix(" s")
-        self.update_spin.setFixedWidth(76)
-        _perf_row.addWidget(self.update_spin)
+        self.update_spin.setSuffix(" seconds")
+        form_perf.addRow("Update Interval:", self.update_spin)
 
-        _perf_row.addSpacing(14)
-        self.fps_check = _SettingsCheck("FPS Overlay")
+        self.fps_check = QtWidgets.QCheckBox("Show overlay")
         self.fps_check.setChecked(self.settings.get('show_fps_overlay', False))
-        _perf_row.addWidget(self.fps_check)
+        form_perf.addRow("FPS Counter:", self.fps_check)
 
-        _perf_row.addStretch()
-        _perf_inner.addLayout(_perf_row)
         outer_layout.addWidget(grp_perf)
 
         # ── 3. Appearance ───────────────────────────────────────────────────
         grp_appearance, form_appearance = make_form("Appearance")
 
-        self.led_bg_check = _SettingsCheck("Enabled")
+        self.led_bg_check = QtWidgets.QCheckBox("Enabled")
         self.led_bg_check.setChecked(self.settings.get('led_background', True))
-        _led_row = QtWidgets.QHBoxLayout(); _led_row.addWidget(self.led_bg_check); _led_row.addStretch()
-        form_appearance.addRow("LED-Style Background:", _led_row)
+        form_appearance.addRow("LED-Style Background:", self.led_bg_check)
 
-        self.glass_check = _SettingsCheck("Enabled")
+        self.glass_check = QtWidgets.QCheckBox("Enabled")
         self.glass_check.setChecked(self.settings.get('glass_overlay', True))
-        _glass_row = QtWidgets.QHBoxLayout(); _glass_row.addWidget(self.glass_check); _glass_row.addStretch()
-        form_appearance.addRow("Glass Overlay Effect:", _glass_row)
+        form_appearance.addRow("Glass Overlay Effect:", self.glass_check)
 
         _opacity_row = QtWidgets.QHBoxLayout()
         self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -10737,9 +10259,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.opacity_slider.setMinimumWidth(160)
         self._opacity_label = QtWidgets.QLabel(f"{self.opacity_slider.value()}%")
         self._opacity_label.setFixedWidth(36)
-        self._opacity_label.setProperty("role", "statValue")
-        self._opacity_label.setFont(QtGui.QFont("JetBrains Mono", 11, QtGui.QFont.DemiBold))
-        self._sync_widget_style(self._opacity_label)
+        self._opacity_label.setStyleSheet("color: #00FF44; font-weight: bold; font-size: 14px;")
         self.opacity_slider.valueChanged.connect(
             lambda v: self._opacity_label.setText(f"{v}%")
         )
@@ -10756,9 +10276,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.content_opacity_slider.setMinimumWidth(160)
         self._content_opacity_label = QtWidgets.QLabel(f"{self.content_opacity_slider.value()}%")
         self._content_opacity_label.setFixedWidth(36)
-        self._content_opacity_label.setProperty("role", "statValue")
-        self._content_opacity_label.setFont(QtGui.QFont("JetBrains Mono", 11, QtGui.QFont.DemiBold))
-        self._sync_widget_style(self._content_opacity_label)
+        self._content_opacity_label.setStyleSheet("color: #00FF44; font-weight: bold; font-size: 14px;")
         self.content_opacity_slider.valueChanged.connect(
             lambda v: self._content_opacity_label.setText(f"{v}%")
         )
@@ -10789,6 +10307,26 @@ class SettingsDialog(QtWidgets.QDialog):
             lambda f: self.font_combo.setFont(QtGui.QFont(f, 13))
         )
         form_font.addRow("Font Family:", self.font_combo)
+
+        # Team Font Size — slider + live % label
+        font_slider_row = QtWidgets.QHBoxLayout()
+        self.font_scale_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.font_scale_slider.setRange(80, 200)
+        self.font_scale_slider.setValue(self.settings.get('font_scale_percent', 175))
+        self.font_scale_slider.setTickInterval(10)
+        self.font_scale_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.font_scale_label = QtWidgets.QLabel(
+            f"{self.font_scale_slider.value()}%"
+        )
+        self.font_scale_label.setMinimumWidth(40)
+        self.font_scale_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.font_scale_label.setStyleSheet("color: #00FF44; font-weight: bold; font-size: 14px;")
+        self.font_scale_slider.valueChanged.connect(
+            lambda v: self.font_scale_label.setText(f"{v}%")
+        )
+        font_slider_row.addWidget(self.font_scale_slider)
+        font_slider_row.addWidget(self.font_scale_label)
+        form_font.addRow("Team Font Size:", font_slider_row)
 
         # Player Info Font — for W-L records, pitcher/batter names, pitch counts
         self.player_info_font_combo = QtWidgets.QComboBox()
@@ -10825,54 +10363,43 @@ class SettingsDialog(QtWidgets.QDialog):
             self.name_display_combo.setCurrentIndex(1)
         else:
             self.name_display_combo.setCurrentIndex(0)
-        form_content.addRow("Team Name Display:", self.name_display_combo)
+        form_content.addRow("🗺️  Team Name Display:", self.name_display_combo)
 
-        self.records_check = _SettingsCheck("Player Names & Stats")
+        self.records_check = QtWidgets.QCheckBox("")
         self.records_check.setChecked(self.settings.get('show_team_records', True))
-        self.records_check.setToolTip("Show pitcher/batter names and pitch counts on each game card.")
+        form_content.addRow("🧢  Show Player Names / Stats (pitcher, batter, pitch counts):", self.records_check)
 
-        self.wl_check = _SettingsCheck("Team W-L Record")
+        self.wl_check = QtWidgets.QCheckBox("")
         self.wl_check.setChecked(self.settings.get('show_team_wl', True))
+        form_content.addRow("🔢  Show Team W-L Record:", self.wl_check)
 
-        self.win_prob_check = _SettingsCheck("Win Probability Bar")
-        self.win_prob_check.setChecked(self.settings.get('show_win_probability', True))
-        self.win_prob_check.setToolTip(
-            "Show a thin win probability bar at the top of each live game card.\n"
-            "The bar is split by team color: away on the left, home on the right."
-        )
-
-        _show_row = QtWidgets.QHBoxLayout()
-        _show_row.setSpacing(16)
-        _show_row.addWidget(self.records_check)
-        _show_row.addWidget(self.wl_check)
-        _show_row.addWidget(self.win_prob_check)
-        _show_row.addStretch()
-        form_content.addRow("Show:", _show_row)
-
-        self.live_only_check = _SettingsCheck("Live Only")
+        self.live_only_check = QtWidgets.QCheckBox("Enabled")
         self.live_only_check.setChecked(self.settings.get('live_games_only', False))
         self.live_only_check.setToolTip(
             "When checked and at least one game is in progress, only live games are shown.\n"
             "If no games are live, falls back to showing Final and Scheduled games normally."
         )
+        form_content.addRow("⚡  Show Live Games Only:", self.live_only_check)
 
-        self.final_check = _SettingsCheck("Include Finals")
+        self.final_check = QtWidgets.QCheckBox("Enabled")
         self.final_check.setChecked(self.settings.get('include_final_games', True))
+        form_content.addRow("🏁  Include Final Games:", self.final_check)
 
-        self.scheduled_check = _SettingsCheck("Include Scheduled")
+        self.scheduled_check = QtWidgets.QCheckBox("Enabled")
         self.scheduled_check.setChecked(self.settings.get('include_scheduled_games', True))
+        form_content.addRow("📆  Include Scheduled Games:", self.scheduled_check)
 
-        _games_row = QtWidgets.QHBoxLayout()
-        _games_row.setSpacing(16)
-        _games_row.addWidget(self.live_only_check)
-        _games_row.addWidget(self.final_check)
-        _games_row.addWidget(self.scheduled_check)
-        _games_row.addStretch()
-        form_content.addRow("Games:", _games_row)
+        self.win_prob_check = QtWidgets.QCheckBox("Enabled")
+        self.win_prob_check.setChecked(self.settings.get('show_win_probability', True))
+        self.win_prob_check.setToolTip(
+            "Show a 3-pixel win probability bar at the bottom of each live game card.\n"
+            "The bar is split by team color: away on the left, home on the right."
+        )
+        form_content.addRow("📊  Show Win Probability Bars:", self.win_prob_check)
 
         # Show Game Moneyline — provider dropdown + per-provider API keys
         ml_row = QtWidgets.QHBoxLayout()
-        self.moneyline_check = _SettingsCheck("Enabled")
+        self.moneyline_check = QtWidgets.QCheckBox("Enabled")
         self.moneyline_check.setChecked(self.settings.get('show_moneyline', False))
         ml_row.addWidget(self.moneyline_check)
         ml_row.addSpacing(12)
@@ -10900,7 +10427,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.odds_refresh_spin.setToolTip("How often to fetch updated moneyline odds (1–120 min)")
         ml_row.addWidget(self.odds_refresh_spin)
         ml_row.addStretch()
-        form_content.addRow("Show Game Moneyline:", ml_row)
+        form_content.addRow("💵  Show Game Moneyline:", ml_row)
 
         # API key for The Odds API (always stored, shown regardless of active provider)
         self.odds_api_key_edit = QtWidgets.QLineEdit()
@@ -10930,17 +10457,16 @@ class SettingsDialog(QtWidgets.QDialog):
             "After all games finish, keep showing yesterday's final scores until this many\n"
             "minutes before today's first pitch. Set to 0 to switch at midnight."
         )
-        form_content.addRow("Switch to Today's Games:", self.yesterday_cutoff_spin)
+        form_content.addRow("🔄  Switch to Today's Games:", self.yesterday_cutoff_spin)
 
         outer_layout.addWidget(grp_content)
 
         # ── 6. Startup ───────────────────────────────────────────────────────
         grp_startup, form_startup = make_form("Startup")
 
-        self.startup_check = _SettingsCheck("Load at Windows Startup")
+        self.startup_check = QtWidgets.QCheckBox("Load at Windows Startup")
         self.startup_check.setChecked(get_startup_registry())
-        _startup_row = QtWidgets.QHBoxLayout(); _startup_row.addWidget(self.startup_check); _startup_row.addStretch()
-        form_startup.addRow("", _startup_row)
+        form_startup.addRow(self.startup_check)
 
         outer_layout.addWidget(grp_startup)
 
@@ -10954,18 +10480,19 @@ class SettingsDialog(QtWidgets.QDialog):
         widget = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout()
         outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(14)
+        outer.setSpacing(8)
 
         # Info label
-        info = self._make_info_label(
+        info = QtWidgets.QLabel(
             "Choose Primary, Secondary, or Tertiary to use an official MLB palette color, "
             "or pick Custom to enter any hex color. Changes apply per-team."
         )
+        info.setWordWrap(True)
+        info.setStyleSheet("padding: 5px; background: #151820; border: 1px solid #2a3a5e; color: #dce0ea;")
         outer.addWidget(info)
 
         # Reset button
         reset_btn = QtWidgets.QPushButton("Reset All to Defaults")
-        self._set_button_variant(reset_btn, "outline")
         reset_btn.clicked.connect(self.reset_team_colors)
         outer.addWidget(reset_btn)
 
@@ -11010,7 +10537,6 @@ class SettingsDialog(QtWidgets.QDialog):
             # Colour swatch — always shows the effective colour
             swatch_color = palette[init_slot] if init_slot < 3 else init_hex
             color_btn = QtWidgets.QPushButton()
-            color_btn.setObjectName("teamSwatchButton")
             color_btn.setFixedSize(28, 22)
             color_btn.setStyleSheet(
                 f"background-color: {swatch_color}; border: 1px solid #4a5a7e;"
@@ -11052,7 +10578,6 @@ class SettingsDialog(QtWidgets.QDialog):
             col.setSpacing(6)
             for div_name, teams in divisions:
                 grp = QtWidgets.QGroupBox(div_name)
-                self._style_glass_panel(grp)
                 form = QtWidgets.QFormLayout(grp)
                 form.setContentsMargins(8, 12, 8, 8)
                 form.setVerticalSpacing(5)
@@ -11139,10 +10664,11 @@ class SettingsDialog(QtWidgets.QDialog):
     
     def reset_team_colors(self):
         """Reset all team colors to defaults"""
-        reply = self._show_question(
+        reply = QtWidgets.QMessageBox.question(
+            self,
             "Reset Team Colors",
             "Reset all team colors to MLB defaults?",
-            QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
         )
         
         if reply == QtWidgets.QMessageBox.Yes:
@@ -11162,83 +10688,66 @@ class SettingsDialog(QtWidgets.QDialog):
         container = QtWidgets.QWidget()
         outer_layout = QtWidgets.QVBoxLayout(container)
         outer_layout.setContentsMargins(8, 8, 8, 8)
-        outer_layout.setSpacing(14)
+        outer_layout.setSpacing(10)
 
-        # Combined scoring alerts group
-        alerts_group = QtWidgets.QGroupBox("Scoring Alerts")
-        self._style_glass_panel(alerts_group)
-        alerts_vbox = QtWidgets.QVBoxLayout(alerts_group)
-        alerts_vbox.setContentsMargins(10, 14, 10, 10)
-        alerts_vbox.setSpacing(8)
+        # Alert behaviour group
+        behaviour_group = QtWidgets.QGroupBox("Scoring Alert Behaviour")
+        behaviour_form = QtWidgets.QFormLayout(behaviour_group)
+        behaviour_form.setContentsMargins(10, 14, 10, 10)
+        behaviour_form.setVerticalSpacing(8)
+        behaviour_form.setHorizontalSpacing(16)
 
-        # Duration row
-        duration_row = QtWidgets.QHBoxLayout()
-        duration_row.addWidget(QtWidgets.QLabel("Alert Duration:"))
         self.alert_duration_spin = QtWidgets.QSpinBox()
         self.alert_duration_spin.setRange(3, 15)
         self.alert_duration_spin.setValue(self.settings.get('scoring_alert_duration', 6))
         self.alert_duration_spin.setSuffix(" sec")
-        self.alert_duration_spin.setFixedWidth(76)
-        duration_row.addWidget(self.alert_duration_spin)
-        duration_row.addStretch()
-        alerts_vbox.addLayout(duration_row)
+        behaviour_form.addRow("Alert Duration:", self.alert_duration_spin)
 
-        # Grid: col 0 = event label, col 1 = Visual Alert check, col 2 = Sound Alert check
-        _grid = QtWidgets.QGridLayout()
-        _grid.setHorizontalSpacing(16)
-        _grid.setVerticalSpacing(4)
-        _grid.setColumnStretch(0, 1)   # event label stretches
-        _grid.setColumnMinimumWidth(1, 110)
-        _grid.setColumnMinimumWidth(2, 110)
+        self.alert_for_team_check = QtWidgets.QCheckBox("Alert when watched team scores")
+        self.alert_for_team_check.setChecked(bool(self.settings.get('scoring_alert_for_team', True)))
+        behaviour_form.addRow(self.alert_for_team_check)
 
-        # Header row
-        _hdr_vis = QtWidgets.QLabel("Visual Alert")
-        _hdr_vis.setStyleSheet("color:#8B95FF; font-size:11px; font-weight:600;")
-        _hdr_vis.setAlignment(QtCore.Qt.AlignCenter)
-        _hdr_snd = QtWidgets.QLabel("Sound Alert")
-        _hdr_snd.setStyleSheet("color:#8B95FF; font-size:11px; font-weight:600;")
-        _hdr_snd.setAlignment(QtCore.Qt.AlignCenter)
-        _grid.addWidget(_hdr_vis, 0, 1, QtCore.Qt.AlignCenter)
-        _grid.addWidget(_hdr_snd, 0, 2, QtCore.Qt.AlignCenter)
+        self.alert_vs_team_check = QtWidgets.QCheckBox("Alert when opponent scores against watched team")
+        self.alert_vs_team_check.setChecked(bool(self.settings.get('scoring_alert_vs_team', True)))
+        behaviour_form.addRow(self.alert_vs_team_check)
 
-        def _add_alert_row(row, label_text, vis_attr, snd_attr, vis_key, snd_key, vis_default, snd_default):
-            lbl = QtWidgets.QLabel(label_text)
-            lbl.setStyleSheet("color:#ECEDF2;")
-            _grid.addWidget(lbl, row, 0, QtCore.Qt.AlignVCenter)
+        self.alert_game_starts_check = QtWidgets.QCheckBox("Alert when watched team's game starts")
+        self.alert_game_starts_check.setChecked(bool(self.settings.get('scoring_alert_game_starts', True)))
+        behaviour_form.addRow(self.alert_game_starts_check)
 
-            vis_cb = _SettingsCheck()
-            vis_cb.setChecked(bool(self.settings.get(vis_key, vis_default)))
-            _grid.addWidget(vis_cb, row, 1, QtCore.Qt.AlignCenter)
-            setattr(self, vis_attr, vis_cb)
+        self.alert_game_finishes_check = QtWidgets.QCheckBox("Alert when watched team's game finishes")
+        self.alert_game_finishes_check.setChecked(bool(self.settings.get('scoring_alert_game_finishes', True)))
+        behaviour_form.addRow(self.alert_game_finishes_check)
 
-            snd_cb = _SettingsCheck()
-            snd_cb.setChecked(bool(self.settings.get(snd_key, snd_default)))
-            _grid.addWidget(snd_cb, row, 2, QtCore.Qt.AlignCenter)
-            setattr(self, snd_attr, snd_cb)
+        outer_layout.addWidget(behaviour_group)
 
-        _add_alert_row(1, "When watched team scores",
-                       'alert_for_team_check',        'alert_sound_for_team_check',
-                       'scoring_alert_for_team',       'scoring_alert_sound_for_team_enabled',
-                       True, False)
-        _add_alert_row(2, "When opponent scores",
-                       'alert_vs_team_check',          'alert_sound_vs_team_check',
-                       'scoring_alert_vs_team',        'scoring_alert_sound_vs_team_enabled',
-                       True, False)
-        _add_alert_row(3, "When watched team's game starts",
-                       'alert_game_starts_check',      'alert_sound_game_starts_check',
-                       'scoring_alert_game_starts',    'scoring_alert_sound_game_starts_enabled',
-                       True, False)
-        _add_alert_row(4, "When watched team's game finishes",
-                       'alert_game_finishes_check',    'alert_sound_game_finishes_check',
-                       'scoring_alert_game_finishes',  'scoring_alert_sound_game_finishes_enabled',
-                       True, False)
+        # Sound behaviour group
+        sound_group = QtWidgets.QGroupBox("Alert Sounds")
+        sound_form = QtWidgets.QFormLayout(sound_group)
+        sound_form.setContentsMargins(10, 14, 10, 10)
+        sound_form.setVerticalSpacing(8)
+        sound_form.setHorizontalSpacing(16)
 
-        alerts_vbox.addLayout(_grid)
-        outer_layout.addWidget(alerts_group)
+        self.alert_sound_for_team_check = QtWidgets.QCheckBox("Play sound when watched team scores")
+        self.alert_sound_for_team_check.setChecked(bool(self.settings.get('scoring_alert_sound_for_team_enabled', False)))
+        sound_form.addRow(self.alert_sound_for_team_check)
+
+        self.alert_sound_vs_team_check = QtWidgets.QCheckBox("Play sound when opponent scores against watched team")
+        self.alert_sound_vs_team_check.setChecked(bool(self.settings.get('scoring_alert_sound_vs_team_enabled', False)))
+        sound_form.addRow(self.alert_sound_vs_team_check)
+
+        self.alert_sound_game_starts_check = QtWidgets.QCheckBox("Play sound when watched team's game starts")
+        self.alert_sound_game_starts_check.setChecked(bool(self.settings.get('scoring_alert_sound_game_starts_enabled', False)))
+        sound_form.addRow(self.alert_sound_game_starts_check)
+
+        self.alert_sound_game_finishes_check = QtWidgets.QCheckBox("Play sound when watched team's game finishes")
+        self.alert_sound_game_finishes_check.setChecked(bool(self.settings.get('scoring_alert_sound_game_finishes_enabled', False)))
+        sound_form.addRow(self.alert_sound_game_finishes_check)
+
+        outer_layout.addWidget(sound_group)
 
         # Watched teams group
         teams_group = QtWidgets.QGroupBox("Watched Teams")
-        self._style_glass_panel(teams_group)
         teams_layout = QtWidgets.QVBoxLayout(teams_group)
         teams_layout.setContentsMargins(10, 14, 10, 10)
         teams_layout.setSpacing(4)
@@ -11251,10 +10760,8 @@ class SettingsDialog(QtWidgets.QDialog):
         btn_row = QtWidgets.QHBoxLayout()
         select_all_btn  = QtWidgets.QPushButton("Select All")
         select_none_btn = QtWidgets.QPushButton("Clear All")
-        self._set_button_variant(select_all_btn, "secondary")
-        self._set_button_variant(select_none_btn, "ghost")
-        select_all_btn.setFixedWidth(110)
-        select_none_btn.setFixedWidth(100)
+        select_all_btn.setFixedWidth(90)
+        select_none_btn.setFixedWidth(90)
         def _select_all_teams() -> None:
             for cb in self._watched_team_checks.values():
                 cb.setChecked(True)
@@ -11272,16 +10779,12 @@ class SettingsDialog(QtWidgets.QDialog):
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(4)
-        for c in range(3):
-            grid.setColumnMinimumWidth(c, 140)
-            grid.setColumnStretch(c, 1)
         for idx, team in enumerate(all_teams):
-            cb = _SettingsCheck(team)
+            cb = QtWidgets.QCheckBox(team)
             cb.setChecked(team in watched)
-            cb.setMinimumWidth(130)
             self._watched_team_checks[team] = cb
             row, col = divmod(idx, 3)
-            grid.addWidget(cb, row, col, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            grid.addWidget(cb, row, col)
         teams_layout.addLayout(grid)
 
         outer_layout.addWidget(teams_group)
@@ -11295,25 +10798,18 @@ class SettingsDialog(QtWidgets.QDialog):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
         layout.setAlignment(QtCore.Qt.AlignTop)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
         layout.setContentsMargins(12, 12, 12, 12)
-
-        intro = self._make_info_label(
-            "Keep proxy and certificate configuration together here. Changes are applied immediately after save or apply."
-        )
-        layout.addWidget(intro)
 
         # Proxy group
         proxy_group = QtWidgets.QGroupBox("Proxy")
-        self._style_glass_panel(proxy_group)
         proxy_form = QtWidgets.QFormLayout()
         proxy_form.setSpacing(8)
         proxy_form.setContentsMargins(10, 12, 10, 10)
 
-        self.use_proxy_check = _SettingsCheck("Enable Proxy")
+        self.use_proxy_check = QtWidgets.QCheckBox("Enable Proxy")
         self.use_proxy_check.setChecked(bool(self.settings.get('use_proxy', False)))
-        _proxy_en_row = QtWidgets.QHBoxLayout(); _proxy_en_row.addWidget(self.use_proxy_check); _proxy_en_row.addStretch()
-        proxy_form.addRow("", _proxy_en_row)
+        proxy_form.addRow(self.use_proxy_check)
 
         self.proxy_url_edit = QtWidgets.QLineEdit(
             normalize_proxy_url(self.settings.get('proxy', ''))
@@ -11328,15 +10824,13 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # Certificate group
         cert_group = QtWidgets.QGroupBox("SSL Certificate (Optional)")
-        self._style_glass_panel(cert_group)
         cert_form = QtWidgets.QFormLayout()
         cert_form.setSpacing(8)
         cert_form.setContentsMargins(10, 12, 10, 10)
 
-        self.use_cert_check = _SettingsCheck("Use Certificate File")
+        self.use_cert_check = QtWidgets.QCheckBox("Use Certificate File")
         self.use_cert_check.setChecked(bool(self.settings.get('use_cert', False)))
-        _cert_en_row = QtWidgets.QHBoxLayout(); _cert_en_row.addWidget(self.use_cert_check); _cert_en_row.addStretch()
-        cert_form.addRow("", _cert_en_row)
+        cert_form.addRow(self.use_cert_check)
 
         cert_row = QtWidgets.QHBoxLayout()
         self.cert_file_edit = QtWidgets.QLineEdit(self.settings.get('cert_file', ''))
@@ -11344,7 +10838,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cert_file_edit.setEnabled(self.use_cert_check.isChecked())
         self.use_cert_check.toggled.connect(self.cert_file_edit.setEnabled)
         self._cert_browse_btn = QtWidgets.QPushButton("Browse…")
-        self._set_button_variant(self._cert_browse_btn, "outline")
         self._cert_browse_btn.setFixedWidth(80)
         self._cert_browse_btn.setEnabled(self.use_cert_check.isChecked())
         self.use_cert_check.toggled.connect(self._cert_browse_btn.setEnabled)
@@ -11381,18 +10874,20 @@ class SettingsDialog(QtWidgets.QDialog):
             ("Q"       , "Quit"),
         ]
 
+        KEY_QSS   = (
+            "background:#1e2530; color:#e0e8ff; border:1px solid #3a4a6a;"
+            "border-radius:4px; padding:2px 8px; font-family:Consolas,monospace;"
+            "font-size:13px; font-weight:bold;"
+        )
+        DESC_QSS  = "color:#c8d8f0; font-size:13px;"
+        NOTE_QSS  = "color:#667788; font-size:11px; font-style:italic;"
+
         widget = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout()
         outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(14)
-
-        intro = self._make_info_label(
-            "These shortcuts work while the ticker has focus. They are session-only and do not modify saved settings."
-        )
-        outer.addWidget(intro)
+        outer.setSpacing(10)
 
         grp = QtWidgets.QGroupBox("Keyboard Shortcuts  (ticker must have focus)")
-        self._style_glass_panel(grp)
         grid = QtWidgets.QGridLayout()
         grid.setContentsMargins(12, 16, 12, 12)
         grid.setHorizontalSpacing(16)
@@ -11401,16 +10896,12 @@ class SettingsDialog(QtWidgets.QDialog):
 
         for row, (key, desc) in enumerate(SHORTCUTS):
             key_lbl  = QtWidgets.QLabel(key)
-            key_lbl.setProperty("role", "hotkey")
-            key_lbl.setFont(QtGui.QFont("JetBrains Mono", 11, QtGui.QFont.DemiBold))
+            key_lbl.setStyleSheet(KEY_QSS)
             key_lbl.setAlignment(QtCore.Qt.AlignCenter)
             key_lbl.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-            self._sync_widget_style(key_lbl)
 
             desc_lbl = QtWidgets.QLabel(desc)
-            desc_lbl.setProperty("role", "hotkeyDesc")
-            desc_lbl.setWordWrap(True)
-            self._sync_widget_style(desc_lbl)
+            desc_lbl.setStyleSheet(DESC_QSS)
 
             grid.addWidget(key_lbl,  row, 0)
             grid.addWidget(desc_lbl, row, 1)
@@ -11418,10 +10909,9 @@ class SettingsDialog(QtWidgets.QDialog):
         grp.setLayout(grid)
         outer.addWidget(grp)
 
-        note = QtWidgets.QLabel("Use the Settings tabs to persist behavior changes. Hotkeys are intended for quick control while the ticker is running.")
-        note.setProperty("role", "meta")
+        note = QtWidgets.QLabel("All shortcuts are session-only and do not modify saved settings.")
+        note.setStyleSheet(NOTE_QSS)
         note.setWordWrap(True)
-        self._sync_widget_style(note)
         outer.addWidget(note)
         outer.addStretch()
 
@@ -11446,7 +10936,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['update_interval'] = self.update_spin.value()
         self.settings['ticker_height'] = self.height_spin.value()
         self.settings['font'] = self.font_combo.currentText()
-        self.settings['font_scale_percent'] = self.font_scale_slider.value() if hasattr(self, 'font_scale_slider') else self.settings.get('font_scale_percent', 175)
+        self.settings['font_scale_percent'] = self.font_scale_slider.value()
         self.settings['player_info_font'] = self.player_info_font_combo.currentText()
         self.settings['show_team_records'] = self.records_check.isChecked()
         self.settings['show_team_wl'] = self.wl_check.isChecked()
@@ -11513,7 +11003,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # Admin tab settings (if shown)
         if self._admin_tab_shown:
-            self.settings['player_font_scale_percent'] = self.player_font_scale_slider.value() if hasattr(self, 'player_font_scale_slider') else self.settings.get('player_font_scale_percent', 75)
+            self.settings['player_font_scale_percent'] = self.player_font_scale_slider.value()
             self.settings['debug_wp_symmetry'] = self.wp_symmetry_debug_check.isChecked()
             self.settings['telemetry_enabled'] = self.telemetry_enabled_check.isChecked()
             self.settings['telemetry_posthog_key'] = self.telemetry_posthog_key_edit.text().strip()
@@ -11554,9 +11044,11 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _offer_restart(self):
         """Ask the user whether to restart now; if yes, relaunch the process."""
-        reply = self._show_question(
+        reply = QtWidgets.QMessageBox.question(
+            self,
             "Restart Required",
             "Ticker height and/or monitor changes require a restart to take effect.\n\nRestart now?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.Yes,
         )
         if reply == QtWidgets.QMessageBox.Yes:
