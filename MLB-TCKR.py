@@ -9906,7 +9906,7 @@ QGroupBox[glassPane="true"]::title {
     subcontrol-position: top left;
     left: 18px;
     padding: 0 8px;
-    color: #ECEDF2;
+    color: #8B95FF;
     background: #13141E;
 }
 
@@ -10245,9 +10245,9 @@ class _SettingsCheck(QtWidgets.QWidget):
     def _refresh(self):
         enabled = self.isEnabled()
         if self._checked:
-            dot_ss = "border-radius:7px; background:#8B95FF; border:1.5px solid #8B95FF;"
+            dot_ss = "border-radius:2px; background:#8B95FF; border:1.5px solid #8B95FF;"
         else:
-            dot_ss = ("border-radius:7px; background:rgba(255,255,255,0.04);"
+            dot_ss = ("border-radius:2px; background:rgba(255,255,255,0.04);"
                       " border:1.5px solid rgba(255,255,255,0.28);")
         self._dot.setStyleSheet(dot_ss)
         lbl_color = "#ECEDF2" if enabled else "#555566"
@@ -10382,7 +10382,7 @@ class SettingsDialog(QtWidgets.QDialog):
         _chrome_w = 164
 
         # Height chrome = tab bar/frame + button box + outer spacing (header is now 1 line).
-        _chrome_h = 80
+        _chrome_h = 160
         _screen = QtWidgets.QApplication.primaryScreen()
         _avail_w = _screen.availableGeometry().width() - 80   # keep desktop margins
         _avail_h = _screen.availableGeometry().height() - 80  # leave room for taskbar/title
@@ -10718,15 +10718,16 @@ class SettingsDialog(QtWidgets.QDialog):
         # ── 3. Appearance ───────────────────────────────────────────────────
         grp_appearance, form_appearance = make_form("Appearance")
 
-        self.led_bg_check = _SettingsCheck("Enabled")
+        self.led_bg_check = _SettingsCheck("LED Background")
         self.led_bg_check.setChecked(self.settings.get('led_background', True))
-        _led_row = QtWidgets.QHBoxLayout(); _led_row.addWidget(self.led_bg_check); _led_row.addStretch()
-        form_appearance.addRow("LED-Style Background:", _led_row)
-
-        self.glass_check = _SettingsCheck("Enabled")
+        self.glass_check = _SettingsCheck("Glass Overlay")
         self.glass_check.setChecked(self.settings.get('glass_overlay', True))
-        _glass_row = QtWidgets.QHBoxLayout(); _glass_row.addWidget(self.glass_check); _glass_row.addStretch()
-        form_appearance.addRow("Glass Overlay Effect:", _glass_row)
+        _effects_row = QtWidgets.QHBoxLayout()
+        _effects_row.setSpacing(16)
+        _effects_row.addWidget(self.led_bg_check)
+        _effects_row.addWidget(self.glass_check)
+        _effects_row.addStretch()
+        form_appearance.addRow("Background Effects:", _effects_row)
 
         _opacity_row = QtWidgets.QHBoxLayout()
         self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -10813,6 +10814,16 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # ── 5. Content ──────────────────────────────────────────────────────
         grp_content, form_content = make_form("Content")
+
+        self.yesterday_cutoff_spin = QtWidgets.QSpinBox()
+        self.yesterday_cutoff_spin.setRange(0, 240)
+        self.yesterday_cutoff_spin.setValue(self.settings.get('yesterday_cutoff_minutes', 30))
+        self.yesterday_cutoff_spin.setSuffix(" min before first pitch")
+        self.yesterday_cutoff_spin.setToolTip(
+            "After all games finish, keep showing yesterday's final scores until this many\n"
+            "minutes before today's first pitch. Set to 0 to switch at midnight."
+        )
+        form_content.addRow("Switch to Today's Games:", self.yesterday_cutoff_spin)
 
         # Team name display — dropdown
         self.name_display_combo = QtWidgets.QComboBox()
@@ -10921,16 +10932,6 @@ class SettingsDialog(QtWidgets.QDialog):
             "Saved independently so switching providers won't erase it."
         )
         form_content.addRow("  Odds-API.io Key (if selected above):", self.odds_api_io_key_edit)
-
-        self.yesterday_cutoff_spin = QtWidgets.QSpinBox()
-        self.yesterday_cutoff_spin.setRange(0, 240)
-        self.yesterday_cutoff_spin.setValue(self.settings.get('yesterday_cutoff_minutes', 30))
-        self.yesterday_cutoff_spin.setSuffix(" min before first pitch")
-        self.yesterday_cutoff_spin.setToolTip(
-            "After all games finish, keep showing yesterday's final scores until this many\n"
-            "minutes before today's first pitch. Set to 0 to switch at midnight."
-        )
-        form_content.addRow("Switch to Today's Games:", self.yesterday_cutoff_spin)
 
         outer_layout.addWidget(grp_content)
 
@@ -11047,31 +11048,29 @@ class SettingsDialog(QtWidgets.QDialog):
             row.addStretch()
             return row
 
-        def make_league_column(divisions):
-            col = QtWidgets.QVBoxLayout()
-            col.setSpacing(6)
-            for div_name, teams in divisions:
-                grp = QtWidgets.QGroupBox(div_name)
+        # Scroll area — QGridLayout keeps AL/NL division rows aligned horizontally
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QtWidgets.QWidget()
+        cols_layout = QtWidgets.QGridLayout(scroll_widget)
+        cols_layout.setContentsMargins(4, 4, 4, 4)
+        cols_layout.setHorizontalSpacing(10)
+        cols_layout.setVerticalSpacing(6)
+        cols_layout.setColumnStretch(0, 1)
+        cols_layout.setColumnStretch(1, 1)
+        for _row_i, ((al_div, al_teams), (nl_div, nl_teams)) in enumerate(
+                zip(AL_DIVISIONS, NL_DIVISIONS)):
+            for _col_i, (_div_name, _teams) in enumerate(
+                    [(al_div, al_teams), (nl_div, nl_teams)]):
+                grp = QtWidgets.QGroupBox(_div_name)
                 self._style_glass_panel(grp)
                 form = QtWidgets.QFormLayout(grp)
                 form.setContentsMargins(8, 12, 8, 8)
                 form.setVerticalSpacing(5)
                 form.setHorizontalSpacing(8)
-                for team in teams:
+                for team in _teams:
                     form.addRow(f"{team}:", make_color_row(team))
-                col.addWidget(grp)
-            col.addStretch()
-            return col
-
-        # Scroll area containing the two-column layout
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_widget = QtWidgets.QWidget()
-        cols_layout = QtWidgets.QHBoxLayout(scroll_widget)
-        cols_layout.setContentsMargins(4, 4, 4, 4)
-        cols_layout.setSpacing(10)
-        cols_layout.addLayout(make_league_column(AL_DIVISIONS))
-        cols_layout.addLayout(make_league_column(NL_DIVISIONS))
+                cols_layout.addWidget(grp, _row_i, _col_i)
         scroll.setWidget(scroll_widget)
         outer.addWidget(scroll)
 
@@ -11187,9 +11186,10 @@ class SettingsDialog(QtWidgets.QDialog):
         _grid = QtWidgets.QGridLayout()
         _grid.setHorizontalSpacing(16)
         _grid.setVerticalSpacing(4)
-        _grid.setColumnStretch(0, 1)   # event label stretches
-        _grid.setColumnMinimumWidth(1, 110)
-        _grid.setColumnMinimumWidth(2, 110)
+        _grid.setColumnStretch(0, 0)   # event label — no stretch
+        _grid.setColumnStretch(3, 1)   # trailing stretch
+        _grid.setColumnMinimumWidth(1, 90)
+        _grid.setColumnMinimumWidth(2, 90)
 
         # Header row
         _hdr_vis = QtWidgets.QLabel("Visual Alert")
@@ -11272,15 +11272,15 @@ class SettingsDialog(QtWidgets.QDialog):
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(4)
-        for c in range(3):
-            grid.setColumnMinimumWidth(c, 140)
+        for c in range(4):
+            grid.setColumnMinimumWidth(c, 120)
             grid.setColumnStretch(c, 1)
         for idx, team in enumerate(all_teams):
             cb = _SettingsCheck(team)
             cb.setChecked(team in watched)
-            cb.setMinimumWidth(130)
+            cb.setMinimumWidth(110)
             self._watched_team_checks[team] = cb
-            row, col = divmod(idx, 3)
+            row, col = divmod(idx, 4)
             grid.addWidget(cb, row, col, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         teams_layout.addLayout(grid)
 
@@ -11343,9 +11343,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cert_file_edit.setPlaceholderText("Path to .pem / .crt certificate file")
         self.cert_file_edit.setEnabled(self.use_cert_check.isChecked())
         self.use_cert_check.toggled.connect(self.cert_file_edit.setEnabled)
-        self._cert_browse_btn = QtWidgets.QPushButton("Browse…")
+        self._cert_browse_btn = QtWidgets.QPushButton()
+        self._cert_browse_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
+        self._cert_browse_btn.setToolTip("Browse for certificate file")
         self._set_button_variant(self._cert_browse_btn, "outline")
-        self._cert_browse_btn.setFixedWidth(80)
+        self._cert_browse_btn.setFixedSize(32, 28)
         self._cert_browse_btn.setEnabled(self.use_cert_check.isChecked())
         self.use_cert_check.toggled.connect(self._cert_browse_btn.setEnabled)
         self._cert_browse_btn.clicked.connect(self.browse_cert_file)
@@ -11402,7 +11404,7 @@ class SettingsDialog(QtWidgets.QDialog):
         for row, (key, desc) in enumerate(SHORTCUTS):
             key_lbl  = QtWidgets.QLabel(key)
             key_lbl.setProperty("role", "hotkey")
-            key_lbl.setFont(QtGui.QFont("JetBrains Mono", 11, QtGui.QFont.DemiBold))
+            key_lbl.setFont(QtGui.QFont("JetBrains Mono", 9, QtGui.QFont.DemiBold))
             key_lbl.setAlignment(QtCore.Qt.AlignCenter)
             key_lbl.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
             self._sync_widget_style(key_lbl)

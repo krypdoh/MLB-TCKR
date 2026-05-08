@@ -18,6 +18,18 @@ build/temp.*
 venv/
 .env
 
+# Build scripts
+build-mlbtckr.ps1
+build_performance.bat
+sign-mlbtckr.ps1
+
+# Cython build inputs/outputs
+setup_mlb_cython.py
+ticker_utils_cython.c
+
+# PyInstaller runtime hooks
+pyi_rth_*.py
+
 # dev
 .cursor/
 .kilo/

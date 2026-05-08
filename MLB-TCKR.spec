@@ -82,21 +82,29 @@ else:
 # ---------------------------------------------------------------------------
 import certifi
 _datas = [
-    # Fonts loaded via QFontDatabase at runtime
-    ('led_board-7.ttf',  '.'),
-    ('SubwayTicker.ttf', '.'),
-    ('PixelGosub-ZaRz.ttf', '.'),
-    ('PixelFont7-G02A.ttf', '.'),
     # System-tray / taskbar icon
     ('mlb.ico',          '.'),
-    ('mlb-reverse.png',  '.'),
+    (os.path.join('espnlogos', 'png', 'mlb-reverse.png'), '.'),
     # Certifi CA bundle for requests/SSL
     (certifi.where(), 'certifi'),
     # Play ball sound effect
     ('play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3', '.'),
 ]
 
-# Include any extra .ttf / .otf fonts sitting in the project directory
+# Include fonts from the project-root fonts/ directory (primary font location)
+_fonts_dir = os.path.join(_spec_dir, 'fonts')
+if os.path.isdir(_fonts_dir):
+    _font_count = 0
+    for _font in glob.glob(os.path.join(_fonts_dir, '*.ttf')) + glob.glob(os.path.join(_fonts_dir, '*.otf')):
+        _entry = (os.path.abspath(_font), '.')
+        if _entry not in _datas:
+            _datas.append(_entry)
+            _font_count += 1
+    print(f'[SPEC] Bundled {_font_count} font(s) from fonts/')
+else:
+    print(f'[SPEC] WARNING: fonts/ directory not found at {_fonts_dir}')
+
+# Include any extra .ttf / .otf fonts sitting in the project root directory
 for _font in glob.glob(os.path.join(_spec_dir, '*.ttf')) + glob.glob(os.path.join(_spec_dir, '*.otf')):
     _entry = (os.path.abspath(_font), '.')
     if _entry not in _datas:
@@ -279,7 +287,7 @@ exe = EXE(
     entitlements_file=None,
     # PyInstaller 5.3+ accepts PNG; for older versions convert mlb.png to mlb.ico
     icon='mlb.ico',
-    version_info='version-mlb-tckr.txt',
+    version='version-mlb-tckr.txt',
     # Embed a Windows application manifest so the AppBar API works correctly
     # and the app is DPI-aware (matches AA_EnableHighDpiScaling in code)
     uac_admin=False,

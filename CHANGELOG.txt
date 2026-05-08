@@ -1,3 +1,35 @@
+Version 1.6.1 (2026-05-06)
+--------------------------
+IMPROVEMENTS:
+- **Redesigned Settings dialogs**: Overhauled the Settings dialog UI for a
+  cleaner layout and improved usability.
+- **Settings — combined Background Effects row**: LED-Style Background and Glass
+  Overlay Effect controls merged into a single row.
+- **Settings — Switch to Today's Games moved**: Relocated to the top of the
+  Content section for quicker access.
+- **Settings — section titles in purple**: Group box titles now use the accent
+  purple color for improved visual hierarchy.
+- **Settings — larger auto-size on open**: Dialog now attempts to open tall
+  enough to show all General tab content without vertical scrolling.
+- **Settings — Scoring Alerts layout**: Visual/Sound Alert checkboxes now sit
+  closer to their event labels; trailing stretch removed from label column.
+- **Settings — Watched Teams 4-column grid**: Team checkboxes laid out in four
+  columns instead of three for a more compact view.
+- **Settings — Team Colors aligned grid**: AL and NL division panels now align
+  row-for-row so East/Central/West boxes sit at the same height across columns.
+- **Settings — Network Browse button**: Replaced "Browse…" text button with a
+  folder icon to prevent label truncation.
+- **Settings — Hotkeys smaller key labels**: Hotkey letter badges rendered at
+  9pt instead of 11pt for a more compact appearance.
+- **Settings checkboxes**: Indicator shape changed from circles to squares.
+
+BUG FIXES:
+- **Box Score scroll judder**: Fixed erratic judder/jitter during box score
+  scrolling by stabilizing the scroll animation timer and preventing conflicting
+  position updates from overlapping refresh cycles.
+
+------------------------------------------------------------------------------
+
 Version 1.6.0 (2026-05-03)
 --------------------------
 NEW FEATURES:
