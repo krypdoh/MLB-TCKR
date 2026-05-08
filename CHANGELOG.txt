@@ -1,6 +1,20 @@
+Version 1.6.2 (2026-05-08)
+--------------------------
+IMPROVEMENTS:
+- **Settings — removed background glow effect**: Eliminated the aurora/radial
+  gradient overlay from the Settings dialog background for a cleaner appearance.
+
+BUG FIXES:
+- **Full-screen detection — multi-monitor**: Ticker no longer hides when a
+  full-screen app is running on a different display; hide/show only triggers when
+  the full-screen window is on the same monitor as the ticker.
+
+------------------------------------------------------------------------------
+
 Version 1.6.1 (2026-05-06)
 --------------------------
 IMPROVEMENTS:
+- **Signed EXE**: Exe files are now signed.
 - **Redesigned Settings dialogs**: Overhauled the Settings dialog UI for a
   cleaner layout and improved usability.
 - **Settings — combined Background Effects row**: LED-Style Background and Glass

@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0504.2207
+Date: 2026.0508.0254
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 import warnings
 warnings.filterwarnings(
@@ -5610,13 +5610,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Heuristic: the window covers the full monitor surface
             is_fullscreen = (fw >= mw and fh >= mh)
 
-            if is_fullscreen and not self._ticker_hidden_for_fullscreen:
+            # Only react if the full-screen app is on the same monitor as our ticker
+            our_hmon = user32.MonitorFromWindow(our_hwnd, MONITOR_DEFAULTTONEAREST)
+            same_monitor = (hmon == our_hmon)
+
+            if is_fullscreen and same_monitor and not self._ticker_hidden_for_fullscreen:
                 self._ticker_hidden_for_fullscreen = True
                 self.hide()
                 self._set_timer_resolution(False)
                 self.scroll_timer.stop()
-                print("[TICKER] Full-screen app detected — ticker hidden")
-            elif not is_fullscreen and self._ticker_hidden_for_fullscreen:
+                print("[TICKER] Full-screen app detected on same monitor — ticker hidden")
+            elif (not is_fullscreen or not same_monitor) and self._ticker_hidden_for_fullscreen:
                 self._ticker_hidden_for_fullscreen = False
                 self.show()
                 if not self.scroll_paused and not self.is_hovered and not self.intro_active:
@@ -10444,31 +10448,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self._set_button_variant(box.button(QtWidgets.QMessageBox.Yes), "primary")
         self._set_button_variant(box.button(QtWidgets.QMessageBox.No), "outline")
         return box.exec_()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QtGui.QColor("#0B0C14"))
-        self._paint_aurora(painter)
-
-    def _paint_aurora(self, painter):
-        rect = self.rect()
-        blobs = [
-            (0.14, 0.18, 260, QtGui.QColor(99, 102, 241, 82)),
-            (0.86, 0.14, 240, QtGui.QColor(139, 92, 246, 66)),
-            (0.78, 0.88, 280, QtGui.QColor(59, 130, 246, 56)),
-        ]
-        painter.setPen(QtCore.Qt.NoPen)
-        for x_ratio, y_ratio, radius, color in blobs:
-            center = QtCore.QPointF(rect.width() * x_ratio, rect.height() * y_ratio)
-            gradient = QtGui.QRadialGradient(center, radius)
-            gradient.setColorAt(0.0, color)
-            transparent = QtGui.QColor(color)
-            transparent.setAlpha(0)
-            gradient.setColorAt(1.0, transparent)
-            painter.setBrush(QtGui.QBrush(gradient))
-            painter.drawEllipse(center, radius, radius)
 
     def eventFilter(self, obj, event):
         """Event filter to detect secret clicks on version label."""
