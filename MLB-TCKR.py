@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0508.0254
+Date: 2026.0513.1032
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 
 import warnings
 warnings.filterwarnings(
@@ -277,6 +277,9 @@ def get_settings():
         "scoring_alert_sound_game_finishes_file": "play-ball-v2-ball-baseball-hammond-music-organ-cgeffex.mp3",
         # Force bundled fonts on hosts with incomplete system font sets (for example Wine).
         "force_bundled_fonts": False,
+        # EXE basenames (lowercase) whose full-screen state is ignored by the ticker.
+        # e.g. ["code.exe", "vlc.exe"]
+        "fullscreen_override_exes": [],
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -2655,6 +2658,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # (mirrors what the Windows Taskbar does).  Poll every 2 s via a QTimer
         # so we never block the main thread.
         self._ticker_hidden_for_fullscreen = False
+        # Cached set of EXE basenames (lowercase) that should never trigger hide.
+        self._fullscreen_override_exes: set = {
+            x.lower() for x in self.settings.get('fullscreen_override_exes', [])
+        }
         self._fullscreen_timer = QtCore.QTimer()
         self._fullscreen_timer.timeout.connect(self._check_fullscreen)
         self._fullscreen_timer.setInterval(2000)
@@ -5583,6 +5590,35 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if fg_hwnd == 0 or fg_hwnd == our_hwnd:
                 return
 
+            # Get window class to filter out system windows (Program Manager, etc.)
+            class_buf = ctypes.create_unicode_buffer(512)
+            user32.GetClassNameW(fg_hwnd, class_buf, 512)
+            window_class = class_buf.value or ""
+            
+            # Exclude known system windows that shouldn't trigger full-screen detection
+            excluded_classes = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
+            if window_class in excluded_classes:
+                return
+
+            # Resolve the EXE name for the foreground window's process
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(fg_hwnd, ctypes.byref(pid))
+            exe_name = ""
+            if pid.value:
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                kernel32 = ctypes.windll.kernel32
+                hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+                if hproc:
+                    exe_buf  = ctypes.create_unicode_buffer(1024)
+                    exe_size = ctypes.c_ulong(1024)
+                    kernel32.QueryFullProcessImageNameW(hproc, 0, exe_buf, ctypes.byref(exe_size))
+                    kernel32.CloseHandle(hproc)
+                    exe_name = os.path.basename(exe_buf.value).lower()  # e.g. "code.exe"
+
+            # Skip EXEs the user has whitelisted in Settings → Override
+            if exe_name and exe_name in self._fullscreen_override_exes:
+                return
+
             # Get foreground window rect
             fg_rect = wintypes.RECT()
             user32.GetWindowRect(fg_hwnd, ctypes.byref(fg_rect))
@@ -5607,19 +5643,36 @@ class MLBTickerWindow(QtWidgets.QWidget):
             mw = mi.rcMonitor.right  - mi.rcMonitor.left
             mh = mi.rcMonitor.bottom - mi.rcMonitor.top
 
-            # Heuristic: the window covers the full monitor surface
-            is_fullscreen = (fw >= mw and fh >= mh)
+            # Heuristic: the window covers the full monitor surface AND lacks a title bar.
+            # Maximized regular windows also cover the monitor but they keep WS_CAPTION,
+            # so requiring its absence avoids false positives from everyday maximized apps.
+            GWL_STYLE  = -16
+            WS_CAPTION = 0x00C00000   # Window has a title bar (set on all normal windows)
+            style = user32.GetWindowLongW(fg_hwnd, GWL_STYLE)
+            has_caption = bool(style & WS_CAPTION)
+            covers_monitor = (fw >= mw and fh >= mh)
+            is_fullscreen = covers_monitor and not has_caption
+
+            # Get window title for debug output
+            title_buf = ctypes.create_unicode_buffer(512)
+            user32.GetWindowTextW(fg_hwnd, title_buf, 512)
+            window_title = title_buf.value or "(untitled)"
 
             # Only react if the full-screen app is on the same monitor as our ticker
             our_hmon = user32.MonitorFromWindow(our_hwnd, MONITOR_DEFAULTTONEAREST)
             same_monitor = (hmon == our_hmon)
+
+            # Debug output
+            if covers_monitor or is_fullscreen or (is_fullscreen != self._ticker_hidden_for_fullscreen):
+                print(f"[TICKER] _check_fullscreen: '{window_title}' exe={exe_name or '?'} hwnd={fg_hwnd}")
+                print(f"         window {fw}x{fh} vs monitor {mw}x{mh}, covers={covers_monitor}, caption={has_caption}, fullscreen={is_fullscreen}, same_monitor={same_monitor}")
 
             if is_fullscreen and same_monitor and not self._ticker_hidden_for_fullscreen:
                 self._ticker_hidden_for_fullscreen = True
                 self.hide()
                 self._set_timer_resolution(False)
                 self.scroll_timer.stop()
-                print("[TICKER] Full-screen app detected on same monitor — ticker hidden")
+                print(f"[TICKER] Full-screen app detected: '{window_title}' — ticker hidden")
             elif (not is_fullscreen or not same_monitor) and self._ticker_hidden_for_fullscreen:
                 self._ticker_hidden_for_fullscreen = False
                 self.show()
@@ -5754,6 +5807,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.cached_background = None
         self.cached_overlay = None
         self._cached_bg_key = None
+
+        # Refresh the fullscreen override EXE set from updated settings
+        self._fullscreen_override_exes = {
+            x.lower() for x in self.settings.get('fullscreen_override_exes', [])
+        }
 
         self.update()
 
@@ -10001,6 +10059,30 @@ QComboBox:focus {
     border: 1px solid rgba(255, 255, 255, 0.20);
 }
 
+QListWidget {
+    background: rgba(255, 255, 255, 0.05);
+    color: #ECEDF2;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 0px;
+    alternate-background-color: rgba(255, 255, 255, 0.03);
+    outline: none;
+}
+
+QListWidget::item {
+    color: #ECEDF2;
+    padding: 5px 10px;
+    border: none;
+}
+
+QListWidget::item:selected {
+    background: rgba(139, 149, 255, 0.30);
+    color: #ECEDF2;
+}
+
+QListWidget::item:hover:!selected {
+    background: rgba(255, 255, 255, 0.06);
+}
+
 QSpinBox::up-button,
 QSpinBox::down-button {
     background: rgba(255, 255, 255, 0.04);
@@ -10339,6 +10421,10 @@ class SettingsDialog(QtWidgets.QDialog):
         # Network / proxy tab
         network_tab = self.create_network_tab()
         self.tabs.addTab(network_tab, "Network")
+
+        # Full-screen override tab
+        override_tab = self.create_override_tab()
+        self.tabs.addTab(override_tab, "Override")
 
         # Hotkeys reference tab
         hotkeys_tab = self.create_hotkeys_tab()
@@ -11340,6 +11426,116 @@ class SettingsDialog(QtWidgets.QDialog):
         widget.setLayout(layout)
         return widget
 
+    def create_override_tab(self):
+        """Settings tab: EXEs whose full-screen state should not hide the ticker."""
+        widget = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout()
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(12)
+
+        intro = self._make_info_label(
+            "Some apps (video players, certain games) go full-screen in a way that "
+            "would normally hide the ticker. Add their executable names below to keep "
+            "the ticker visible even when they are in full-screen mode."
+        )
+        outer.addWidget(intro)
+
+        grp = QtWidgets.QGroupBox("Full-Screen Override — Always Show Ticker")
+        self._style_glass_panel(grp)
+        grp_layout = QtWidgets.QVBoxLayout()
+        grp_layout.setContentsMargins(12, 16, 12, 12)
+        grp_layout.setSpacing(8)
+
+        # List widget showing the saved EXE names
+        self._override_list = QtWidgets.QListWidget()
+        self._override_list.setAlternatingRowColors(True)
+        self._override_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self._override_list.setMaximumHeight(200)
+        saved = self.settings.get('fullscreen_override_exes', [])
+        for exe in saved:
+            self._override_list.addItem(exe)
+        grp_layout.addWidget(self._override_list)
+
+        # Buttons row
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        add_file_btn = QtWidgets.QPushButton("Browse for .exe…")
+        add_file_btn.setProperty("variant", "secondary")
+        self._sync_widget_style(add_file_btn)
+        add_file_btn.clicked.connect(self._override_browse_exe)
+
+        add_name_btn = QtWidgets.QPushButton("Enter name manually…")
+        add_name_btn.setProperty("variant", "secondary")
+        self._sync_widget_style(add_name_btn)
+        add_name_btn.clicked.connect(self._override_add_manual)
+
+        remove_btn = QtWidgets.QPushButton("Remove selected")
+        remove_btn.setProperty("variant", "outline")
+        self._sync_widget_style(remove_btn)
+        remove_btn.clicked.connect(self._override_remove_selected)
+
+        btn_row.addWidget(add_file_btn)
+        btn_row.addWidget(add_name_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(remove_btn)
+        grp_layout.addLayout(btn_row)
+
+        note = QtWidgets.QLabel(
+            "Only the filename is stored (e.g. vlc.exe), not the full path. "
+            "Names are matched case-insensitively."
+        )
+        note.setProperty("role", "meta")
+        note.setWordWrap(True)
+        self._sync_widget_style(note)
+        grp_layout.addWidget(note)
+
+        grp.setLayout(grp_layout)
+        outer.addWidget(grp)
+        outer.addStretch()
+        widget.setLayout(outer)
+        return widget
+
+    def _override_browse_exe(self):
+        """Open a file dialog to pick an .exe and add its basename to the override list."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Executable",
+            "",
+            "Executables (*.exe);;All Files (*)"
+        )
+        if not path:
+            return
+        exe_name = os.path.basename(path).lower()
+        self._override_list_add(exe_name)
+
+    def _override_add_manual(self):
+        """Prompt the user to type an EXE name and add it to the override list."""
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Add EXE Override",
+            "Enter the executable filename (e.g. vlc.exe):"
+        )
+        if not ok or not text.strip():
+            return
+        exe_name = text.strip().lower()
+        if not exe_name.endswith('.exe'):
+            exe_name += '.exe'
+        self._override_list_add(exe_name)
+
+    def _override_list_add(self, exe_name: str):
+        """Add exe_name to the list widget if not already present."""
+        existing = [self._override_list.item(i).text()
+                    for i in range(self._override_list.count())]
+        if exe_name not in existing:
+            self._override_list.addItem(exe_name)
+
+    def _override_remove_selected(self):
+        """Remove the currently selected item from the override list."""
+        row = self._override_list.currentRow()
+        if row >= 0:
+            self._override_list.takeItem(row)
+
     def create_hotkeys_tab(self):
         """Create read-only keyboard shortcuts reference tab."""
         SHORTCUTS = [
@@ -11490,6 +11686,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['scoring_alert_sound_game_finishes_enabled'] = self.alert_sound_game_finishes_check.isChecked()
         self.settings['watched_teams'] = [
             team for team, cb in self._watched_team_checks.items() if cb.isChecked()
+        ]
+
+        # Full-screen override EXE list
+        self.settings['fullscreen_override_exes'] = [
+            self._override_list.item(i).text()
+            for i in range(self._override_list.count())
         ]
 
         # Admin tab settings (if shown)

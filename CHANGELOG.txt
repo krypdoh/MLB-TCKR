@@ -1,3 +1,24 @@
+Version 1.6.3 (2026-05-13)
+--------------------------
+IMPROVEMENTS:
+- **Settings — Override tab**: New tab lets users add EXE names (e.g. vlc.exe)
+  whose full-screen state is ignored — the ticker stays visible even when those
+  apps are full-screen. Entries can be added via file browser or typed manually
+  and are matched case-insensitively.
+
+BUG FIXES:
+- **Full-screen detection — false positives with maximized windows**: Ticker was
+  incorrectly hiding when a regular app (e.g. browser, file manager) was
+  maximized but not truly full-screen. Detection now also requires the foreground
+  window to lack a title bar (WS_CAPTION), matching the behavior of genuine
+  full-screen apps such as games and video players.
+- **Full-screen detection — system windows (Program Manager)**: The Windows
+  desktop process (Progman/WorkerW) and taskbar windows were incorrectly
+  triggering full-screen hide. Known system window classes are now explicitly
+  excluded from the check.
+
+------------------------------------------------------------------------------
+
 Version 1.6.2 (2026-05-08)
 --------------------------
 IMPROVEMENTS:
