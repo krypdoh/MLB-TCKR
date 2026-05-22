@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0513.1032
+Date: 2026.0522.0801
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.3"
+VERSION = "1.6.5"
 
 import warnings
 warnings.filterwarnings(
@@ -60,6 +60,7 @@ import time
 import datetime
 import random
 import uuid
+import gc
 import platform
 import requests
 import statsapi # type: ignore
@@ -2338,6 +2339,39 @@ def draw_baseball_diamond(runners, outs, inning_num, is_top, size=50, dpr=1.0, b
     return pixmap
 
 
+class _VBlankDriver(QtCore.QThread):
+    """Background thread that emits tick() once per hardware VBlank via DwmFlush().
+
+    DwmFlush() is a Windows DWM API that blocks until the Desktop Window Manager
+    presents the next frame, giving true VBlank-synchronised animation without
+    needing OpenGL.  When DwmFlush is unavailable (non-Windows, Remote Desktop,
+    compositor disabled) the thread exits its run() loop silently; the caller's
+    QTimer-based animation then operates as the sole driver.
+    """
+    tick = QtCore.pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        try:
+            _dwmapi = ctypes.WinDLL("dwmapi")
+            while self._running:
+                result = _dwmapi.DwmFlush()  # blocks until the next VBlank
+                if result != 0:
+                    # Non-zero HRESULT: DWM not compositing — exit and let
+                    # the QTimer fallback carry the animation load.
+                    break
+                if self._running:
+                    self.tick.emit()
+        except Exception:
+            pass  # Not Windows, or dwmapi unavailable — QTimer fallback is active
+
+
 class MLBTickerWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -2601,6 +2635,20 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.scroll_timer.timeout.connect(self.update_scroll)
         self.scroll_timer.setTimerType(QtCore.Qt.PreciseTimer)  # More accurate timing
 
+        # VBlank-synchronised repaint driver (Windows / DWM compositing only).
+        # Fires self.update() at each hardware VBlank via DwmFlush(), so Qt always
+        # composites a fresh frame right at flip time.  The scroll_timer still
+        # advances the scroll position and counts FPS; the VBlank driver eliminates
+        # the phase-beat stutter that occurs when the 8ms timer drifts against the
+        # 16.67ms VBlank boundary.  Exits run() silently on non-Windows or when
+        # DWM composition is unavailable (Remote Desktop, VMs, Aero disabled).
+        self._vblank_driver = _VBlankDriver()
+        # Drive update_scroll (not bare update) so the VBlank tick owns the full
+        # animation loop — FPS counting + position advance + repaint — with zero
+        # intermediate frames from the QTimer between VBlanks.
+        self._vblank_driver.tick.connect(self.update_scroll)
+        self._vblank_driver.start()
+
         # Intro pixel-reveal timer (~30 fps)
         self.intro_timer = QtCore.QTimer()
         self.intro_timer.timeout.connect(self.update_intro)
@@ -2823,6 +2871,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         #         shrink the desktop work area so other windows won't overlap.
         shell32.SHAppBarMessage(ABM_SETPOS, ctypes.byref(abd))
 
+        # Cache the reserved strip so _nudge_overlapping_windows() can enforce it.
+        self._appbar_reserved_phys = (
+            int(abd.rc.left), int(abd.rc.top),
+            int(abd.rc.right), int(abd.rc.bottom),
+        )
+        self._appbar_hmonitor = hmonitor
+
         # Step 5: Reposition the Qt window in logical pixels to match the
         #         physical rectangle the shell just registered.
         self.setGeometry(
@@ -2856,13 +2911,32 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # itself does when it resizes.
         WM_SETTINGCHANGE  = 0x001A
         HWND_BROADCAST    = 0xFFFF
+        SPI_SETWORKAREA   = 0x002F
         # PostMessageW is fire-and-forget — it queues WM_SETTINGCHANGE to
         # every top-level window and returns instantly.  SendMessageTimeoutW
         # was blocking up to 5 s *per window*; with several slow processes
         # on the desktop that added up to 30 s of frozen startup.
         # All windows still receive the notification and refresh their
         # cached work-area when their message queues are next processed.
+        #
+        # We broadcast twice: once with wParam=0 (generic settings change)
+        # and once with wParam=SPI_SETWORKAREA (0x2F) so that apps which
+        # specifically listen for work-area changes also get the signal.
         user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0)
+        user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, SPI_SETWORKAREA, 0)
+
+        # Some apps (or apps still launching) miss the initial broadcast
+        # because they haven't created their message queue yet.  Re-broadcast
+        # at 1 s, 3 s, and 6 s so windows opened shortly after the ticker
+        # starts still receive the correct work-area dimensions and don't
+        # open underneath the bar.
+        def _rebroadcast():
+            user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0)
+            user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, SPI_SETWORKAREA, 0)
+
+        QtCore.QTimer.singleShot(1000, _rebroadcast)
+        QtCore.QTimer.singleShot(3000, _rebroadcast)
+        QtCore.QTimer.singleShot(6000, _rebroadcast)
 
         _logical_height = int((abd.rc.bottom - abd.rc.top) / dpr)
 
@@ -3114,7 +3188,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             self.games = []
             self.build_ticker_pixmap()
             if self.ticker_pixmap:
-                raw_speed = self.settings.get('speed', 2)
+                raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
                 self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
                 # _scroll_max_width is set inside build_ticker_pixmap
             # Only reset frame time when not paused
@@ -3140,7 +3214,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if scroll_ratio is not None and self._scroll_max_width > 0:
             self.scroll_offset = scroll_ratio * self._scroll_max_width
         if self.ticker_pixmap:
-            raw_speed = self.settings.get('speed', 2)
+            raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
             self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
             # _scroll_max_width is set inside build_ticker_pixmap
         self.update()
@@ -3267,7 +3341,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 if scroll_ratio is not None and self._scroll_max_width > 0:
                     self.scroll_offset = scroll_ratio * self._scroll_max_width
                 if self.ticker_pixmap:
-                    raw_speed = self.settings.get('speed', 2)
+                    raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
                     self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
                 # Only reset frame time when not paused (avoids time jump on unpause)
                 if not self.scroll_paused and not self.is_hovered:
@@ -3297,7 +3371,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 if scroll_ratio is not None and self._scroll_max_width > 0:
                     self.scroll_offset = scroll_ratio * self._scroll_max_width
                 if self.ticker_pixmap:
-                    raw_speed = self.settings.get('speed', 2)
+                    raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
                     self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
                 # Only reset frame time when not paused
                 if not self.scroll_paused and not self.is_hovered:
@@ -3351,7 +3425,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if scroll_ratio is not None and self._scroll_max_width > 0:
                 self.scroll_offset = scroll_ratio * self._scroll_max_width
             if self.ticker_pixmap:
-                raw_speed = self.settings.get('speed', 2)
+                raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
                 self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
                 # _scroll_max_width is set inside build_ticker_pixmap
             # Only reset frame time when not paused (avoids time jump on unpause)
@@ -3939,7 +4013,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 if scroll_ratio is not None and self._scroll_max_width > 0:
                     self.scroll_offset = scroll_ratio * self._scroll_max_width
                 if self.ticker_pixmap:
-                    raw_speed = self.settings.get('speed', 2)
+                    raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
                     self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
             self._reschedule_update_timer()
             self.update()
@@ -3975,7 +4049,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if scroll_ratio is not None and self._scroll_max_width > 0:
             self.scroll_offset = scroll_ratio * self._scroll_max_width
         if self.ticker_pixmap:
-            raw_speed = self.settings.get('speed', 2)
+            raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
             self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
         # Only reset frame time when not paused
         if not self.scroll_paused and not self.is_hovered:
@@ -4071,7 +4145,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if scroll_ratio is not None and self._scroll_max_width > 0:
             self.scroll_offset = scroll_ratio * self._scroll_max_width
         if self.ticker_pixmap:
-            raw_speed = self.settings.get('speed', 2)
+            raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
             self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
         self._reschedule_update_timer()
         self.update()
@@ -4250,8 +4324,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self.scroll_offset = -float(self.width())
                 # Reset elapsed timer so first delta_ms is sane after the intro pause
                 self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
+                # Run GC now to clear any allocation buildup from intro rendering,
+                # preventing a collection pause from hitting the first animation frames.
+                gc.collect()
                 # Kick off normal scrolling now that intro is finished
-                self.scroll_timer.start(self._scroll_timer_interval_ms)
+                self._start_anim_timer()
                 print("[INTRO] Complete — starting ticker scroll from off-screen right")
                 # Defer the heavy pixmap build + timer start to the next event-loop
                 # tick so the scroll timer fires at least one frame before the main
@@ -4278,7 +4355,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # scroll_offset was set to -self.width() by update_intro just before
         # this function was scheduled, so content scrolls in from off-screen
         # right — DO NOT reset it here or the entry animation is lost.
-        raw_speed = self.settings.get('speed', 2)
+        raw_speed = getattr(self, '_session_speed', self.settings.get('speed', 2))
         self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
         self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
         self._reschedule_update_timer()
@@ -4373,13 +4450,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Target visual gap between rendered game-name bounds.  Using visual edges
         # keeps perceived spacing consistent even when card internals have variable
         # transparent margins (short names, logo width differences, etc.).
-        _visual_gap = max(0, int(round(self.ticker_height * 1.50)))
+        _visual_gap = max(0, int(round(self.ticker_height * 3.00)))
         # When W-L or Moneyline is visible, reserve extra room between cards so
         # side-column text does not sit in the inter-card whitespace.
         if (self.settings.get('show_team_wl', True)
             or self.settings.get('show_moneyline', False)):
-            _visual_gap += 50
-        _trailing_gap = max(0, int(round(self.ticker_height * 1.0)))
+            _visual_gap += 100
+        _trailing_gap = max(0, int(round(self.ticker_height * 2.0)))
 
         _settings_key = (
             self.settings.get('show_team_records', True),
@@ -5417,13 +5494,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 self.scroll_offset = 0.0
         self._last_frame_ms = render_now_ms
 
-        # Draw ticker at the nearest physical-pixel boundary.
-        # Rounding to 1/dpr logical pixels means Qt composites at an exact physical
-        # pixel — no bilinear filtering, no per-frame sharpness variation, smooth
-        # motion at DPR×1 resolution (0.5 logical-px steps at DPR 2, etc.).
-        phys_x = round(self.scroll_offset * self.dpr) / self.dpr
+        # Use the raw float scroll offset — sub-pixel positioning is handled by
+        # QPainter.SmoothPixmapTransform bilinear blending rather than pixel-snapping.
+        # At DPR≥2 the interpolation is near-imperceptible (sub-pixel precision);
+        # at DPR=1 it eliminates the alternating 2-px/3-px advance per frame that
+        # was caused by rounding to whole pixels and produced constant visible judder.
+        phys_x = self.scroll_offset
         _content_alpha = settings.get('content_opacity', 255) / 255.0
         painter.setOpacity(_content_alpha)
+        # Enable bilinear interpolation for the scrolling blit so fractional
+        # offsets blend smoothly instead of snapping to the nearest physical pixel.
+        painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
 
         # Draw tiles for visible period repetitions (avoids one giant pixmap that
         # can exceed GPU texture limits at high DPR with many games).
@@ -5447,6 +5528,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Fallback for no-games message pixmap (small, no GPU issue)
             painter.drawPixmap(QtCore.QPointF(-phys_x, 0), self.ticker_pixmap)
 
+        painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, False)
         painter.setOpacity(1.0)
 
         # Cache overlay if settings haven't changed
@@ -5534,7 +5616,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.drawText(tx, ty, fps_text)
 
         painter.end()
-    
+
+    def _start_anim_timer(self):
+        """Start the scroll animation.
+
+        When the VBlank driver is running it is the sole animation source, so
+        the QTimer must NOT also start — that would create intermediate frames
+        between VBlanks whose varying positions cause speed-dependent judder.
+        The QTimer only starts when the VBlank driver is unavailable (non-Windows,
+        Remote Desktop, DWM disabled) and acts as a plain-rate fallback.
+        """
+        if not (hasattr(self, '_vblank_driver') and self._vblank_driver.isRunning()):
+            self.scroll_timer.start(self._scroll_timer_interval_ms)
+
     def enterEvent(self, event):
         """Pause scrolling when mouse enters ticker"""
         self.is_hovered = True
@@ -5552,7 +5646,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if not self.intro_active and not self.scroll_paused:
             self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0  # reset baseline to avoid jump
             self._set_timer_resolution(True)
-            self.scroll_timer.start(self._scroll_timer_interval_ms)
+            self._start_anim_timer()
         super().leaveEvent(event)
 
     def changeEvent(self, event):
@@ -5566,8 +5660,88 @@ class MLBTickerWindow(QtWidgets.QWidget):
             elif not self.scroll_paused and not self.is_hovered and not self.intro_active:
                 self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
                 self._set_timer_resolution(True)
-                self.scroll_timer.start(self._scroll_timer_interval_ms)
+                self._start_anim_timer()
                 print("[TICKER] Restored — scroll timer restarted")
+
+    def _nudge_overlapping_windows(self):
+        """Move any visible top-level window whose top edge sits inside the
+        AppBar's reserved strip down to just below that strip.
+
+        Apps like Trillian save and restore their own window position
+        (e.g. y=0) on every launch, completely ignoring the current work
+        area.  WM_SETTINGCHANGE cannot fix this because the app never reads
+        the work area — it just restores a hard-coded saved coordinate.
+        This method detects those windows and nudges them into the usable
+        desktop area without user intervention.
+        """
+        if sys.platform != "win32":
+            return
+        if not getattr(self, '_appbar_registered', False):
+            return
+        reserved = getattr(self, '_appbar_reserved_phys', None)
+        if reserved is None:
+            return
+
+        res_left, res_top, res_right, res_bottom = reserved
+        our_hwnd = int(self.winId())
+        user32   = ctypes.windll.user32
+
+        # System/shell window classes that must never be moved.
+        excluded_classes = {
+            "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+            "DV2ControlHost", "MsgrIMEWindowClass", "SysShadow",
+            "tooltips_class32", "#32769",   # desktop
+        }
+
+        GWL_EXSTYLE        = -20
+        WS_EX_TOOLWINDOW   = 0x00000080   # floating tool palettes / tray pop-ups
+        SWP_NOSIZE         = 0x0001
+        SWP_NOZORDER       = 0x0004
+        SWP_NOACTIVATE     = 0x0010
+        SWP_ASYNCWINDOWPOS = 0x4000       # don't block if the target thread is busy
+
+        to_nudge = []   # list of (hwnd, x, new_y)
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def _enum_cb(hwnd, _lp):
+            if hwnd == our_hwnd:
+                return True
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if user32.IsIconic(hwnd):          # minimized
+                return True
+            # Skip tool-windows (tray pop-ups, tooltips, etc.)
+            ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if ex_style & WS_EX_TOOLWINDOW:
+                return True
+            # Skip known system window classes
+            cls_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, cls_buf, 256)
+            if cls_buf.value in excluded_classes:
+                return True
+            # Check whether the window's top edge falls inside our reserved strip.
+            rc = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rc))
+            if res_top <= rc.top < res_bottom:
+                # Also confirm horizontal overlap with the reserved strip.
+                if rc.left < res_right and rc.right > res_left:
+                    to_nudge.append((hwnd, rc.left, rc.top))
+            return True
+
+        cb = WNDENUMPROC(_enum_cb)
+        user32.EnumWindows(cb, 0)
+
+        for hwnd, win_x, old_y in to_nudge:
+            # Slide the window top to just below our reserved strip.
+            user32.SetWindowPos(
+                hwnd, None, win_x, res_bottom, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            )
+            title_buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, title_buf, 256)
+            print(f"[AppBar] Nudged '{title_buf.value}' (hwnd={hwnd}) "
+                  f"from y={old_y} → y={res_bottom}")
 
     def _check_fullscreen(self):
         """Detect a full-screen DirectX/OpenGL app in the foreground and hide/show the AppBar.
@@ -5582,6 +5756,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """
         if sys.platform != "win32":
             return
+        # Enforce the reserved strip: move any window that opened inside it.
+        self._nudge_overlapping_windows()
         try:
             user32 = ctypes.windll.user32
             fg_hwnd = user32.GetForegroundWindow()
@@ -5679,7 +5855,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 if not self.scroll_paused and not self.is_hovered and not self.intro_active:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
                     self._set_timer_resolution(True)
-                    self.scroll_timer.start(self._scroll_timer_interval_ms)
+                    self._start_anim_timer()
                 print("[TICKER] Full-screen app gone — ticker restored")
         except Exception as _e:
             print(f"[TICKER] _check_fullscreen error: {_e}")
@@ -5714,6 +5890,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
 
         # Speed — update scroll constant directly
         raw_speed = self.settings.get('speed', 2)
+        self._session_speed = raw_speed  # Sync session speed with new saved setting
         self._scroll_speed_px_per_ms = (raw_speed * 0.5) / 16.667
 
         # Update interval
@@ -5950,7 +6127,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 if not self.intro_active and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
                     self._set_timer_resolution(True)
-                    self.scroll_timer.start(self._scroll_timer_interval_ms)
+                    self._start_anim_timer()
                 print("[KB] Scroll unpaused")
         elif key == 'g':
             self.start_data_fetch()
@@ -6040,6 +6217,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def closeEvent(self, event):
         """Cleanup on close"""
         self._emit_run_end('close_event')
+        # Stop VBlank driver first so no stray update() signals arrive while
+        # the widget is being torn down.
+        if hasattr(self, '_vblank_driver') and self._vblank_driver.isRunning():
+            self._vblank_driver.stop()
+            self._vblank_driver.wait(300)  # up to ~2 VBlank periods for clean exit
         # Stop all timers
         self.scroll_timer.stop()
         self.update_timer.stop()

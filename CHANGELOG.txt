@@ -1,3 +1,51 @@
+Version 1.6.5 (2026-05-22)
+--------------------------
+IMPROVEMENTS:
+- **Speed — manual speed preserved across mode switches**: Pressing + or - to
+  adjust scroll speed during a session now survives date-mode changes (Y/D/T
+  keys), data refreshes, fetch errors, and the yesterday-to-today auto-switch.
+  Previously all data-refresh callbacks reset the speed back to the saved
+  setting, discarding any in-session adjustment. The manual speed is now held
+  in a session variable and falls back to the saved setting only on a fresh
+  launch or after the user explicitly saves a new speed in Settings.
+
+- **Ticker — eliminated scroll judder at all speeds**: Replaced the QTimer-based
+  animation driver with a VBlank-synchronised driver (DwmFlush) so every
+  rendered frame is delivered to DWM at the exact moment it composes the next
+  display frame. Previously, intermediate timer ticks between VBlanks wrote
+  varying pixel positions into the backing store; at higher speed settings (9+)
+  this produced visible per-frame position variation. The ticker now advances by
+  a perfectly consistent amount on every displayed frame regardless of speed.
+- **Ticker — sub-pixel rendering**: Scroll offset is now kept as a raw float
+  throughout the render path rather than being rounded to the nearest logical
+  pixel before drawing, eliminating staircase stepping at lower speeds.
+- **Ticker — smooth tile blending**: Bilinear interpolation (SmoothPixmapTransform)
+  is now enabled around the tile-drawing block so fractional-pixel tile edges
+  blend cleanly instead of snapping.
+- **Ticker — reduced GC pause at scroll start**: An explicit garbage-collection
+  cycle runs immediately after the intro animation completes and before the
+  first scroll frame, preventing a collector pause from producing a visible
+  stutter on the first frame.
+
+------------------------------------------------------------------------------
+
+Version 1.6.4 (2026-05-21)
+--------------------------
+IMPROVEMENTS:
+- **Ticker — increased spacing between games**: The blank space between game
+  cards on the scrolling ticker has been doubled so player/pitcher info at the
+  bottom of one card no longer overlaps the adjacent card.
+
+BUG FIXES:
+- **AppBar — windows opening underneath the ticker**: Apps such as Trillian that
+  save and restore their own window position (e.g. y=0) on every launch were
+  opening inside the ticker's reserved strip, ignoring the work area entirely.
+  The ticker now scans all visible top-level windows every 2 seconds and
+  automatically slides any window whose top edge falls inside the reserved strip
+  down to just below it.
+
+------------------------------------------------------------------------------
+
 Version 1.6.3 (2026-05-13)
 --------------------------
 IMPROVEMENTS:

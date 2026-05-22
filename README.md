@@ -4,7 +4,7 @@
 
 A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen — just like the tickers you see on sports networks and in sports bars.
 
-![Version](https://img.shields.io/badge/version-1.6.3-blue) 
+![Version](https://img.shields.io/badge/version-1.6.5-blue) 
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
 
@@ -504,8 +504,8 @@ You should have received a copy of the GNU Affero General Public License along w
 **Paul R. Charovkine**
 
 - Program: MLB-TCKR
-- Version: 1.6.1
-- Date: 2026.05.06
+- Version: 1.6.5
+- Date: 2026.05.22
 
 ---
 
