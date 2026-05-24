@@ -1,3 +1,30 @@
+Version 1.6.7 (2026-05-24)
+--------------------------
+BUG FIXES:
+- **Away team logo — inconsistent gap to score for some games**: When the home
+  team's logo was physically wider than the away team's, the logo slots were
+  symmetrised to the wider value and the away logo was left-aligned inside its
+  slot, producing a variable gap between the logo's right edge and the away
+  score. Fixed by absorbing any logo-width difference into the outer block
+  widths rather than expanding the logo slots. The name→logo gap (5 px) and
+  logo→score gap (15 px) are now constant for every game; extra pixels land in
+  the outer margin of the wider-logo side's block, between the WP-bar edge and
+  the team name, where they are not visible.
+- **Moneyline odds — drawn over player names/stats when W-L Record is
+  disabled**: With "Show Team W-L Record" turned off in Settings, the moneyline
+  value was placed at the same vertical position as the pitcher/player stats
+  row, causing the two strings to overlap. The moneyline now draws at the
+  team-name row height (odds_y) in its side column regardless of the W-L
+  setting, matching the position it occupies when W-L is enabled.
+- **Loading / No-games message — solid black background covered the ticker
+  bar**: The "Loading…", "No MLB games scheduled today", and "No data — check
+  network connection" message pixmaps were filled with opaque black, hiding the
+  LED grid or custom background that the paintEvent had already painted beneath
+  them. Changed the fill to transparent so the styled background shows through,
+  matching the appearance of normal game cards.
+
+------------------------------------------------------------------------------
+
 Version 1.6.6 (2026-05-23)
 --------------------------
 BUG FIXES:

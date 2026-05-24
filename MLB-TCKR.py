@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0523.2210
+Date: 2026.0524.0804
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.6"
+VERSION = "1.6.7"
 
 import warnings
 warnings.filterwarnings(
@@ -4455,7 +4455,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             full_w = segment_w * num_copies
             self.ticker_pixmap = QtGui.QPixmap(int(full_w * self.dpr), int(self.ticker_height * self.dpr))
             self.ticker_pixmap.setDevicePixelRatio(self.dpr)
-            self.ticker_pixmap.fill(QtCore.Qt.black)
+            self.ticker_pixmap.fill(QtCore.Qt.transparent)
             # Use actual visual bounding rect so pixel/LED fonts center correctly
             _br = metrics.boundingRect('ABCWMgy0123456789')
             text_y = (self.ticker_height - _br.height()) // 2 - _br.top()
@@ -4915,16 +4915,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
         else:
             home_top_w = home_name_width
 
-        # Symmetrize both blocks AND logos so the win-probability bar extends
-        # equally past the content on both sides.  Without this, a wider home-team
-        # logo (or longer pitcher-stats line) makes the right half of the card wider
-        # than the left, causing the bar to look uneven.
+        # Step 1 — symmetrize text blocks so pitcher-stats lines don't make one
+        # side wider than the other.
         _sym_block_w = max(away_block_width, home_block_width)
         away_block_width = _sym_block_w
         home_block_width = _sym_block_w
-        _sym_logo_w = max(away_logo_w, home_logo_w)
-        away_logo_w = _sym_logo_w
-        home_logo_w = _sym_logo_w
+        # Step 2 — absorb any logo-width difference into the blocks rather than
+        # expanding the logo slots.  This keeps the name→logo gap (5 px) and the
+        # logo→score gap (15 px) constant for every game while still maintaining
+        # card symmetry for the WP bar.  The extra pixels land in the outer margin
+        # of the shorter-logo side's block, between the WP-bar edge and the team
+        # name, where they are invisible to the viewer.
+        _combined_sym = max(away_block_width + away_logo_w,
+                            home_block_width + home_logo_w)
+        away_block_width = _combined_sym - away_logo_w
+        home_block_width = _combined_sym - home_logo_w
 
         # Compute effective outer-side slack later (after row-fit decisions).
         # At short ticker heights we may intentionally hide lower rows; WP-bar
@@ -5123,11 +5128,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
         time_y  += _content_y0
         odds_y  += _content_y0
         # Keep moneyline independent from Show Records: when W-L is visible,
-        # draw moneyline below it; otherwise draw moneyline on the primary small-text line.
+        # draw moneyline below it; otherwise draw moneyline aligned with the team
+        # name row (odds_y) so it never overlaps the player names/stats row.
         _odds_draw_y_raw = (
             odds_y + small_metrics.descent() + 2 + small_metrics.ascent()
             if show_wl
-            else (record_y if record_y is not None else odds_y)
+            else odds_y
         )
         # Keep odds baseline inside the visible content band even when row-fit logic
         # drops secondary rows at small ticker heights.
@@ -5183,7 +5189,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Away team logo
             away_logo = _away_logo_pix
             painter.drawPixmap(x, logo_y, away_logo)
-            x += away_logo_w + 15  # More space between logo and score
+            x += away_logo_w + 15
             
             # Away score (on same line as team name)
             painter.setFont(self._qfont)
