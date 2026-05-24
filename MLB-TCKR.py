@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0522.0801
+Date: 2026.0523.2210
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.5"
+VERSION = "1.6.6"
 
 import warnings
 warnings.filterwarnings(
@@ -2721,16 +2721,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Start immediately — data loads in the background while the intro plays.
         self.build_intro_animation()
 
-        # Pre-load all 30 MLB team logos at startup so switching to Tomorrow/Yesterday
-        # views never hits disk — all teams are already cached in TEAM_IMAGE_CACHE.
-        import threading
-        _all_teams = list(MLB_ESPN_ABBR.keys())  # all 30 nicknames
-        _logo_sz = int(self.ticker_height * 0.625)
-        threading.Thread(
-            target=_preload_logos_background,
-            args=(_all_teams, _logo_sz),
-            daemon=True,
-        ).start()
+        # Pre-warm the MLB logo cache before the intro starts so the first
+        # build_ticker_pixmap() call after the intro is a cache hit with no disk I/O.
+        # QPixmap must be created on the main thread, so this is done synchronously
+        # here (once, at startup, before the intro visuals begin — imperceptible cost).
+        self._load_mlb_logo(int(self.ticker_height * 0.625))
+
         # Pause game-data polling while the intro plays — fetches during the intro
         # are wasted because build_ticker_pixmap() returns early when intro_active is
         # True.  The timer is restarted when the intro finishes.
@@ -3325,7 +3321,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # When a manual date override is active, skip yesterday-mode logic entirely
         # and just display the fetched games for that date.
         if self._date_view_override is not None:
-            print(f"[MLB] Received {len(games)} games for date override: {self._date_view_override}")
             self._loading_mode = False  # Clear loading indicator
             self.games = games
             self._reschedule_update_timer()
@@ -3336,6 +3331,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 scroll_ratio = None
                 if (self.scroll_paused or self.is_hovered) and self._scroll_max_width > 0:
                     scroll_ratio = self.scroll_offset / self._scroll_max_width
+                # Force a fresh synchronous rebuild: clear stale tiles and any
+                # in-flight background rebuild so the stale-rebuild early-return in
+                # build_ticker_pixmap() cannot defer using wrong-date tiles.
+                self._ticker_rebuild_queue = []
+                self._ticker_rebuild_in_progress = False
+                self._ticker_tiles = []
                 self.build_ticker_pixmap()
                 # Restore scroll position ratio after rebuild when paused
                 if scroll_ratio is not None and self._scroll_max_width > 0:
@@ -3346,7 +3347,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 # Only reset frame time when not paused (avoids time jump on unpause)
                 if not self.scroll_paused and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-            self.update()
+            # Skip the repaint during intro — the intro timer drives its own updates
+            if not self.intro_active:
+                self.update()
             return
 
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
@@ -3376,7 +3379,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 # Only reset frame time when not paused
                 if not self.scroll_paused and not self.is_hovered:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-            self.update()
+            # Skip the repaint during intro — the intro timer drives its own updates
+            if not self.intro_active:
+                self.update()
             return
 
         # If we already decided to fetch yesterday (pending set but worker hasn't returned
@@ -3432,7 +3437,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if not self.scroll_paused and not self.is_hovered:
                 self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
 
-        self.update()
+        # Skip the repaint during intro — the intro timer drives its own updates
+        if not self.intro_active:
+            self.update()
     
     def on_fetch_complete(self):
         """Mark fetch as complete"""
@@ -3445,6 +3452,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def _on_teams_known(self, team_names):
         """Start logo pre-loading in a background thread the moment team names
         are available from the schedule — well before game-detail fetches finish."""
+        if self.intro_active:
+            # Defer: the all-30-team preload in _post_intro_setup will cover these
+            # teams, and starting heavy QImage work now would starve the intro_timer
+            # of GIL time, causing the animation to freeze for up to ~1 second.
+            return
         import threading
         logo_size = int(self.ticker_height * 0.625)
         threading.Thread(
@@ -4224,9 +4236,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self.intro_display = QtGui.QPixmap(w_phys, h_phys)
         self.intro_display.fill(QtCore.Qt.transparent)
 
-        # Build shuffled block list in physical pixel grid
-        cols = max(1, w_phys // bs_phys)
-        rows = max(1, h_phys // bs_phys)
+        # Build shuffled block list in physical pixel grid.
+        # Use math.ceil so the last partial column/row of physical pixels is always
+        # included — integer-division floor would leave a residual strip of green
+        # pixels at the right/bottom edge that the erase phase never clears.
+        cols = max(1, math.ceil(w_phys / bs_phys))
+        rows = max(1, math.ceil(h_phys / bs_phys))
         blocks = [(r, c) for r in range(rows) for c in range(cols)]
         random.shuffle(blocks)
         self.intro_all_blocks = blocks
@@ -4330,6 +4345,15 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 # Kick off normal scrolling now that intro is finished
                 self._start_anim_timer()
                 print("[INTRO] Complete — starting ticker scroll from off-screen right")
+                # Synchronously repaint NOW so the intro pixels are erased from the
+                # screen before _post_intro_setup runs.  self.update() posts only a
+                # low-priority paint event; QTimer.singleShot(0) fires at normal
+                # priority, so _post_intro_setup() (and its blocking logo load) can
+                # win the race and hold the screen on the last intro frame for seconds.
+                # repaint() calls paintEvent() synchronously — intro_display is None
+                # and intro_active is False at this point, so it just draws the
+                # background, clearing any residual intro blocks instantly.
+                self.repaint()
                 # Defer the heavy pixmap build + timer start to the next event-loop
                 # tick so the scroll timer fires at least one frame before the main
                 # thread is occupied.  The update timer is started inside
@@ -4348,6 +4372,18 @@ class MLBTickerWindow(QtWidgets.QWidget):
         movement.  Starting the update timer *after* the build means the
         5-second polling countdown begins once the ticker is ready, preventing
         an immediate re-fetch during construction."""
+        # Pre-load all 30 MLB team logos NOW (after intro) so the intro timer
+        # was never starved of GIL time by heavy QImage loading in C++ code.
+        # Covers all teams for date-switching and any teams deferred from
+        # _on_teams_known while the intro was active.
+        import threading
+        _all_teams = list(MLB_ESPN_ABBR.keys())  # all 30 nicknames
+        _logo_sz = int(self.ticker_height * 0.625)
+        threading.Thread(
+            target=_preload_logos_background,
+            args=(_all_teams, _logo_sz),
+            daemon=True,
+        ).start()
         self.build_ticker_pixmap()
         # Activate scrolling immediately.  _scroll_speed_px_per_ms stays 0.0
         # from __init__ until a full on_fetch_complete cycle sets it; mirror
@@ -4397,8 +4433,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self.intro_active:
             return
         if not self.games:
-            # No games today OR no network data — pick the right message
-            if self._no_data_mode:
+            # No games yet — pick the right message based on current state
+            if self._loading_mode:
+                text = "Loading..."
+            elif self._no_data_mode:
                 text = "No data — check network connection"
             else:
                 text = "No MLB games scheduled today"
@@ -4583,7 +4621,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # Set a truthy sentinel so existing `if self.ticker_pixmap:` checks work.
         # paintEvent uses _ticker_tiles for actual drawing.
         self.ticker_pixmap = True
-        
+
         # Check if any scores are currently glowing - if so, schedule a rebuild
         # in ~100ms to update the colors as the glow expires
         current_time_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
@@ -5158,7 +5196,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 _vs_fm_p = QtGui.QFontMetrics(self.vs_font)
                 _fl_w  = _vs_fm_p.horizontalAdvance(final_label)
                 _fl_br = _vs_fm_p.boundingRect(final_label)
-                _fl_x  = x + (effective_after_diamond - _fl_w) // 2
+                _fl_x  = x + (effective_after_diamond - _fl_w) // 2 - 4
                 _fl_y  = (_content_h - _fl_br.height()) // 2 - _fl_br.top() + _content_y0
                 painter.setFont(self.vs_font)
                 painter.setPen(QtGui.QColor('#FFD700'))
@@ -5280,14 +5318,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
             time_x = x + (center_element_w - time_w) // 2
             time_br = time_metrics.boundingRect(status_text)
             vs_br = _vs_fm.boundingRect('vs')
-            time_above_y = (_content_h - time_br.height() - vs_br.height() - 3) // 2 - time_br.top() + _content_y0
+            # Postponed cards show "PPD" centred on its own — no "vs" below.
+            if status == 'Postponed':
+                time_above_y = (_content_h - time_br.height()) // 2 - time_br.top() + _content_y0
+            else:
+                time_above_y = (_content_h - time_br.height() - vs_br.height() - 3) // 2 - time_br.top() + _content_y0
             painter.drawText(time_x, time_above_y, status_text)
 
-            painter.setFont(self.vs_font)
-            painter.setPen(QtGui.QColor('#FFFFFF'))
-            vs_x = x + (center_element_w - _vs_fm.horizontalAdvance('vs')) // 2
-            vs_below_y = time_above_y + time_br.bottom() + 1 + _vs_fm.ascent()
-            painter.drawText(vs_x, vs_below_y, 'vs')
+            if status != 'Postponed':
+                painter.setFont(self.vs_font)
+                painter.setPen(QtGui.QColor('#FFFFFF'))
+                vs_x = x + (center_element_w - _vs_fm.horizontalAdvance('vs')) // 2
+                vs_below_y = time_above_y + time_br.bottom() + 1 + _vs_fm.ascent()
+                painter.drawText(vs_x, vs_below_y, 'vs')
             x += center_element_w + 15
 
             # ── Home logo ────────────────────────────────────────────────────
@@ -5559,13 +5602,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
             delay_text = "DATA DELAYED"
             painter.setFont(self.small_font)
             fm_d = QtGui.QFontMetrics(self.small_font)
-            dw = fm_d.horizontalAdvance(delay_text)
-            dh = fm_d.height()
-            margin = 6
-            dx = self.width() - dw - margin
-            dy = dh + margin - 2
-            painter.fillRect(dx - 3, margin - 2, dw + 6, dh + 2, QtGui.QColor(0, 0, 0, 160))
+            dw  = fm_d.horizontalAdvance(delay_text)
+            _br = fm_d.boundingRect(delay_text)
+            pad_x, pad_y = 3, 2
+            right_margin, top_margin = 4, 3
+            dx  = self.width() - dw - right_margin
+            bg_x = dx - pad_x
+            bg_y = top_margin
+            bg_h = _br.height() + 2 * pad_y
+            painter.fillRect(bg_x, bg_y, dw + 2 * pad_x, bg_h, QtGui.QColor(0, 0, 0, 100))
             painter.setPen(QtGui.QColor('#FFA500'))
+            dy = bg_y + pad_y - _br.top()
             painter.drawText(dx, dy, delay_text)
 
         # Date badge — shown when displaying a different day's games or loading
@@ -5581,13 +5628,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if _badge_text:
             painter.setFont(self.small_font)
             fm_y = QtGui.QFontMetrics(self.small_font)
-            yw = fm_y.horizontalAdvance(_badge_text)
-            yh = fm_y.height()
-            margin = 6
-            yx = self.width() - yw - margin
-            yy = yh + margin - 2
-            painter.fillRect(yx - 3, margin - 2, yw + 6, yh + 2, QtGui.QColor(0, 0, 0, 160))
+            yw  = fm_y.horizontalAdvance(_badge_text)
+            _br = fm_y.boundingRect(_badge_text)
+            pad_x, pad_y = 3, 2
+            right_margin, top_margin = 4, 3
+            yx   = self.width() - yw - right_margin
+            bg_x = yx - pad_x
+            bg_y = top_margin
+            bg_h = _br.height() + 2 * pad_y
+            painter.fillRect(bg_x, bg_y, yw + 2 * pad_x, bg_h, QtGui.QColor(0, 0, 0, 100))
             painter.setPen(_badge_color)
+            yy = bg_y + pad_y - _br.top()
             painter.drawText(yx, yy, _badge_text)
 
         # FPS overlay — bottom-right corner, bright green, small_font
@@ -5605,14 +5656,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if fps_text:
                 painter.setFont(self.small_font)
                 fm = QtGui.QFontMetrics(self.small_font)
-                tw = fm.horizontalAdvance(fps_text)
-                th = fm.height()
-                margin = 4
-                tx = self.width() - tw - margin
-                ty = self.height() - margin
-                # Subtle dark backing so the text is readable over any content
-                painter.fillRect(tx - 2, ty - th, tw + 4, th + 2, QtGui.QColor(0, 0, 0, 140))
+                tw  = fm.horizontalAdvance(fps_text)
+                _br = fm.boundingRect(fps_text)
+                pad_x, pad_y = 3, 2
+                right_margin, bottom_margin = 4, 3
+                tx   = self.width() - tw - right_margin
+                bg_x = tx - pad_x
+                bg_h = _br.height() + 2 * pad_y
+                bg_y = self.height() - bottom_margin - bg_h
+                painter.fillRect(bg_x, bg_y, tw + 2 * pad_x, bg_h, QtGui.QColor(0, 0, 0, 100))
                 painter.setPen(fps_color)
+                ty = bg_y + pad_y - _br.top()
                 painter.drawText(tx, ty, fps_text)
 
         painter.end()
@@ -5700,6 +5754,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
         SWP_NOACTIVATE     = 0x0010
         SWP_ASYNCWINDOWPOS = 0x4000       # don't block if the target thread is busy
 
+        # Full virtual-screen height — used to skip fullscreen-sized windows.
+        SM_CYSCREEN = 1
+        screen_h = user32.GetSystemMetrics(SM_CYSCREEN)
+
         to_nudge = []   # list of (hwnd, x, new_y)
 
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -5723,6 +5781,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Check whether the window's top edge falls inside our reserved strip.
             rc = wintypes.RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rc))
+            # Never nudge fullscreen-sized windows (games, screenshot overlays, etc.).
+            # Only small windows that accidentally restore to y=0 need correcting.
+            if (rc.bottom - rc.top) >= screen_h:
+                return True
             if res_top <= rc.top < res_bottom:
                 # Also confirm horizontal overlap with the reserved strip.
                 if rc.left < res_right and rc.right > res_left:
@@ -5795,6 +5857,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
             if exe_name and exe_name in self._fullscreen_override_exes:
                 return
 
+            # Built-in exclusion: screenshot / screen-capture tools.
+            # Their overlays look fullscreen but are not games — keep the ticker
+            # visible so users can screenshot it.
+            _SCREENSHOT_TOOLS = frozenset({
+                'greenshot.exe', 'sharex.exe',
+                'snagit32.exe', 'snagit64.exe', 'snagiteditor.exe',
+                'screenpresso.exe', 'picpick.exe', 'lightshot.exe',
+                'gyazo.exe', 'hypersnap.exe', 'faststone capture.exe',
+                'flameshot.exe',
+            })
+            if exe_name and exe_name in _SCREENSHOT_TOOLS:
+                return
+
             # Get foreground window rect
             fg_rect = wintypes.RECT()
             user32.GetWindowRect(fg_hwnd, ctypes.byref(fg_rect))
@@ -5822,12 +5897,20 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Heuristic: the window covers the full monitor surface AND lacks a title bar.
             # Maximized regular windows also cover the monitor but they keep WS_CAPTION,
             # so requiring its absence avoids false positives from everyday maximized apps.
-            GWL_STYLE  = -16
-            WS_CAPTION = 0x00C00000   # Window has a title bar (set on all normal windows)
-            style = user32.GetWindowLongW(fg_hwnd, GWL_STYLE)
-            has_caption = bool(style & WS_CAPTION)
+            GWL_STYLE    = -16
+            GWL_EXSTYLE  = -20
+            WS_CAPTION        = 0x00C00000  # Window has a title bar
+            WS_EX_TRANSPARENT = 0x00000020  # Click-through overlay
+            WS_EX_LAYERED     = 0x00080000  # Layered window (used by screenshot overlays for dimming)
+            style   = user32.GetWindowLongW(fg_hwnd, GWL_STYLE)
+            exstyle = user32.GetWindowLongW(fg_hwnd, GWL_EXSTYLE)
+            has_caption  = bool(style   & WS_CAPTION)
+            is_clickthru = bool(exstyle & WS_EX_TRANSPARENT)
+            is_layered   = bool(exstyle & WS_EX_LAYERED)
             covers_monitor = (fw >= mw and fh >= mh)
-            is_fullscreen = covers_monitor and not has_caption
+            # Exclude click-through and layered windows: these are screenshot/capture
+            # overlays (semi-transparent dim effect requires WS_EX_LAYERED), not games.
+            is_fullscreen = covers_monitor and not has_caption and not is_clickthru and not is_layered
 
             # Get window title for debug output
             title_buf = ctypes.create_unicode_buffer(512)
@@ -5841,17 +5924,21 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # Debug output
             if covers_monitor or is_fullscreen or (is_fullscreen != self._ticker_hidden_for_fullscreen):
                 print(f"[TICKER] _check_fullscreen: '{window_title}' exe={exe_name or '?'} hwnd={fg_hwnd}")
-                print(f"         window {fw}x{fh} vs monitor {mw}x{mh}, covers={covers_monitor}, caption={has_caption}, fullscreen={is_fullscreen}, same_monitor={same_monitor}")
+                print(f"         window {fw}x{fh} vs monitor {mw}x{mh}, covers={covers_monitor}, "
+                      f"caption={has_caption}, clickthru={is_clickthru}, layered={is_layered}, "
+                      f"fullscreen={is_fullscreen}, same_monitor={same_monitor} exstyle=0x{exstyle:08X}")
 
             if is_fullscreen and same_monitor and not self._ticker_hidden_for_fullscreen:
                 self._ticker_hidden_for_fullscreen = True
-                self.hide()
+                # Use opacity instead of hide() so the AppBar window stays registered
+                # and the reserved screen strip never shifts position.
+                self.setWindowOpacity(0.0)
                 self._set_timer_resolution(False)
                 self.scroll_timer.stop()
                 print(f"[TICKER] Full-screen app detected: '{window_title}' — ticker hidden")
             elif (not is_fullscreen or not same_monitor) and self._ticker_hidden_for_fullscreen:
                 self._ticker_hidden_for_fullscreen = False
-                self.show()
+                self.setWindowOpacity(1.0)
                 if not self.scroll_paused and not self.is_hovered and not self.intro_active:
                     self._last_frame_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
                     self._set_timer_resolution(True)
@@ -5995,12 +6082,17 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def _kb_set_date_override(self, override):
         """Helper: set session date override and re-fetch (does not save settings)."""
         self._date_view_override = override
+        # Always reset next-day state so the update_timer restarts for the new date.
         if self._yesterday_mode:
             self._yesterday_mode = False
-            self.waiting_for_next_day = False
-            self.next_day_timer.stop()
             self._pending_today_games = []
             self._pending_today_date = ''
+        self.waiting_for_next_day = False
+        self.next_day_timer.stop()
+        # If a fetch is already in-flight it was started for the OLD date — kill it
+        # now so start_data_fetch below creates a new worker with the correct date.
+        if self.is_fetching:
+            self._force_unlock_fetch("date override switch")
         self.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
         self.start_odds_fetch(force=True)  # Refresh odds for the new date view
         label = override if override else "auto (today)"
@@ -6300,9 +6392,6 @@ class MLBTickerWindow(QtWidgets.QWidget):
         refresh_action = menu.addAction("Refresh Games")
         refresh_action.triggered.connect(self.start_data_fetch)
 
-        restart_action = menu.addAction("Restart")
-        restart_action.triggered.connect(self._restart_intro)
-
         menu.addSeparator()
 
         # Date submenu — session-only, not saved to settings
@@ -6323,14 +6412,20 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     # Exit automatic yesterday mode when switching to a manual date
                     if self._yesterday_mode:
                         self._yesterday_mode = False
-                        self.waiting_for_next_day = False
-                        self.next_day_timer.stop()
                         self._pending_today_games = []
                         self._pending_today_date = ''
+                    self.waiting_for_next_day = False
+                    self.next_day_timer.stop()
+                    if self.is_fetching:
+                        self._force_unlock_fetch("date override switch")
                     self.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
                     self.start_odds_fetch(force=True)  # Refresh odds for the new date view
                 return _handler
             act.triggered.connect(_make_date_handler())
+
+        date_menu.addSeparator()
+        restart_intro_action = date_menu.addAction("Restart Intro")
+        restart_intro_action.triggered.connect(self._restart_intro)
 
         menu.addSeparator()
 
@@ -8771,6 +8866,8 @@ class BoxScoreWindow(QtWidgets.QWidget):
         # score is open; caching by fingerprint eliminates redundant rebuilds.
         _runners = game.get('runners', {})
         _new_fp = (
+            game.get('game_id'),
+            game.get('away_name'), game.get('home_name'),
             game.get('away_score'), game.get('home_score'),
             game.get('current_inning'), game.get('inning_state'),
             game.get('outs'), game.get('balls'), game.get('strikes'),
@@ -8785,6 +8882,20 @@ class BoxScoreWindow(QtWidgets.QWidget):
             # Always show player info in box score window, regardless of ticker settings
             pixmap = tw.build_game_pixmap(game, force_show_player_info=True)
             self._banner_lbl.setPixmap(pixmap)
+            # Widen the window if the banner pixmap is wider than the current window so
+            # it is never clipped.  Only expands — never shrinks — and respects screen bounds.
+            _dpr = getattr(tw, 'dpr', 1.0) or 1.0
+            _pix_logical_w = int(pixmap.width() / _dpr) + 48  # +48 for left+right margins
+            if _pix_logical_w > self.width():
+                _screen = QtWidgets.QApplication.screenAt(self.geometry().center())
+                if _screen is None:
+                    _screen = QtWidgets.QApplication.primaryScreen()
+                _max_w = _screen.availableGeometry().width() - 40
+                _new_w = min(_pix_logical_w, _max_w)
+                # Resize and re-center horizontally on the same screen
+                _avail = _screen.availableGeometry()
+                _new_x = _avail.left() + (_avail.width() - _new_w) // 2
+                self.setGeometry(_new_x, self.y(), _new_w, self.height())
         except Exception as e:
             print(f"[BoxScore] Banner render error: {e}")
 
@@ -12079,9 +12190,6 @@ def main():
     refresh_action = tray_menu.addAction("Refresh Games")
     refresh_action.triggered.connect(window.start_data_fetch)
 
-    restart_action = tray_menu.addAction("Restart")
-    restart_action.triggered.connect(window._restart_intro)
-
     tray_menu.addSeparator()
 
     pause_action = tray_menu.addAction("Pause Ticker")
@@ -12118,10 +12226,12 @@ def main():
                 window._date_view_override = k if checked else None
                 if window._yesterday_mode:
                     window._yesterday_mode = False
-                    window.waiting_for_next_day = False
-                    window.next_day_timer.stop()
                     window._pending_today_games = []
                     window._pending_today_date = ''
+                window.waiting_for_next_day = False
+                window.next_day_timer.stop()
+                if window.is_fetching:
+                    window._force_unlock_fetch("date override switch")
                 window.start_data_fetch(show_loading=True)  # Show LOADING when switching dates
                 window.start_odds_fetch(force=True)  # Refresh odds for the new date view
             return _handler

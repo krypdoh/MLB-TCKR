@@ -1,3 +1,95 @@
+Version 1.6.6 (2026-05-23)
+--------------------------
+BUG FIXES:
+- **Date switching — long delay before new day's games appeared**: Switching to
+  Yesterday / Today / Tomorrow via keyboard (Y/D/T) or the right-click context
+  menu would show a blank or stale ticker for many seconds. Root cause was two
+  issues: (a) existing games were immediately cleared, causing "No MLB games
+  scheduled" to flash during the fetch; (b) the "Restart Intro" action sat
+  adjacent to the date submenu in the context menu, making it easy to
+  accidentally trigger a ~9-second intro animation instead. Fixed by keeping
+  the current game list scrolling while the new fetch runs (clearing only after
+  data arrives) and displaying a LOADING badge during the fetch, and by moving
+  "Restart Intro" inside the "Show Games For..." submenu and removing it from
+  the system-tray menu entirely.
+- **Date switching — premature "No Games Scheduled" message**: When switching
+  days or on initial launch, the ticker showed "No MLB games scheduled today"
+  before data had been fetched. The empty-games path in build_ticker_pixmap now
+  checks _loading_mode first: shows "Loading..." while a fetch is in progress,
+  and only shows "No MLB games scheduled today" after a completed fetch that
+  returned an empty list.
+- **Screenshot tools — ticker invisible / inaccessible during screen grab**:
+  Greenshot and similar capture tools create a fullscreen overlay window at y=0
+  that was being misidentified as a fullscreen game, causing the ticker to go
+  invisible (via setWindowOpacity) and the AppBar nudge logic to push the
+  capture overlay down by the ticker height — making the top strip inaccessible
+  to the screenshot cursor. Fixed with three layers of protection: (1) a
+  built-in exe-name whitelist (greenshot.exe, sharex.exe, snagit*.exe,
+  screenpresso.exe, picpick.exe, lightshot.exe, gyazo.exe, hypersnap.exe,
+  flameshot.exe) skips those processes in fullscreen detection entirely;
+  (2) windows with WS_EX_LAYERED are excluded from the fullscreen heuristic
+  since screenshot overlays require layered windows for their dimming effect
+  while real games do not; (3) the AppBar nudge function now skips any window
+  whose height equals or exceeds the full screen height, so fullscreen-sized
+  overlays are never displaced.
+- **Full-screen detection — ticker position shifts on restore**: When the ticker
+  hid for a fullscreen app via self.hide() and came back via self.show(), the
+  AppBar re-queried its position on restore and could settle at a slightly
+  different y-coordinate, leaving a persistent gap. Changed to
+  setWindowOpacity(0.0) / setWindowOpacity(1.0) so the AppBar window remains
+  registered and spatially fixed throughout — only its visual content
+  disappears.
+
+IMPROVEMENTS:
+- **Badge overlays — tighter, more transparent backgrounds**: The YESTERDAY /
+  TOMORROW / LOADING / DATA DELAYED / FPS overlay badges previously used
+  QFontMetrics.height() for background sizing, which includes full line spacing
+  and produced backgrounds visibly larger than the text. Switched to
+  QFontMetrics.boundingRect(text).height() for the actual ink height, reduced
+  padding to 3 px horizontal / 2 px vertical, and lowered background alpha
+  from 160 to 100 (~39% opaque). All three badge positions (date, data-delayed,
+  FPS) now use a consistent layout formula.
+- **Full-screen detection — debug output improved**: The _check_fullscreen debug
+  line now includes clickthru=, layered=, and exstyle=0x... fields so any
+  future false-positive can be diagnosed without code changes.
+- **Intro animation — residual green pixels at fade-out**: During the 'out'
+  (pixel-erase) phase, a narrow strip of green pixels from the "MLB-TCKR" intro
+  text could linger on the right and/or bottom edge of the ticker through the
+  end of the animation. Root cause: the block-grid was built with integer
+  division (w_phys // bs_phys), so if the physical pixel dimensions were not
+  exact multiples of the block size, the partial column/row at the edges was
+  never added to the erase list. Fixed by using math.ceil so every physical
+  pixel is always covered by a block. Additionally, the three branches of
+  on_data_received() that call self.update() when game data arrives are now
+  gated on not self.intro_active — the intro timer drives its own per-frame
+  updates, and the extra repaint was redundant.
+- **Intro animation — ~1-second freeze near the end of the fade-out**: On
+  startup, the intro animation would stall visibly for up to one second during
+  the final frames of the 'out' phase, leaving several green blocks frozen on
+  screen. Root cause: PyQt5's QImage constructor and convertToFormat() are
+  pure C++ calls that hold the Python GIL for the full duration of PNG decoding
+  and pixel-format conversion. A background thread that pre-loaded all 30 team
+  logos (started before the intro to warm the cache) was holding the GIL in
+  long bursts, preventing the main thread's intro_timer from firing on schedule.
+  A second logo-preload thread from _on_teams_known fired mid-intro (when the
+  network fetch completed), adding further GIL contention. Fixed by deferring
+  both preload threads until _post_intro_setup(), which runs immediately after
+  the intro completes — so logos load while the ticker is scrolling rather than
+  while the intro is animating. The 'restart intro' menu action was already
+  smooth because logos were already cached; startup now matches.
+  A second issue persisted: Qt's update() posts a low-priority paint event, but
+  the 0ms QTimer.singleShot that fires _post_intro_setup runs at normal
+  priority and wins the race. build_ticker_pixmap() then blocked the main
+  thread loading logos synchronously (since the preload thread had only just
+  started), leaving the screen frozen on the previous intro frame — showing 1-2
+  residual pixel blocks — until loading finished. Fixed by calling
+  self.repaint() (synchronous) after clearing intro_display and before
+  scheduling _post_intro_setup: since intro_active is False and intro_display
+  is None at that point, it paints only the background, guaranteeing the
+  screen is clear before any blocking logo load can begin.
+
+------------------------------------------------------------------------------
+
 Version 1.6.5 (2026-05-22)
 --------------------------
 IMPROVEMENTS:
