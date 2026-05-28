@@ -1,3 +1,39 @@
+Version 1.6.8 (2026-05-27)
+--------------------------
+IMPROVEMENTS:
+- **diffPatch delta fetching for live game feeds**: Polls the MLB diffPatch
+  endpoint (RFC 6902 JSON Patch) after the first fetch, sending only the
+  changed bytes since the last timestamp. Completed-game feeds are served from
+  an in-memory cache with zero network calls. Falls back to a full feed
+  silently on any error. Both caches auto-invalidate on date rollover.
+
+- **Win probability — atBatIndex deduplication**: /winProbability has no
+  incremental API; the full list is fetched each poll but the WP bar only
+  re-renders when atBatIndex advances. Stale cache is served on network
+  failure so the bar never disappears.
+
+  Projected bandwidth savings per 3-hour game (1 live game, 10-second poll):
+  ┌─────────────────────────────┬────────────┬────────────┬────────────────┐
+  │ Endpoint                    │ Before     │ After      │ Saving         │
+  ├─────────────────────────────┼────────────┼────────────┼────────────────┤
+  │ Game feed (diffPatch)       │ ~194 MB    │ ~5–10 MB   │ ~95% reduction │
+  │ Win probability (full poll) │ ~43 MB     │ ~43 MB     │ unchanged*     │
+  │ Schedule (always full)      │ ~5.4 MB    │ ~5.4 MB    │ unchanged      │
+  │ Total per game / 3 hours    │ ~242 MB    │ ~54 MB     │ ~78% reduction │
+  └─────────────────────────────┴────────────┴────────────┴────────────────┘
+  * atBatIndex check avoids redundant redraws but not bytes transferred.
+  Full 15-game slate: ~3.6 GB → ~810 MB per 3-hour window.
+
+BUG FIXES:
+- **Win probability bar not shown for live games**: Cache lookup used a
+  truthiness check that skipped any falsy dict value; fixed to `is not None`.
+- **RFC 6902 patch — new plays silently dropped**: The `"-"` RFC 6901 array-
+  append token caused `int('-')` → ValueError, swallowed by `except: pass`,
+  discarding every new completed play from the cached feed. Fixed with an
+  `_idx()` helper that maps `"-"` to `len(list)`.
+
+------------------------------------------------------------------------------
+
 Version 1.6.7 (2026-05-24)
 --------------------------
 BUG FIXES:

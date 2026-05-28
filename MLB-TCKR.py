@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0524.0804
+Date: 2026.0527.2145
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.7"
+VERSION = "1.6.8"
 
 import warnings
 warnings.filterwarnings(
@@ -1251,6 +1251,146 @@ def _fetch_pitcher_stats_parallel(game_data):
     return stats_map
 
 
+# ---------------------------------------------------------------------------
+# Live game feed cache — persists between poll cycles to enable diffPatch.
+# Keys: game_id (int) → {'feed': dict, 'timestamp': str, 'is_final': bool}
+# Special key '_date' (str) tracks the current fetch date for auto-invalidation.
+# ---------------------------------------------------------------------------
+_LIVE_FEED_CACHE: dict = {}
+
+# ---------------------------------------------------------------------------
+# Win-probability cache — stores the last known WP entry per game so that
+# a timecoded /winProbability request returning an empty list (no new plays
+# since last poll) can still surface a valid value.
+# Keys: game_id (int) → last WP entry dict (homeTeamWinProbability, etc.)
+# ---------------------------------------------------------------------------
+_WP_CACHE: dict = {}
+
+
+def _apply_merge_patch(target, patch):
+    """Apply RFC 7396 JSON Merge Patch to *target*, returning a new dict.
+
+    - patch[key] is None      → remove key from target
+    - both values are dicts   → recurse
+    - otherwise               → overwrite target[key] with patch[key]
+    Arrays in the patch fully replace arrays in the target (RFC 7396 rule).
+    """
+    if not isinstance(patch, dict):
+        return patch
+    result = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _apply_merge_patch(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _apply_json_patch(doc, operations):
+    """Apply a JSON Patch (RFC 6902) array of operations to *doc*.
+
+    The MLB diffPatch endpoint returns a JSON Patch list rather than a
+    JSON Merge Patch object.  Handles add / remove / replace / move / copy;
+    'test' operations are silently ignored.  Malformed individual operations
+    are skipped so a single bad entry does not abort the whole patch.
+    Returns a new (deep-copied) document with all operations applied.
+    """
+    import copy
+
+    def _parse(pointer):
+        """RFC 6901 JSON Pointer → list of unescaped key/index strings."""
+        if not pointer or pointer == '/':
+            return []
+        return [p.replace('~1', '/').replace('~0', '~')
+                for p in pointer.lstrip('/').split('/')]
+
+    def _idx(obj, part):
+        """Resolve a single RFC 6901 path token against *obj*.
+        '-' on a list means the element one past the end (used by 'add').
+        """
+        if isinstance(obj, list):
+            return len(obj) if part == '-' else int(part)
+        return part
+
+    def _resolve(obj, parts):
+        for part in parts:
+            obj = obj[_idx(obj, part)] if isinstance(obj, list) else obj[part]
+        return obj
+
+    def _set(obj, parts, value):
+        for part in parts[:-1]:
+            obj = obj[_idx(obj, part)] if isinstance(obj, list) else obj[part]
+        key = parts[-1]
+        if isinstance(obj, list):
+            idx = _idx(obj, key)   # '-' → append index
+            if idx >= len(obj):
+                obj.append(value)
+            else:
+                obj[idx] = value
+        else:
+            obj[key] = value
+
+    def _delete(obj, parts):
+        for part in parts[:-1]:
+            obj = obj[_idx(obj, part)] if isinstance(obj, list) else obj[part]
+        key = parts[-1]
+        if isinstance(obj, list):
+            del obj[_idx(obj, key)]
+        else:
+            del obj[key]
+
+    result = copy.deepcopy(doc)
+    for op in operations:
+        verb = op.get('op')
+        path = _parse(op.get('path', ''))
+        try:
+            if verb == 'add':
+                if not path:
+                    result = op['value']
+                else:
+                    _set(result, path, op['value'])
+            elif verb == 'remove':
+                _delete(result, path)
+            elif verb == 'replace':
+                _set(result, path, op['value'])
+            elif verb == 'move':
+                src = _parse(op.get('from', ''))
+                val = _resolve(result, src)
+                _delete(result, src)
+                if path:
+                    _set(result, path, val)
+                else:
+                    result = val
+            elif verb == 'copy':
+                src = _parse(op.get('from', ''))
+                val = copy.deepcopy(_resolve(result, src))
+                if path:
+                    _set(result, path, val)
+                else:
+                    result = val
+            # 'test' → ignore
+        except Exception:
+            pass  # skip malformed individual operations
+    return result
+
+
+def _clear_live_feed_cache(game_ids=None):
+    """Evict live feed cache entries.
+
+    If *game_ids* is provided, only those game IDs are removed; otherwise the
+    entire cache is cleared (called automatically on date rollover).
+    """
+    global _LIVE_FEED_CACHE
+    if game_ids is None:
+        _LIVE_FEED_CACHE.clear()
+        print("[MLB] Live feed cache cleared (date change)")
+    else:
+        for _gid in game_ids:
+            _LIVE_FEED_CACHE.pop(_gid, None)
+
+
 def fetch_todays_games(fetch_date=None, on_teams_known=None):
     """Fetch all MLB games for today, or for a specific date (YYYY-MM-DD)."""
     def format_last_name(player_obj):
@@ -1343,8 +1483,12 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
         # N sequential round-trips when multiple games are in progress.
         _live_final_statuses = {'In Progress', 'Live', 'Final', 'Completed', 'Game Over'}
         _live_statuses       = {'In Progress', 'Live'}
+        _final_statuses      = {'Final', 'Completed', 'Game Over'}
+
+        # List of (game_id, is_final) for all games that need a feed.
         _needs_feed = [
-            g['game_id'] for g in games
+            (g['game_id'], g.get('status') in _final_statuses)
+            for g in games
             if g.get('status') in _live_final_statuses and g.get('game_id')
         ]
         _needs_wp = [
@@ -1352,27 +1496,132 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
             if g.get('status') in _live_statuses and g.get('game_id')
         ]
 
-        def _fetch_one_feed(gid):
+        # Auto-invalidate both caches when the fetch date rolls over.
+        if _LIVE_FEED_CACHE.get('_date') != today:
+            _clear_live_feed_cache()
+            _LIVE_FEED_CACHE['_date'] = today
+            _WP_CACHE.clear()
+            print("[MLB] WP cache cleared (date change)")
+
+        def _fetch_one_feed(gid, is_final=False):
+            """Fetch the game feed for *gid*, using the MLB diffPatch endpoint
+            when a cached baseline already exists.
+
+            Strategy:
+              - Final game already cached → serve from cache (no network call)
+              - Live game with cache      → diffPatch endpoint (tiny delta payload)
+              - No cache / diffPatch fail → full feed + populate cache
+              - Live→Final transition     → full feed, mark cache as final so
+                                            subsequent polls skip the network entirely
+            """
+            cached = _LIVE_FEED_CACHE.get(gid)
+
+            # Final game feeds are immutable — serve from cache when available.
+            if cached and cached.get('is_final'):
+                return gid, cached['feed']
+
+            # Live game with a cached baseline: request only the delta.
+            if cached and not is_final:
+                try:
+                    ts = cached['timestamp']
+                    _diff_r = requests.get(
+                        f"https://statsapi.mlb.com/api/v1.1/game/{gid}/feed/live/diffPatch",
+                        params={'startTimecode': ts},
+                        timeout=8,
+                    )
+                    if _diff_r.status_code == 200:
+                        patch = _diff_r.json()
+                        if patch:  # non-empty → something changed
+                            # MLB returns JSON Patch (RFC 6902) as a list,
+                            # or JSON Merge Patch (RFC 7396) as a dict.
+                            if isinstance(patch, list):
+                                updated = _apply_json_patch(cached['feed'], patch)
+                            else:
+                                updated = _apply_merge_patch(cached['feed'], patch)
+                            new_ts = (updated.get('metaData', {}).get('timeStamp', '')
+                                      if isinstance(updated, dict) else '')
+                            # If the patch didn't include a metaData.timeStamp
+                            # update (MLB sometimes omits it), advance the anchor
+                            # to now so subsequent polls request a fresh delta
+                            # rather than re-requesting the same growing window.
+                            if not new_ts or new_ts == ts:
+                                import datetime as _dt
+                                new_ts = _dt.datetime.now(
+                                    _dt.timezone.utc
+                                ).strftime('%Y%m%d_%H%M%S')
+                            _LIVE_FEED_CACHE[gid] = {
+                                'feed': updated, 'timestamp': new_ts, 'is_final': False
+                            }
+                            print(
+                                f"[MLB] diffPatch game {gid}: {len(_diff_r.content)} B "
+                                f"(changed, ts={new_ts})"
+                            )
+                            return gid, updated
+                        else:
+                            print(
+                                f"[MLB] diffPatch game {gid}: {len(_diff_r.content)} B (no change)"
+                            )
+                            return gid, cached['feed']
+                except Exception as _dp_err:
+                    print(
+                        f"[MLB] diffPatch failed for game {gid}, "
+                        f"falling back to full feed: {_dp_err}"
+                    )
+                # Fall through to full feed on any error.
+
+            # Full feed: first poll for this game, diffPatch fallback, or Live→Final transition.
             try:
-                return gid, statsapi.get('game', {'gamePk': gid})
+                feed = statsapi.get('game', {'gamePk': gid})
+                ts   = feed.get('metaData', {}).get('timeStamp', '')
+                _LIVE_FEED_CACHE[gid] = {'feed': feed, 'timestamp': ts, 'is_final': is_final}
+                print(f"[MLB] Full feed game {gid}: ts={ts}, is_final={is_final}")
+                return gid, feed
             except Exception as _fe:
                 print(f"[MLB] Pre-fetch failed for game {gid}: {_fe}")
                 return gid, None
 
         def _fetch_one_wp(gid):
-            """Fetch /api/v1/game/{pk}/winProbability — returns list of completed plays
-            each with top-level homeTeamWinProbability (0-100 scale)."""
+            """Fetch /api/v1/game/{pk}/winProbability using a timecode when
+            a cached baseline exists to minimise payload size.
+
+            Strategy:
+              - Cached entry exists  → send timecoded request (returns only
+                                       plays after that timestamp, typically
+                                       0-2 entries vs the full list)
+                - Non-empty result   → update cache, return last entry
+                - Empty result       → nothing changed; serve from cache
+                - Any error / timecode ignored (full list returned) → fall
+                  through and use the last entry of the full list, update cache
+              - No cache / fallback  → full fetch, populate cache
+            """
+            cached_entry = _WP_CACHE.get(gid)
+            # The /winProbability endpoint does not support incremental fetching —
+            # it always returns the full at-bat history regardless of any timecode
+            # parameter.  We fetch the full list but skip the cache update when
+            # the last entry's atBatIndex hasn't advanced, avoiding redundant
+            # display redraws.
             try:
-                import requests as _req
-                _r = _req.get(
+                _r = requests.get(
                     f"https://statsapi.mlb.com/api/v1/game/{gid}/winProbability",
                     timeout=8,
                 )
                 _data = _r.json()
                 if isinstance(_data, list) and _data:
-                    return gid, _data[-1]  # last completed play has current WP
+                    _last = _data[-1]
+                    _cached_ab = (cached_entry.get('atBatIndex')
+                                  if isinstance(cached_entry, dict) else None)
+                    if _cached_ab is not None and _last.get('atBatIndex') == _cached_ab:
+                        print(f"[WP] game {gid}: {len(_r.content)} B (no change)")
+                        return gid, cached_entry
+                    _WP_CACHE[gid] = _last
+                    print(f"[WP] game {gid}: {len(_r.content)} B "
+                          f"(ab={_last.get('atBatIndex')}, hwp={_last.get('homeTeamWinProbability')})")
+                    return gid, _last
             except Exception as _we:
                 print(f"[WP] Fetch failed for game {gid}: {_we}")
+            # Last resort: serve stale cached entry rather than returning None.
+            if cached_entry is not None:
+                return gid, cached_entry
             return gid, None
 
         _pre_fetched_feeds: dict = {}
@@ -1381,7 +1630,8 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
         _total = len(_needs_feed) + len(_needs_wp)
         if _total > 0:
             with ThreadPoolExecutor(max_workers=min(20, _total)) as _feed_ex:
-                _feed_futures = {_feed_ex.submit(_fetch_one_feed, gid): gid for gid in _needs_feed}
+                _feed_futures = {_feed_ex.submit(_fetch_one_feed, gid, is_fin): gid
+                                 for gid, is_fin in _needs_feed}
                 _wp_futures   = {_feed_ex.submit(_fetch_one_wp,   gid): gid for gid in _needs_wp}
                 for fut, gid in _feed_futures.items():
                     _gid, _payload = fut.result()
@@ -1583,7 +1833,7 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
                     _wp_entry = _pre_fetched_wp.get(game_id)
                     if _wp_entry is not None:
                         try:
-                            _wp_raw = _wp_entry.get('homeTeamWinProbability')
+                            _wp_raw = _wp_entry.get('homeTeamWinProbability') if isinstance(_wp_entry, dict) else None
                             if _wp_raw is not None:
                                 _wp_val = float(_wp_raw) / 100.0
                                 game_info['win_probability_home'] = max(0.0, min(1.0, _wp_val))

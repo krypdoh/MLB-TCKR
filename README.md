@@ -4,7 +4,7 @@
 
 A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen — just like the tickers you see on sports networks and in sports bars.
 
-![Version](https://img.shields.io/badge/version-1.6.7-blue) 
+![Version](https://img.shields.io/badge/version-1.6.8-blue) 
 ![Python](https://img.shields.io/badge/python-3.13-green)
 ![License](https://img.shields.io/badge/license-GNU%20AGPLv3-red)
 
@@ -61,6 +61,8 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 - **Optional Cython optimization** for maximum performance
 - **Hardware acceleration** with SmoothPixmapTransform
 - **Pause stability** — scroll position preserved precisely when paused during data updates
+- **diffPatch delta fetching** — live game feeds send only changed bytes after the first poll (~95% bandwidth reduction); completed-game feeds served from in-memory cache with zero network calls
+- **Win probability deduplication** — WP bar only re-renders when a new at-bat completes (`atBatIndex` check), eliminating redundant UI updates between pitches
 
 ### � TV / Radio / SiriusXM Schedule
 - **Full broadcast info** for every game today or tomorrow — press **M** or right-click the tray → **TV/Radio Today…**
@@ -504,8 +506,8 @@ You should have received a copy of the GNU Affero General Public License along w
 **Paul R. Charovkine**
 
 - Program: MLB-TCKR
-- Version: 1.6.7
-- Date: 2026.05.24
+- Version: 1.6.8
+- Date: 2026.05.27
 
 ---
 
