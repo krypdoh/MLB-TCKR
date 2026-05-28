@@ -31,6 +31,12 @@ BUG FIXES:
   append token caused `int('-')` → ValueError, swallowed by `except: pass`,
   discarding every new completed play from the cached feed. Fixed with an
   `_idx()` helper that maps `"-"` to `len(list)`.
+- **AppBar nudge loop with Windows Settings app**: The 2-second fullscreen
+  timer called `_nudge_overlapping_windows()` on every tick, repeatedly moving
+  the Windows Settings app (which saves y=1 and restores it on each draw) to
+  y=132. This created a continuous fight loop visible in the log. Fixed by
+  adding a 60-second per-hwnd cooldown (`_nudge_cooldown` dict) so the same
+  window is nudged at most once per minute.
 
 ------------------------------------------------------------------------------
 

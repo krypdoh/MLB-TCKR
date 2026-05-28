@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0527.2145
+Date: 2026.0528.0854
 License: GNU AGPLv3
 
 Description:
@@ -6050,16 +6050,25 @@ class MLBTickerWindow(QtWidgets.QWidget):
         cb = WNDENUMPROC(_enum_cb)
         user32.EnumWindows(cb, 0)
 
+        _nudge_times = getattr(self, '_nudge_cooldown', {})
+        now = time.monotonic()
+        NUDGE_COOLDOWN_S = 60  # don't re-nudge the same hwnd more often than this
+
         for hwnd, win_x, old_y in to_nudge:
+            last = _nudge_times.get(hwnd, 0)
+            if now - last < NUDGE_COOLDOWN_S:
+                continue  # still in cooldown — don't fight the app's saved position
             # Slide the window top to just below our reserved strip.
             user32.SetWindowPos(
                 hwnd, None, win_x, res_bottom, 0, 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
             )
+            _nudge_times[hwnd] = now
             title_buf = ctypes.create_unicode_buffer(256)
             user32.GetWindowTextW(hwnd, title_buf, 256)
             print(f"[AppBar] Nudged '{title_buf.value}' (hwnd={hwnd}) "
                   f"from y={old_y} → y={res_bottom}")
+        self._nudge_cooldown = _nudge_times
 
     def _check_fullscreen(self):
         """Detect a full-screen DirectX/OpenGL app in the foreground and hide/show the AppBar.
