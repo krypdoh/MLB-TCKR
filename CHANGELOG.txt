@@ -1,3 +1,40 @@
+Version 1.6.9 (2026-05-28)
+--------------------------
+BUG FIXES:
+- **Runners on base not clearing after grand slam (diamond stuck lit)**: Runner
+  state was read from `linescore.offense` in the diffPatch-cached feed. After
+  a grand slam the MLB API sends RFC 6902 `remove` operations to clear the
+  offense runner keys, but these were silently swallowed by a bare
+  `except: pass`, leaving all three bases permanently lit in the cached
+  document even as new batters came up. Runner state is now derived from the
+  last completed play's `runners[].movement.end` field in `allPlays`, which is
+  immutably written once an at-bat completes and is always correctly patched.
+  `linescore.offense` is retained as a fallback only when `allPlays` is empty
+  (before the first pitch of a game). Failed JSON patch operations now log as
+  `[MLB] JSON patch op skipped` instead of being silently discarded.
+- **Stale scoring alert replayed on restart**: After restarting the app, a
+  scoring play (e.g. a grand slam from several minutes earlier) could fire
+  again as an alert. The cause was a MLB API caching quirk: poll 1 returned a
+  slightly stale full feed (before the play) while poll 2's diffPatch captured
+  it, making the score appear to jump live. `_prev_play_indices` was empty on
+  startup so the deduplication check had no baseline to compare against. Fixed
+  by seeding `_prev_play_indices` with each game's current `last_play_index`
+  on the first fetch (and during the intro animation) so any play already in
+  the data before launch can never trigger an alert.
+- **AppBar nudge loop — `SystemSettings.exe` fight loop on multiple PCs**: The
+  2-second fullscreen timer called `_nudge_overlapping_windows()` on every
+  tick, repeatedly moving the Windows Settings UWP app (`SystemSettings.exe`,
+  which saves y=1 and restores it after each draw) to y=132 on multiple
+  machines. Fixed on two levels: (1) an `excluded_exes` set now skips
+  `SystemSettings.exe`, `ApplicationFrameHost.exe`, `ShellExperienceHost.exe`,
+  `SearchHost.exe`, and `Explorer.exe` entirely during window enumeration so
+  they never reach the nudge list; (2) a 60-second per-hwnd cooldown
+  (`_nudge_cooldown` dict via `time.monotonic()`) prevents any remaining
+  window from being re-nudged more than once per minute. The nudge log now
+  includes `exe=` to identify the owning process.
+
+------------------------------------------------------------------------------
+
 Version 1.6.8 (2026-05-27)
 --------------------------
 IMPROVEMENTS:
@@ -28,15 +65,20 @@ BUG FIXES:
 - **Win probability bar not shown for live games**: Cache lookup used a
   truthiness check that skipped any falsy dict value; fixed to `is not None`.
 - **RFC 6902 patch — new plays silently dropped**: The `"-"` RFC 6901 array-
-  append token caused `int('-')` → ValueError, swallowed by `except: pass`,
+  append token caused `int('-')` → ValueErro r, swallowed by `except: pass`,
   discarding every new completed play from the cached feed. Fixed with an
   `_idx()` helper that maps `"-"` to `len(list)`.
 - **AppBar nudge loop with Windows Settings app**: The 2-second fullscreen
   timer called `_nudge_overlapping_windows()` on every tick, repeatedly moving
-  the Windows Settings app (which saves y=1 and restores it on each draw) to
-  y=132. This created a continuous fight loop visible in the log. Fixed by
-  adding a 60-second per-hwnd cooldown (`_nudge_cooldown` dict) so the same
-  window is nudged at most once per minute.
+  `SystemSettings.exe` (Windows Settings UWP app, which saves y=1 and restores
+  it on each draw) to y=132, creating a continuous fight loop in the log on
+  multiple PCs. Fixed on two levels: (1) an `excluded_exes` set now skips
+  `SystemSettings.exe`, `ApplicationFrameHost.exe`, `ShellExperienceHost.exe`,
+  `SearchHost.exe`, and `Explorer.exe` entirely in the window enumeration
+  callback so they never reach the nudge list; (2) a 60-second per-hwnd
+  cooldown (`_nudge_cooldown` dict via `time.monotonic()`) prevents any
+  remaining window from being re-nudged more than once per minute. The nudge
+  log now includes `exe=` to identify the owning process.
 
 ------------------------------------------------------------------------------
 

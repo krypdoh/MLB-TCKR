@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0528.0854
+Date: 2026.0528.1816
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.8"
+VERSION = "1.6.9"
 
 import warnings
 warnings.filterwarnings(
@@ -1371,8 +1371,8 @@ def _apply_json_patch(doc, operations):
                 else:
                     result = val
             # 'test' → ignore
-        except Exception:
-            pass  # skip malformed individual operations
+        except Exception as _op_err:
+            print(f"[MLB] JSON patch op skipped ({verb} {op.get('path','?')}): {_op_err}")
     return result
 
 
@@ -1781,15 +1781,32 @@ def fetch_todays_games(fetch_date=None, on_teams_known=None):
                         game_info['home_subtext'] = batter_subtext
                         game_info['pitcher_side'] = 'away'
                     
-                    # Get runners on base from linescore
-                    linescore_data = live_data.get('linescore', {})
-                    offense = linescore_data.get('offense', {})
-                    
-                    game_info['runners'] = {
-                        'first': offense.get('first') is not None,
-                        'second': offense.get('second') is not None,
-                        'third': offense.get('third') is not None
-                    }
+                    # Derive runner state from the last completed play's final runner
+                    # positions.  linescore.offense can lag behind in diffPatch-cached
+                    # feeds — RFC 6902 'remove' ops for runner keys sometimes fail
+                    # silently, leaving stale True values (e.g. all 3 bases lit after
+                    # a grand slam clears the bases).  allPlays is authoritative.
+                    _runners = {'first': False, 'second': False, 'third': False}
+                    _base_map = {'1B': 'first', '2B': 'second', '3B': 'third'}
+                    _all_plays_now = plays.get('allPlays', [])
+                    for _ap in reversed(_all_plays_now):
+                        if _ap.get('about', {}).get('isComplete'):
+                            for _r in _ap.get('runners', []):
+                                _end = _r.get('movement', {}).get('end')
+                                if _end in _base_map:
+                                    _runners[_base_map[_end]] = True
+                            break
+                    else:
+                        # No completed plays yet (very start of game) —
+                        # fall back to linescore.offense.
+                        linescore_data = live_data.get('linescore', {})
+                        offense = linescore_data.get('offense', {})
+                        _runners = {
+                            'first':  offense.get('first')  is not None,
+                            'second': offense.get('second') is not None,
+                            'third':  offense.get('third')  is not None,
+                        }
+                    game_info['runners'] = _runners
 
                     # Scoring play data for watched-team alert system.
                     # currentPlay is already the NEXT batter (no result yet).
@@ -3567,6 +3584,19 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if self.games and not self.intro_active:
             _old_map = {g.get('game_id'): g for g in self.games}
             self._check_scoring_alerts(_old_map, games)
+        elif not self.games or self.intro_active:
+            # First fetch on startup (games empty) or still in intro animation: seed
+            # _prev_play_indices from the current data so that plays which already
+            # happened before launch never trigger an alert.  Without this, a stale
+            # full feed on poll 1 followed by a diffPatch that captures a prior
+            # scoring play on poll 2 looks like a live score change.
+            for _g in games:
+                _gid = _g.get('game_id')
+                _idx = _g.get('last_play_index', -1)
+                if _gid is not None and _idx != -1:
+                    # Only advance — never overwrite a higher index already seeded
+                    if _idx > self._prev_play_indices.get(_gid, -1):
+                        self._prev_play_indices[_gid] = _idx
 
         # When a manual date override is active, skip yesterday-mode logic entirely
         # and just display the fetched games for that date.
@@ -6003,6 +6033,34 @@ class MLBTickerWindow(QtWidgets.QWidget):
             "tooltips_class32", "#32769",   # desktop
         }
 
+        # System process EXEs that must never be nudged.  Windows owns their
+        # positioning (UWP host, shell, etc.) and snaps them back immediately.
+        excluded_exes = {
+            "systemsettings.exe",       # Windows Settings UWP app
+            "applicationframehost.exe", # UWP window host
+            "shellexperiencehost.exe",  # Start menu / Action Center
+            "searchhost.exe",           # Windows Search
+            "searchapp.exe",
+            "explorer.exe",
+        }
+
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+        def _get_exe(hwnd_val):
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd_val, ctypes.byref(pid))
+            if not pid.value:
+                return ""
+            hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+            if not hproc:
+                return ""
+            buf  = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(1024)
+            kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size))
+            kernel32.CloseHandle(hproc)
+            return os.path.basename(buf.value).lower()
+
         GWL_EXSTYLE        = -20
         WS_EX_TOOLWINDOW   = 0x00000080   # floating tool palettes / tray pop-ups
         SWP_NOSIZE         = 0x0001
@@ -6033,6 +6091,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             cls_buf = ctypes.create_unicode_buffer(256)
             user32.GetClassNameW(hwnd, cls_buf, 256)
             if cls_buf.value in excluded_classes:
+                return True
+            # Skip system-owned processes (UWP host, Settings, Explorer, etc.)
+            if _get_exe(hwnd).lower() in excluded_exes:
                 return True
             # Check whether the window's top edge falls inside our reserved strip.
             rc = wintypes.RECT()
@@ -6066,7 +6127,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
             _nudge_times[hwnd] = now
             title_buf = ctypes.create_unicode_buffer(256)
             user32.GetWindowTextW(hwnd, title_buf, 256)
-            print(f"[AppBar] Nudged '{title_buf.value}' (hwnd={hwnd}) "
+            exe_name = _get_exe(hwnd) or "?"
+            print(f"[AppBar] Nudged '{title_buf.value}' (hwnd={hwnd}, exe={exe_name}) "
                   f"from y={old_y} → y={res_bottom}")
         self._nudge_cooldown = _nudge_times
 
