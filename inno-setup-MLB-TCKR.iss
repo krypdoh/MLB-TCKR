@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "MLB-TCKR"
-#define MyAppVersion "1.6.5"
+#define MyAppVersion "1.6.9"
 #define MyAppPublisher "Paul R. Charovkine"
 #define MyAppURL "https://krypdoh.github.io/MLB-TCKR/"
 #define MyAppExeName "MLB-TCKR.exe"
