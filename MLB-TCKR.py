@@ -6248,8 +6248,10 @@ class MLBTickerWindow(QtWidgets.QWidget):
             our_hmon = user32.MonitorFromWindow(our_hwnd, MONITOR_DEFAULTTONEAREST)
             same_monitor = (hmon == our_hmon)
 
-            # Debug output
-            if covers_monitor or is_fullscreen or (is_fullscreen != self._ticker_hidden_for_fullscreen):
+            # Debug output — only when the actionable state changes (avoids spam when a
+            # full-screen window is on a *different* monitor and nothing would change).
+            effective_fullscreen = is_fullscreen and same_monitor
+            if effective_fullscreen != self._ticker_hidden_for_fullscreen:
                 print(f"[TICKER] _check_fullscreen: '{window_title}' exe={exe_name or '?'} hwnd={fg_hwnd}")
                 print(f"         window {fw}x{fh} vs monitor {mw}x{mh}, covers={covers_monitor}, "
                       f"caption={has_caption}, clickthru={is_clickthru}, layered={is_layered}, "
