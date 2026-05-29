@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0528.1816
+Date: 2026.0529.1702
 License: GNU AGPLv3
 
 Description:
@@ -6304,6 +6304,41 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Re-read settings from disk and apply all hotswappable values immediately."""
         self.settings = get_settings()
 
+        # ── Ticker height — apply live (resize AppBar and window) ─────────────
+        new_height = int(self.settings.get('ticker_height', 60))
+        if new_height != self.ticker_height:
+            self.ticker_height = new_height
+            self.remove_appbar()
+            geo = self._target_screen.geometry() if hasattr(self, '_target_screen') and self._target_screen else self.screen().geometry()
+            self.setGeometry(geo.x(), geo.y(), geo.width(), self.ticker_height)
+            self.setup_appbar()
+            self._load_mlb_logo(int(self.ticker_height * 0.625))
+            print(f"[LIVE] Ticker height → {self.ticker_height}px")
+
+        # ── Monitor — apply live (same logic as keyboard shortcut) ────────────
+        new_mon_idx = int(self.settings.get('monitor_index', 0))
+        screens = QtWidgets.QApplication.screens()
+        new_mon_idx = min(new_mon_idx, max(0, len(screens) - 1))
+        cur_screen = getattr(self, '_target_screen', None) or self.screen()
+        new_screen = screens[new_mon_idx]
+        if new_screen is not cur_screen:
+            self.remove_appbar()
+            self._target_screen = new_screen
+            self.dpr = new_screen.devicePixelRatio()
+            self._font_style_strategy = (
+                QtGui.QFont.NoAntialias | QtGui.QFont.NoSubpixelAntialias |
+                QtGui.QFont.ForceIntegerMetrics
+                if self.dpr >= 2.0 else
+                QtGui.QFont.PreferAntialias | QtGui.QFont.ForceIntegerMetrics
+            )
+            self._text_aa_hint = self.dpr < 2.0
+            geo = new_screen.geometry()
+            self.setGeometry(geo.x(), geo.y(), geo.width(), self.ticker_height)
+            self.setup_appbar()
+            self._game_pixmap_cache.clear()
+            self._last_ticker_fp = None
+            print(f"[LIVE] Monitor → {new_mon_idx} ({new_screen.name()})")
+
         # Speed — update scroll constant directly
         raw_speed = self.settings.get('speed', 2)
         self._session_speed = raw_speed  # Sync session speed with new saved setting
@@ -11357,12 +11392,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.monitor_combo.setCurrentIndex(_saved_mon)
         form_display.addRow("Monitor:", self.monitor_combo)
 
-        restart_note = QtWidgets.QLabel("\u26a0 Ticker Height and Monitor changes require a restart.")
-        restart_note.setObjectName("restartNote")
-        restart_note.setWordWrap(True)
-        restart_note.setStyleSheet("color: #6b7090; font-size: 11px; background: transparent; border: none; padding: 0px;")
-        form_display.addRow("", restart_note)
-
         outer_layout.addWidget(grp_display)
 
         # ── 2. Performance ──────────────────────────────────────────────────
@@ -12349,84 +12378,18 @@ class SettingsDialog(QtWidgets.QDialog):
             'screen_dpr': float(_dpr),
         })
 
-    # Settings that cannot be applied live — require a full restart
-    _RESTART_KEYS = ('ticker_height', 'monitor_index')
-
-    def _needs_restart(self, old_settings):
-        """Return True if any restart-required setting changed."""
-        return any(old_settings.get(k) != self.settings.get(k)
-                   for k in self._RESTART_KEYS)
-
-    def _offer_restart(self):
-        """Ask the user whether to restart now; if yes, relaunch the process."""
-        reply = self._show_question(
-            "Restart Required",
-            "Ticker height and/or monitor changes require a restart to take effect.\n\nRestart now?",
-            QtWidgets.QMessageBox.Yes,
-        )
-        if reply == QtWidgets.QMessageBox.Yes:
-            if getattr(sys, 'frozen', False):
-                args = sys.argv          # PyInstaller .exe: argv[0] is the exe
-            else:
-                args = [sys.executable] + sys.argv
-            # Strip Qt env vars inherited from this (parent) process.
-            # The child's PyInstaller runtime hooks will re-set them to
-            # the child's own _MEI temp dir.  Inheriting the parent's
-            # _MEI paths (which are being deleted as the parent quits)
-            # causes Qt to report 'Could not find platform plugin in ""'.
-            _child_env = os.environ.copy()
-            for _qt_var in (
-                'QT_PLUGIN_PATH',
-                'QML2_IMPORT_PATH',
-                'QT_QPA_PLATFORM_PLUGIN_PATH',
-                # PyInstaller bootloader env vars — if inherited, the child's
-                # bootloader skips extraction and reuses the PARENT's _MEI temp
-                # dir.  When the parent exits and its atexit deletes that dir,
-                # the child loses python313.dll and crashes.  Clearing these
-                # forces the child to extract its own independent _MEI dir.
-                '_MEIPASS2',          # PyInstaller 4.x / 5.x
-                '_PYIBoot_MEIPASS',   # PyInstaller 6.x+
-            ):
-                _child_env.pop(_qt_var, None)
-            # Release the AppBar reservation NOW, before spawning the child.
-            # If we wait until the 3-s quit timer fires the child will call
-            # setup_appbar() while our strip is still registered and Windows
-            # will push it below us — the "new ticker appears below the old one"
-            # symptom.  Releasing first gives the shell time to free the work
-            # area before the child process initialises Qt (which takes ~1-2 s).
-            _ticker = self.parent()
-            if _ticker and hasattr(_ticker, 'remove_appbar'):
-                _ticker.remove_appbar()
-                QtWidgets.QApplication.processEvents()  # let shell digest ABM_REMOVE
-
-            subprocess.Popen(args, env=_child_env)
-            # Delay 3 s before quitting so the child process has time to
-            # bootstrap Python and lock its Qt DLLs before our atexit
-            # handler sweeps the shared _MEI temp folder.  Without this
-            # delay, qwindows.dll (locked lazily at QApplication creation)
-            # can be deleted by the parent before the child ever uses it.
-            _app = QtWidgets.QApplication.instance()
-            QtCore.QTimer.singleShot(3000, _app.quit)
-
     def apply_settings(self):
-        """Save settings and apply hotswappable values to the live ticker."""
-        old = {k: self.settings.get(k) for k in self._RESTART_KEYS}
+        """Save settings and apply all values to the live ticker."""
         self._collect_settings()
         if self.parent() and hasattr(self.parent(), 'apply_live_settings'):
             self.parent().apply_live_settings()
-        if self._needs_restart(old):
-            self._offer_restart()
 
     def save_and_close(self):
         """Save settings, apply live, and close dialog."""
-        old = {k: self.settings.get(k) for k in self._RESTART_KEYS}
         self._collect_settings()
         if self.parent() and hasattr(self.parent(), 'apply_live_settings'):
             self.parent().apply_live_settings()
-        needs_restart = self._needs_restart(old)
         self.accept()
-        if needs_restart:
-            self._offer_restart()
 
 
 def main():

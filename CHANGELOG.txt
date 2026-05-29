@@ -1,5 +1,14 @@
-Version 1.6.9 (2026-05-28)
+Version 1.6.9 (2026-05-29)
 --------------------------
+IMPROVEMENTS:
+- **Monitor and ticker height changes are now live — no restart required**:
+  Changing the target display or ticker height in Settings now takes effect
+  immediately. The AppBar reservation is released, the window is repositioned
+  and resized on the new screen, and the AppBar is re-registered — the same
+  path used by the keyboard monitor shortcuts (1–4). The "⚠ Ticker Height and
+  Monitor changes require a restart" warning has been removed from the
+  Settings dialog.
+
 BUG FIXES:
 - **Runners on base not clearing after grand slam (diamond stuck lit)**: Runner
   state was read from `linescore.offense` in the diffPatch-cached feed. After
@@ -32,6 +41,13 @@ BUG FIXES:
   (`_nudge_cooldown` dict via `time.monotonic()`) prevents any remaining
   window from being re-nudged more than once per minute. The nudge log now
   includes `exe=` to identify the owning process.
+- **Full-screen detection log spam when game is on a different monitor**: The
+  `_check_fullscreen` debug print fired every 2 seconds whenever a full-screen
+  game was running on a non-ticker monitor because `covers=True` was
+  unconditionally included in the print condition. The log now only prints when
+  the ticker's actual hide/show state would change (i.e. `is_fullscreen and
+  same_monitor` differs from `_ticker_hidden_for_fullscreen`), so a game on
+  another display produces no log noise.
 
 ------------------------------------------------------------------------------
 
