@@ -1,3 +1,18 @@
+Version 1.6.10 (2026-06-24)
+---------------------------
+BUG FIXES:
+- **Eliminated scroll judder caused by DELAYED game flashing**: The 2-second
+  timer that alternates between the start time and "DELAYED" text was evicting
+  the pixmap cache and triggering a full build_ticker_pixmap() rebuild every
+  cycle — blocking the main thread with QPainter rendering and causing visible
+  scroll stutter, especially on slower PCs. Fixed by pre-rendering both states
+  (time string and "DELAYED") when the ticker is first assembled, then swapping
+  pre-built pixmap pointers in _ticker_tiles on each toggle. The toggle callback
+  now performs zero QPainter work — only pointer swaps and a
+  self.update() — completely eliminating the judder while preserving the
+  alternating visual effect.
+
+
 Version 1.6.9 (2026-05-29)
 --------------------------
 IMPROVEMENTS:

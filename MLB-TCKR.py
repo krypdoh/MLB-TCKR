@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0529.1702
+Date: 2026.0624.1435
 License: GNU AGPLv3
 
 Description:
@@ -10,7 +10,7 @@ Shows team logos, scores, runners on base, outs, innings, and game times just li
 traditional LED sports ticker. Integrates with Windows AppBar for persistent display.
 """
 
-VERSION = "1.6.9"
+VERSION = "1.6.10"
 
 import warnings
 warnings.filterwarnings(
@@ -2690,6 +2690,11 @@ class MLBTickerWindow(QtWidgets.QWidget):
         self._last_ticker_fp = None   # overall fingerprint; None forces first build
         self._ticker_rebuild_queue = []         # [(game, game_id, game_fp)] pending incremental rebuild
         self._ticker_rebuild_in_progress = False  # True while incremental rebuild is running
+
+        # Delayed-game dual-pixmap swap (eliminates rebuild judder on toggle)
+        self._delayed_alt_pixmaps = {}   # game_id → alternate-state QPixmap
+        self._delayed_tile_map = {}      # game_id → index into _ticker_tiles
+        self._delayed_show_time = True   # current toggle state: True=time, False=DELAYED
         
         # Score change tracking for glow effect
         self._score_change_times = {}  # game_id → {'away': ms_timestamp, 'home': ms_timestamp}
@@ -3785,19 +3790,25 @@ class MLBTickerWindow(QtWidgets.QWidget):
     # ------------------------------------------------------------------
 
     def _rebuild_for_delayed_toggle(self):
-        """Rebuild ticker every 2 s while any game has Delayed Start/Delayed status
-        so the start-time / DELAYED label alternates visually."""
-        _delayed_statuses = {'Delayed Start', 'Delayed'}
-        delayed_games = [g for g in self.games if g.get('status') in _delayed_statuses]
-        if delayed_games:
-            # Evict the per-game pixmap cache for each delayed game so that
-            # build_ticker_pixmap calls build_game_pixmap again (the toggle
-            # label is computed inside build_game_pixmap at draw time).
-            for g in delayed_games:
-                self._game_pixmap_cache.pop(g.get('game_id'), None)
-            self._last_ticker_fp = None
-            self.build_ticker_pixmap()
-            self.update()
+        """Swap pre-rendered delayed-game pixmaps every 2 s for zero-cost flashing.
+
+        Instead of evicting the cache and calling build_ticker_pixmap() (which causes
+        judder from QPainter work on the main thread), this simply swaps pointers to
+        already-rendered alternate-state pixmaps in _ticker_tiles.  O(n_delayed_games)
+        with no rendering work — typically O(0-2).
+        """
+        if not self._delayed_alt_pixmaps or not self._ticker_tiles:
+            return
+        for game_id, alt_pixmap in list(self._delayed_alt_pixmaps.items()):
+            idx = self._delayed_tile_map.get(game_id)
+            if idx is None or idx >= len(self._ticker_tiles):
+                continue
+            x, y, current_pixmap = self._ticker_tiles[idx]
+            # Swap: current becomes the alt, alt becomes the displayed one.
+            self._ticker_tiles[idx] = (x, y, alt_pixmap)
+            self._delayed_alt_pixmaps[game_id] = current_pixmap
+        self._delayed_show_time = not self._delayed_show_time
+        self.update()
 
     def _invalidate_glow_cache(self):
         """Invalidate ticker cache to update score glow colors as they expire."""
@@ -4902,6 +4913,27 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # paintEvent uses _ticker_tiles for actual drawing.
         self.ticker_pixmap = True
 
+        # Pre-render alternate-state pixmaps for delayed games so the 2-second
+        # toggle can swap pixmap pointers without any QPainter work (zero judder).
+        self._delayed_alt_pixmaps = {}
+        self._delayed_tile_map = {}
+        _delayed_statuses = {'Delayed Start', 'Delayed'}
+        _logo_tile_offset = 1 if mlb_pm else 0
+        for i, game in enumerate(self.games):
+            if game.get('status') in _delayed_statuses:
+                game_id = game.get('game_id')
+                tile_idx = _logo_tile_offset + i
+                # Determine which state was rendered as the primary and build the opposite.
+                if int(time.time()) // 2 % 2 == 0:
+                    alt_override = 'delayed'
+                else:
+                    alt_override = 'time'
+                alt_pixmap = self.build_game_pixmap(game, _delayed_override=alt_override)
+                self._delayed_alt_pixmaps[game_id] = alt_pixmap
+                self._delayed_tile_map[game_id] = tile_idx
+        # Sync the toggle state to what was just rendered as primary.
+        self._delayed_show_time = (int(time.time()) // 2 % 2 == 0)
+
         # Check if any scores are currently glowing - if so, schedule a rebuild
         # in ~100ms to update the colors as the glow expires
         current_time_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
@@ -4986,7 +5018,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         MLB_LOGO_CACHE[cache_key] = None  # cache the miss so we don't re-scan
         return None
     
-    def build_game_pixmap(self, game, force_show_player_info=False):
+    def build_game_pixmap(self, game, force_show_player_info=False, _delayed_override=None):
         """Build pixmap for a single game.
         
         Args:
@@ -5587,8 +5619,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 status_text = 'PPD'
             elif status in ('Delayed Start', 'Delayed'):
                 _game_time_str = format_game_time_local(game.get('game_datetime'))
-                # Toggle: even 2-s epoch → show original start time; odd → show DELAYED
-                if int(time.time()) // 2 % 2 == 0:
+                # Determine which text to show: override (for pre-rendering alt state)
+                # or live toggle based on current epoch.
+                if _delayed_override == 'time':
+                    status_text = _game_time_str
+                elif _delayed_override == 'delayed':
+                    status_text = 'DELAYED'
+                    _status_color = '#FF8C00'  # amber for DELAYED
+                elif int(time.time()) // 2 % 2 == 0:
                     status_text = _game_time_str
                 else:
                     status_text = 'DELAYED'
