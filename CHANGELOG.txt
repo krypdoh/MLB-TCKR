@@ -11,6 +11,51 @@ BUG FIXES:
   now performs zero QPainter work — only pointer swaps and a
   self.update() — completely eliminating the judder while preserving the
   alternating visual effect.
+- **Fixed DELAYED flash getting stuck on one state**: The alt-pixmap override
+  was computed from time.time() at rebuild time, but the primary pixmap in
+  cache was frozen from the original build. When the two epochs matched, both
+  primary and alt showed the same text — swapping produced no visible change.
+  Fixed by always rendering both states explicitly and placing them based on
+  the current toggle state, decoupled from the cache.
+- **Player info now shows on ticker at smaller heights**: The hard
+  compact-mode override (ticker_height <= 64 with WP bar visible) was forcing
+  show_records = False regardless of available space. Removed the override and
+  let the existing row-fit logic decide naturally — if there is physical room
+  (>= 1 px gap between rows), player info renders.
+- **Uniform card heights via 50/50 WP placeholder bar**: Scheduled, Pre-Game,
+  Warmup, Delayed, and Postponed games now display a neutral 50/50 win
+  probability bar (team colors split evenly with center divider) so all cards
+  share the same vertical layout offset as live/final games.
+- **MLB logo cache miss causing repeated disk scans**: _load_mlb_logo() cached
+  a miss as None but checked `if cached is not None:` — the sentinel collided
+  with dict.get()'s default, causing a full filesystem re-scan on every call.
+  Changed to `if cache_key in MLB_LOGO_CACHE:` so the miss is honoured.
+
+IMPROVEMENTS:
+- **WARMUP status now flashes with game time**: Games in "Warmup" status
+  alternate between the start time and "WARMUP" text every 2 seconds (same
+  mechanism as DELAYED), using the default cyan color for both states.
+- **Score glow duration increased to 30 seconds**: The gold highlight glow
+  that appears when a run scores now persists for 30 seconds (up from the
+  previous shorter duration) so it is more noticeable during scrolling.
+- **Win Probability Bar per-status controls**: The WP bar can now be toggled
+  independently for Scheduled games (50/50 placeholder) and Finished games
+  (solid winner bar). New settings: "Enable on Scheduled" and "Enable on
+  Finished" appear as sub-options under the master "Show Bar" toggle.
+- **Settings dialog column alignment**: The Show / Games / Win Prob Bar
+  checkbox rows now use minimum-width columns so items are vertically aligned
+  across all three rows.
+- **Settings dialog resize polish**: The Team Name Display combo box uses an
+  expanding size policy so it no longer gets clipped when the dialog is
+  narrowed. Opacity percentage labels use a slightly smaller font and wider
+  fixed width so "100%" is never cut off.
+
+BUG FIXES (additional):
+- **SiriusXM data missing for Athletics games**: The SXM scraper matched games
+  by exact team name, but SiriusXM returns "Athletics  " (with trailing
+  whitespace). Added .strip() to awayTeamCity/homeTeamCity so the lookup key
+  matches the MLB Stats API name ("Athletics") and channel data merges
+  correctly.
 
 
 Version 1.6.9 (2026-05-29)

@@ -230,6 +230,7 @@ def get_settings():
         "player_font_scale_percent": 75,  # Scale for player info fonts (W-L, names, pitch counts)
         "show_team_records": True,
         "show_team_cities": False,
+        "show_city_only": False,
         "include_final_games": True,
         "include_scheduled_games": True,
         "live_games_only": False,
@@ -255,6 +256,8 @@ def get_settings():
         "docked": True,  # When True, ticker is docked (not moveable) and registered as AppBar
         "yesterday_cutoff_minutes": 30,  # Show yesterday's finals until N min before first pitch
         "show_win_probability": True,  # Show win probability bar on live game cards
+        "wp_bar_scheduled": True,         # Show 50/50 placeholder bar on scheduled games
+        "wp_bar_finished": True,           # Show winner bar on finished games
         "debug_wp_symmetry": False,    # Debug print: WP bar left/right overlap values
         "show_moneyline": False,   # Show H2H moneyline odds
         "odds_api_provider": "action-network",  # "action-network", "the-odds-api", or "odds-api-io"
@@ -781,6 +784,19 @@ def get_team_nickname(team_name):
     
     # Otherwise use last word as team nickname
     return team_name.split()[-1]
+
+
+def get_team_city(team_name):
+    """Extract city/location from full team name (e.g. 'New York Yankees' -> 'New York')."""
+    multi_word_nicknames = ('Red Sox', 'White Sox', 'Blue Jays')
+    for nickname in multi_word_nicknames:
+        if team_name.endswith(nickname):
+            city = team_name[:-len(nickname)].strip()
+            return city if city else team_name
+    parts = team_name.split()
+    if len(parts) > 1:
+        return ' '.join(parts[:-1])
+    return team_name
 
 
 def get_team_color(team_name):
@@ -3814,7 +3830,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         """Invalidate ticker cache to update score glow colors as they expire."""
         # Check if we still have active glows
         current_time_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-        glow_duration_ms = 2500
+        glow_duration_ms = 30000  # 30 seconds
         has_active_glow = False
         
         for game_id, change_times in self._score_change_times.items():
@@ -4696,9 +4712,12 @@ class MLBTickerWindow(QtWidgets.QWidget):
         settings_key = (
             s.get('show_team_records', True),
             s.get('show_team_cities', False),
+            s.get('show_city_only', False),
             s.get('show_team_wl', True),
             s.get('show_moneyline', False),
             s.get('show_win_probability', True),
+            s.get('wp_bar_scheduled', True),
+            s.get('wp_bar_finished', True),
         )
         parts = []
         for g in self.games:
@@ -4790,6 +4809,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         _settings_key = (
             self.settings.get('show_team_records', True),
             self.settings.get('show_team_cities', False),
+            self.settings.get('show_city_only', False),
             self.settings.get('show_team_wl', True),
             self.settings.get('show_moneyline', False),
             self.settings.get('show_win_probability', True),
@@ -4917,27 +4937,32 @@ class MLBTickerWindow(QtWidgets.QWidget):
         # toggle can swap pixmap pointers without any QPainter work (zero judder).
         self._delayed_alt_pixmaps = {}
         self._delayed_tile_map = {}
-        _delayed_statuses = {'Delayed Start', 'Delayed'}
+        _delayed_statuses = {'Delayed Start', 'Delayed', 'Warmup'}
         _logo_tile_offset = 1 if mlb_pm else 0
         for i, game in enumerate(self.games):
             if game.get('status') in _delayed_statuses:
                 game_id = game.get('game_id')
                 tile_idx = _logo_tile_offset + i
-                # Determine which state was rendered as the primary and build the opposite.
-                if int(time.time()) // 2 % 2 == 0:
-                    alt_override = 'delayed'
+                # Render both states explicitly so the swap is always correct
+                # regardless of what time.time() said when the cache was populated.
+                time_pixmap = self.build_game_pixmap(game, _delayed_override='time')
+                delayed_pixmap = self.build_game_pixmap(game, _delayed_override='delayed')
+                # Place whichever matches current toggle state in the tile,
+                # and the other in _delayed_alt_pixmaps for the timer to swap.
+                if self._delayed_show_time:
+                    x, y, _ = self._ticker_tiles[tile_idx]
+                    self._ticker_tiles[tile_idx] = (x, y, time_pixmap)
+                    self._delayed_alt_pixmaps[game_id] = delayed_pixmap
                 else:
-                    alt_override = 'time'
-                alt_pixmap = self.build_game_pixmap(game, _delayed_override=alt_override)
-                self._delayed_alt_pixmaps[game_id] = alt_pixmap
+                    x, y, _ = self._ticker_tiles[tile_idx]
+                    self._ticker_tiles[tile_idx] = (x, y, delayed_pixmap)
+                    self._delayed_alt_pixmaps[game_id] = time_pixmap
                 self._delayed_tile_map[game_id] = tile_idx
-        # Sync the toggle state to what was just rendered as primary.
-        self._delayed_show_time = (int(time.time()) // 2 % 2 == 0)
 
         # Check if any scores are currently glowing - if so, schedule a rebuild
-        # in ~100ms to update the colors as the glow expires
+        # after a short delay to update the colors as the glow expires
         current_time_ms = self._elapsed_timer.nsecsElapsed() / 1_000_000.0
-        glow_duration_ms = 2500
+        glow_duration_ms = 30000  # 30 seconds
         has_active_glow = False
         for game_id, change_times in self._score_change_times.items():
             if change_times['away'] is not None:
@@ -4949,9 +4974,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     has_active_glow = True
                     break
         
-        # If glowing, invalidate fingerprint after a short delay to force color update
+        # If glowing, schedule a rebuild after 1 s to update once glow expires
         if has_active_glow:
-            QtCore.QTimer.singleShot(100, self._invalidate_glow_cache)
+            QtCore.QTimer.singleShot(1000, self._invalidate_glow_cache)
 
     def _process_next_ticker_rebuild(self):
         """Process one queued game-card rebuild per event-loop tick.
@@ -4992,9 +5017,8 @@ class MLBTickerWindow(QtWidgets.QWidget):
     def _load_mlb_logo(self, logo_size):
         """Load mlb.png scaled to logo_size logical pixels tall, DPR-aware (cached)."""
         cache_key = (int(logo_size), self.dpr)
-        cached = MLB_LOGO_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+        if cache_key in MLB_LOGO_CACHE:
+            return MLB_LOGO_CACHE[cache_key]
 
         images_dirs = [
             os.path.join(APPDATA_DIR, "MLB-TCKR.images"),
@@ -5031,10 +5055,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         away_team_full = game['away_name']
         home_team_full = game['home_name']
         
-        # Use nickname, abbreviation, or full city+name based on settings
+        # Use nickname, abbreviation, city-only, or full city+name based on settings
         if self.settings.get('use_city_abbreviations', False):
             away_team = MLB_CITY_ABBR.get(get_team_nickname(away_team_full), get_team_nickname(away_team_full))
             home_team = MLB_CITY_ABBR.get(get_team_nickname(home_team_full), get_team_nickname(home_team_full))
+        elif self.settings.get('show_city_only', False):
+            away_team = get_team_city(away_team_full)
+            home_team = get_team_city(home_team_full)
         elif self.settings.get('show_team_cities', False):
             away_team = away_team_full
             home_team = home_team_full
@@ -5079,7 +5106,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
         home_score_color = '#FFFFFF'
         if game_id and game_id in self._score_change_times:
             change_times = self._score_change_times[game_id]
-            glow_duration_ms = 2500  # 2.5 seconds
+            glow_duration_ms = 30000  # 30 seconds
             
             # Away score glow
             if change_times['away'] is not None:
@@ -5100,22 +5127,28 @@ class MLBTickerWindow(QtWidgets.QWidget):
         show_records = force_show_player_info or self.settings.get('show_team_records', True)
         show_wl = self.settings.get('show_team_wl', True)
         _show_wp_setting = self.settings.get('show_win_probability', True)
+        _wp_bar_scheduled = self.settings.get('wp_bar_scheduled', True)
+        _wp_bar_finished = self.settings.get('wp_bar_finished', True)
         _wp_home = game.get('win_probability_home')
         _game_is_final = status in ['Final', 'Completed', 'Game Over']
         # For final games, override WP to 100% for the winning team so the bar
         # renders as a solid winner-color strip, keeping all cards visually consistent.
-        if _show_wp_setting and _game_is_final:
+        if _show_wp_setting and _wp_bar_finished and _game_is_final:
             _final_away = game.get('away_score', 0)
             _final_home = game.get('home_score', 0)
             _wp_home = 1.0 if _final_home > _final_away else 0.0
+        # For scheduled/pre-game games, show a neutral 50/50 bar so all cards share
+        # the same vertical layout (WP bar reserves space uniformly).
+        _wp_is_placeholder = False
+        if _show_wp_setting and _wp_bar_scheduled and _wp_home is None and status in (
+            'Scheduled', 'Preview', 'Pre-Game', 'Warmup', 'Delayed Start', 'Delayed', 'Postponed'
+        ):
+            _wp_home = 0.5
+            _wp_is_placeholder = True
         _wp_visible = _show_wp_setting and (_wp_home is not None)
-        # Compact mode for short bars: keep only core rows above the WP strip.
-        _compact_wp_layout = _wp_visible and self.ticker_height <= 64
-        if _compact_wp_layout:
-            # In compact mode on ticker, hide records/WL — but still show in box score
-            if not force_show_player_info:
-                show_records = False
-                show_wl = False
+        # Row-fit logic (below) naturally drops rows that overflow _content_h,
+        # so no hard compact-mode override is needed — player info renders
+        # whenever there is physically enough room (>= 1 px gap between rows).
         _pre_statuses_render = {'Scheduled', 'Preview', 'Pre-Game', 'Warmup',
                                   'Delayed Start', 'Delayed', 'Postponed'}
         _final_statuses_render = {'Final', 'Completed', 'Game Over'}
@@ -5307,11 +5340,14 @@ class MLBTickerWindow(QtWidgets.QWidget):
             # centre element is time/vs instead of score+diamond+score.
             status_text = format_game_time_local(game.get('game_datetime'))
 
-            # Reserve space for the wider of the time string or "DELAYED" so the
+            # Reserve space for the wider of the time string or status label so the
             # column width stays fixed during the 2-second toggle.
             if status in ('Delayed Start', 'Delayed'):
                 _delayed_label_w = time_metrics.horizontalAdvance('DELAYED') + 10
                 status_width = max(time_metrics.horizontalAdvance(status_text) + 10, _delayed_label_w)
+            elif status == 'Warmup':
+                _warmup_label_w = time_metrics.horizontalAdvance('WARMUP') + 10
+                status_width = max(time_metrics.horizontalAdvance(status_text) + 10, _warmup_label_w)
             else:
                 status_width = time_metrics.horizontalAdvance(status_text) + 10
             _vs_fm = QtGui.QFontMetrics(self.vs_font)
@@ -5599,6 +5635,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
                     painter.drawText(away_col_draw_x, _odds_draw_y, away_odds_text)
                 painter.setFont(self._qfont)
                 painter.setPen(away_color)
+            _wp_name_left = away_name_x  # capture for WP bar left edge
             painter.drawText(away_name_x, text_y, away_team)
             if record_y is not None:
                 painter.setFont(self.small_font)
@@ -5631,6 +5668,16 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 else:
                     status_text = 'DELAYED'
                     _status_color = '#FF8C00'  # amber for DELAYED
+            elif status == 'Warmup':
+                _game_time_str = format_game_time_local(game.get('game_datetime'))
+                if _delayed_override == 'time':
+                    status_text = _game_time_str
+                elif _delayed_override == 'delayed':
+                    status_text = 'WARMUP'
+                elif int(time.time()) // 2 % 2 == 0:
+                    status_text = _game_time_str
+                else:
+                    status_text = 'WARMUP'
             elif 'game_datetime' in game:
                 status_text = format_game_time_local(game.get('game_datetime'))
             else:
@@ -5665,6 +5712,7 @@ class MLBTickerWindow(QtWidgets.QWidget):
             painter.setFont(self._qfont)
             painter.setPen(home_color)
             home_name_x = x  # flush left — name immediately follows the logo gap
+            _wp_name_right = home_name_x + home_name_width  # capture for WP bar right edge
             if home_col_w > 0:
                 home_col_draw_x = x + home_name_width + odds_gap
             else:
@@ -5718,12 +5766,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
                 painter.fillRect(_bar_x, _bar_y, _away_w, _bar_h, _away_bar)
             if _home_w > 0:
                 painter.fillRect(_bar_x + _away_w, _bar_y, _home_w, _bar_h, _home_bar)
-            # Separator and % labels only for live games (not final — bar is solid)
-            if not is_final:
+            # Separator (black divider) for live and placeholder bars (not final — solid winner color)
+            if not _game_is_final:
                 if 0 < _away_w < _bar_w:
                     painter.fillRect(_bar_x + _away_w - _sep_w // 2, _bar_y, _sep_w, _bar_h,
                                       QtGui.QColor(0, 0, 0, 220))
-
+            # % labels only for live games (not final or placeholder)
+            if not _game_is_final and not _wp_is_placeholder:
                 # Labels drawn ON the bar only when the bar is tall enough to fit them.
                 # Skip entirely if the text height exceeds the bar height — bar takes priority.
                 _tbr = tiny_metrics.tightBoundingRect(_away_pct_str)
@@ -7668,8 +7717,8 @@ def fetch_sxm_channels():
 
     result = {}
     for sg in sxm_games:
-        away_name = sg.get('awayTeamCity', '')
-        home_name = sg.get('homeTeamCity', '')
+        away_name = sg.get('awayTeamCity', '').strip()
+        home_name = sg.get('homeTeamCity', '').strip()
         if not away_name or not home_name:
             continue
         sat_home = sg.get('homeStream') or None
@@ -10736,8 +10785,7 @@ QComboBox {
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 0px;
     padding: 3px 7px;
-    min-height: 0px;
-    max-height: 28px;
+    min-height: 22px;
     selection-background-color: #8B95FF;
     selection-color: #0B0C14;
 }
@@ -11395,6 +11443,8 @@ class SettingsDialog(QtWidgets.QDialog):
             form.setVerticalSpacing(4)
             form.setHorizontalSpacing(12)
             form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            form.setRowWrapPolicy(QtWidgets.QFormLayout.DontWrapRows)
+            form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
             return group, form
 
         # ── 1. Display ──────────────────────────────────────────────────────
@@ -11491,9 +11541,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.opacity_slider.setToolTip("0% = Fully Transparent  ·  100% = Fully Opaque")
         self.opacity_slider.setMinimumWidth(160)
         self._opacity_label = QtWidgets.QLabel(f"{self.opacity_slider.value()}%")
-        self._opacity_label.setFixedWidth(36)
+        self._opacity_label.setFixedWidth(44)
         self._opacity_label.setProperty("role", "statValue")
-        self._opacity_label.setFont(QtGui.QFont("JetBrains Mono", 11, QtGui.QFont.DemiBold))
+        self._opacity_label.setFont(QtGui.QFont("JetBrains Mono", 9, QtGui.QFont.DemiBold))
         self._sync_widget_style(self._opacity_label)
         self.opacity_slider.valueChanged.connect(
             lambda v: self._opacity_label.setText(f"{v}%")
@@ -11510,9 +11560,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.content_opacity_slider.setToolTip("0% = Fully Transparent  ·  100% = Fully Opaque")
         self.content_opacity_slider.setMinimumWidth(160)
         self._content_opacity_label = QtWidgets.QLabel(f"{self.content_opacity_slider.value()}%")
-        self._content_opacity_label.setFixedWidth(36)
+        self._content_opacity_label.setFixedWidth(44)
         self._content_opacity_label.setProperty("role", "statValue")
-        self._content_opacity_label.setFont(QtGui.QFont("JetBrains Mono", 11, QtGui.QFont.DemiBold))
+        self._content_opacity_label.setFont(QtGui.QFont("JetBrains Mono", 9, QtGui.QFont.DemiBold))
         self._sync_widget_style(self._content_opacity_label)
         self.content_opacity_slider.valueChanged.connect(
             lambda v: self._content_opacity_label.setText(f"{v}%")
@@ -11581,10 +11631,16 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # Team name display — dropdown
         self.name_display_combo = QtWidgets.QComboBox()
+        self.name_display_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.name_display_combo.setMinimumWidth(220)
         self.name_display_combo.addItem("Team Name  (e.g. Yankees)",    "nickname")
         self.name_display_combo.addItem("City + Team  (e.g. New York Yankees)", "city")
+        self.name_display_combo.addItem("City  (e.g. New York)",         "city_only")
         self.name_display_combo.addItem("Abbreviation  (e.g. NYY)",     "abbrev")
         if self.settings.get('use_city_abbreviations', False):
+            self.name_display_combo.setCurrentIndex(3)
+        elif self.settings.get('show_city_only', False):
             self.name_display_combo.setCurrentIndex(2)
         elif self.settings.get('show_team_cities', False):
             self.name_display_combo.setCurrentIndex(1)
@@ -11592,27 +11648,13 @@ class SettingsDialog(QtWidgets.QDialog):
             self.name_display_combo.setCurrentIndex(0)
         form_content.addRow("Team Name Display:", self.name_display_combo)
 
+        # --- Aligned checkbox grid (Show / Games / Win Prob Bar) ---
         self.records_check = _SettingsCheck("Player Names & Stats")
         self.records_check.setChecked(self.settings.get('show_team_records', True))
         self.records_check.setToolTip("Show pitcher/batter names and pitch counts on each game card.")
 
         self.wl_check = _SettingsCheck("Team W-L Record")
         self.wl_check.setChecked(self.settings.get('show_team_wl', True))
-
-        self.win_prob_check = _SettingsCheck("Win Probability Bar")
-        self.win_prob_check.setChecked(self.settings.get('show_win_probability', True))
-        self.win_prob_check.setToolTip(
-            "Show a thin win probability bar at the top of each live game card.\n"
-            "The bar is split by team color: away on the left, home on the right."
-        )
-
-        _show_row = QtWidgets.QHBoxLayout()
-        _show_row.setSpacing(16)
-        _show_row.addWidget(self.records_check)
-        _show_row.addWidget(self.wl_check)
-        _show_row.addWidget(self.win_prob_check)
-        _show_row.addStretch()
-        form_content.addRow("Show:", _show_row)
 
         self.live_only_check = _SettingsCheck("Live Only")
         self.live_only_check.setChecked(self.settings.get('live_games_only', False))
@@ -11627,6 +11669,49 @@ class SettingsDialog(QtWidgets.QDialog):
         self.scheduled_check = _SettingsCheck("Include Scheduled")
         self.scheduled_check.setChecked(self.settings.get('include_scheduled_games', True))
 
+        self.win_prob_check = _SettingsCheck("Show Bar")
+        self.win_prob_check.setChecked(self.settings.get('show_win_probability', True))
+        self.win_prob_check.setToolTip(
+            "Show a thin win probability bar at the top of each game card.\n"
+            "The bar is split by team color: away on the left, home on the right."
+        )
+
+        self.wp_scheduled_check = _SettingsCheck("Enable on Scheduled")
+        self.wp_scheduled_check.setChecked(self.settings.get('wp_bar_scheduled', True))
+        self.wp_scheduled_check.setToolTip(
+            "Show a neutral 50/50 bar on scheduled/pre-game cards\n"
+            "so all cards share the same vertical height."
+        )
+
+        self.wp_finished_check = _SettingsCheck("Enable on Finished")
+        self.wp_finished_check.setChecked(self.settings.get('wp_bar_finished', True))
+        self.wp_finished_check.setToolTip(
+            "Show a solid winner-color bar on final/completed game cards."
+        )
+
+        # Disable sub-options when master toggle is off
+        self.win_prob_check.toggled.connect(self.wp_scheduled_check.setEnabled)
+        self.win_prob_check.toggled.connect(self.wp_finished_check.setEnabled)
+        self.wp_scheduled_check.setEnabled(self.win_prob_check.isChecked())
+        self.wp_finished_check.setEnabled(self.win_prob_check.isChecked())
+
+        # Set fixed widths so columns align across the three rows
+        _col1_w = 195
+        _col2_w = 175
+        self.records_check.setFixedWidth(_col1_w)
+        self.live_only_check.setFixedWidth(_col1_w)
+        self.win_prob_check.setFixedWidth(_col1_w)
+        self.wl_check.setFixedWidth(_col2_w)
+        self.final_check.setFixedWidth(_col2_w)
+        self.wp_scheduled_check.setFixedWidth(_col2_w)
+
+        _show_row = QtWidgets.QHBoxLayout()
+        _show_row.setSpacing(16)
+        _show_row.addWidget(self.records_check)
+        _show_row.addWidget(self.wl_check)
+        _show_row.addStretch()
+        form_content.addRow("Show:", _show_row)
+
         _games_row = QtWidgets.QHBoxLayout()
         _games_row.setSpacing(16)
         _games_row.addWidget(self.live_only_check)
@@ -11634,6 +11719,14 @@ class SettingsDialog(QtWidgets.QDialog):
         _games_row.addWidget(self.scheduled_check)
         _games_row.addStretch()
         form_content.addRow("Games:", _games_row)
+
+        _wp_row = QtWidgets.QHBoxLayout()
+        _wp_row.setSpacing(16)
+        _wp_row.addWidget(self.win_prob_check)
+        _wp_row.addWidget(self.wp_scheduled_check)
+        _wp_row.addWidget(self.wp_finished_check)
+        _wp_row.addStretch()
+        form_content.addRow("Win Prob Bar:", _wp_row)
 
         # Show Game Moneyline — provider dropdown + per-provider API keys
         ml_row = QtWidgets.QHBoxLayout()
@@ -11699,7 +11792,6 @@ class SettingsDialog(QtWidgets.QDialog):
 
         outer_layout.addWidget(grp_startup)
 
-        outer_layout.addStretch()
         scroll.setWidget(container)
         self._general_container = container  # measured in __init__ for auto-sizing
         return scroll
@@ -12320,6 +12412,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['include_final_games'] = self.final_check.isChecked()
         self.settings['include_scheduled_games'] = self.scheduled_check.isChecked()
         self.settings['show_win_probability'] = self.win_prob_check.isChecked()
+        self.settings['wp_bar_scheduled'] = self.wp_scheduled_check.isChecked()
+        self.settings['wp_bar_finished'] = self.wp_finished_check.isChecked()
         self.settings['show_moneyline'] = self.moneyline_check.isChecked()
         self.settings['odds_api_provider'] = self.odds_provider_combo.currentData()
         self.settings['odds_api_key'] = self.odds_api_key_edit.text().strip()
@@ -12328,6 +12422,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings['yesterday_cutoff_minutes'] = self.yesterday_cutoff_spin.value()
         _name_mode = self.name_display_combo.currentData()
         self.settings['show_team_cities']        = (_name_mode == 'city')
+        self.settings['show_city_only']          = (_name_mode == 'city_only')
         self.settings['use_city_abbreviations']  = (_name_mode == 'abbrev')
         self.settings['led_background'] = self.led_bg_check.isChecked()
         self.settings['glass_overlay'] = self.glass_check.isChecked()

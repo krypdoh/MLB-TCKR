@@ -1,6 +1,6 @@
 # MLB-TCKR
 
-**Professional MLB Live Game Ticker for Windows**
+## Professional MLB Live Game Ticker for Windows
 
 A sleek, performant scrolling ticker that displays live Major League Baseball game data at the top of your screen — just like the tickers you see on sports networks and in sports bars.
 
@@ -100,7 +100,7 @@ A sleek, performant scrolling ticker that displays live Major League Baseball ga
 > Click the ticker bar to give it focus first.
 
 | Key | Action | Persists? |
-|-----|--------|-----------|
+| ----- | -------- | ----------- |
 | `Q` | Quit application | — |
 | `S` | Open Scoreboard (Scorecard) window | — |
 | `L` | Open Standings window | — |
@@ -297,7 +297,7 @@ See the full hotkeys table in the [Keyboard Shortcuts](#-keyboard-shortcuts) fea
 
 ## Project Structure
 
-```
+```text
 MLB-TCKR/
 │
 ├── MLB-TCKR.py                    # Main application
@@ -431,7 +431,7 @@ Odds are fetched from [The Odds API](https://the-odds-api.com) on a configurable
 ### Key Settings Reference
 
 | Key | Type | Description |
-|-----|------|-------------|
+| ----- | ------ | ------------- |
 | `speed` | int (1–30) | Scroll speed |
 | `update_interval` | int (5–300) | Game data refresh in seconds |
 | `ticker_height` | int (40–200) | Ticker bar height in pixels |
@@ -501,7 +501,7 @@ Case-insensitive lookup is used. If a logo is missing, the ticker falls back to 
 ### Main Classes
 
 | Class | Description |
-|-------|-------------|
+| ------- | ------------- |
 | `MLBTickerWindow` | Main application window with DPI-aware AppBar integration |
 | `GameDataWorker` | Background thread for MLB API calls |
 | `StandingsWindow` | AL/NL standings popup with LED-style background |
@@ -514,7 +514,7 @@ Case-insensitive lookup is used. If a logo is missing, the ticker falls back to 
 ### Key Methods
 
 | Method | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `fetch_todays_games()` | MLB API integration |
 | `build_ticker_pixmap()` | Render complete ticker to pixmap |
 | `build_game_pixmap()` | Render a single game segment with score glow |
