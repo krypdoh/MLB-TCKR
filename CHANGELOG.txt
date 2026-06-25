@@ -56,6 +56,14 @@ BUG FIXES (additional):
   whitespace). Added .strip() to awayTeamCity/homeTeamCity so the lookup key
   matches the MLB Stats API name ("Athletics") and channel data merges
   correctly.
+- **Images/logos not found when running .py directly**: All image-loading
+  functions only searched `MLB-TCKR.images` subfolders (AppData and _MEIPASS),
+  which don't exist in the source tree. Added `espnlogos/png` and
+  `newlogos/png` (and `newlogos/` root for SVG league logos) as fallback
+  search paths in get_team_logo(), _preload_logos_background(), the intro logo
+  loader, the MLB ticker logo loader, and _league_logo_lbl(). Also added the
+  `fonts/` subfolder to register_all_font_files() so bundled TTF/OTF files are
+  discovered when running from source.
 
 
 Version 1.6.9 (2026-05-29)

@@ -1,7 +1,7 @@
 """
 Author: Paul R. Charovkine
 Program: MLB-TCKR.py
-Date: 2026.0624.1435
+Date: 2026.0625.0922
 License: GNU AGPLv3
 
 Description:
@@ -575,9 +575,12 @@ def register_all_font_files():
     """Scan app directories for ALL .ttf/.otf files and register them with Qt.
     This must be called after QApplication is created so fonts are available
     both for rendering and for the Settings font combo."""
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
     search_dirs = [
         APPDATA_DIR,
-        os.path.dirname(os.path.abspath(__file__)),
+        _script_dir,
+        # Fallback: local project fonts subfolder
+        os.path.join(_script_dir, "fonts"),
     ]
     registered = {}
     for d in search_dirs:
@@ -949,7 +952,11 @@ def get_team_logo(team_name, size=40):
     runtime_base = getattr(sys, '_MEIPASS', None)
     if runtime_base:
         images_dirs.append(os.path.join(runtime_base, "MLB-TCKR.images"))
-    images_dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "MLB-TCKR.images"))
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    images_dirs.append(os.path.join(_script_dir, "MLB-TCKR.images"))
+    # Fallback: local project asset folders (espnlogos/png, newlogos/png)
+    images_dirs.append(os.path.join(_script_dir, "espnlogos", "png"))
+    images_dirs.append(os.path.join(_script_dir, "newlogos", "png"))
 
     # Ensure AppData image folder exists for user overrides.
     os.makedirs(images_dirs[0], exist_ok=True)
@@ -1100,7 +1107,11 @@ def _preload_logos_background(team_names, logo_size):
     runtime_base = getattr(sys, '_MEIPASS', None)
     if runtime_base:
         images_dirs.append(os.path.join(runtime_base, "MLB-TCKR.images"))
-    images_dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "MLB-TCKR.images"))
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    images_dirs.append(os.path.join(_script_dir, "MLB-TCKR.images"))
+    # Fallback: local project asset folders (espnlogos/png, newlogos/png)
+    images_dirs.append(os.path.join(_script_dir, "espnlogos", "png"))
+    images_dirs.append(os.path.join(_script_dir, "newlogos", "png"))
 
     seen = set()
     for team_name in team_names:
@@ -4570,6 +4581,9 @@ class MLBTickerWindow(QtWidgets.QWidget):
             APPDATA_DIR,
             os.path.join(_script_dir, "MLB-TCKR.images"),
             _script_dir,
+            # Fallback: local project asset folders
+            os.path.join(_script_dir, "espnlogos", "png"),
+            os.path.join(_script_dir, "newlogos", "png"),
         ]
         runtime_base = getattr(sys, '_MEIPASS', None)
         if runtime_base:
@@ -5020,9 +5034,13 @@ class MLBTickerWindow(QtWidgets.QWidget):
         if cache_key in MLB_LOGO_CACHE:
             return MLB_LOGO_CACHE[cache_key]
 
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
         images_dirs = [
             os.path.join(APPDATA_DIR, "MLB-TCKR.images"),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "MLB-TCKR.images"),
+            os.path.join(_script_dir, "MLB-TCKR.images"),
+            # Fallback: local project asset folders
+            os.path.join(_script_dir, "espnlogos", "png"),
+            os.path.join(_script_dir, "newlogos", "png"),
         ]
         runtime_base = getattr(sys, '_MEIPASS', None)
         if runtime_base:
@@ -7187,6 +7205,10 @@ class StandingsWindow(QtWidgets.QWidget):
             search_dirs.append(sys._MEIPASS)
         search_dirs.append(os.path.join(script_dir, _images_subdir))
         search_dirs.append(script_dir)
+        # Fallback: local project asset folders
+        search_dirs.append(os.path.join(script_dir, "newlogos"))
+        search_dirs.append(os.path.join(script_dir, "newlogos", "png"))
+        search_dirs.append(os.path.join(script_dir, "espnlogos", "png"))
         path = None
         for d in search_dirs:
             candidate = os.path.join(d, filename)
